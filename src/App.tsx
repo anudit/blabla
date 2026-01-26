@@ -191,8 +191,8 @@ const styles = {
     transition: 'background-color 0.3s ease, box-shadow 0.3s ease',
   },
   lineActive: {
-    backgroundColor: 'rgba(255, 230, 0, 0.5)',
-    boxShadow: '0 0 0 2px rgba(220, 200, 0, 0.6)',
+    backgroundColor: 'rgb(0 183 255 / 50%)',
+    boxShadow: '0 0 0 2px rgba(0, 183, 255, 0.6)',
     mixBlendMode: 'multiply' as const,
     zIndex: 20,
   },

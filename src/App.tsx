@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity } from 'lucide-react';
+import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu } from 'lucide-react';
+import logo from './logo.png';
+
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.mjs`;
 const styles = {
   container: {
@@ -8,7 +10,7 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    backgroundColor: '#f3f4f6',
+    backgroundColor: 'white', // Beige background for retro aesthetic
     fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
     color: '#333',
   },
@@ -32,8 +34,9 @@ const styles = {
   title: {
     fontSize: '1.25rem',
     fontWeight: 'bold' as const,
-    color: '#1f2937',
+    color: 'blue', // Red for "bla bla" aesthetic
     margin: 0,
+    fontFamily: 'Arial', // Retro font feel
   },
   statusGroup: {
     display: 'flex',
@@ -191,10 +194,36 @@ const styles = {
     transition: 'background-color 0.3s ease, box-shadow 0.3s ease',
   },
   lineActive: {
-    backgroundColor: 'rgb(0 183 255 / 50%)',
-    boxShadow: '0 0 0 2px rgba(0, 183, 255, 0.6)',
+    backgroundColor: 'rgb(70 181 220 / 50%)',
+    boxShadow: '0 0 0 2px rgb(70 181 220 / 60%)',
     mixBlendMode: 'multiply' as const,
     zIndex: 20,
+  },
+  bottomBar: {
+    position: 'fixed' as const,
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: '#fff',
+    padding: '0.5rem',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: '1rem',
+    boxShadow: '0 -1px 3px rgba(0,0,0,0.1)',
+    zIndex: 50,
+    flexWrap: 'wrap' as const,
+  },
+  menuPopover: {
+    position: 'absolute' as const,
+    bottom: '100%',
+    backgroundColor: '#fff',
+    padding: '1rem',
+    borderRadius: '0.375rem',
+    boxShadow: '0 2px 10px rgba(0,0,0,0.2)',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: '0.5rem',
   },
 };
 export default function App() {
@@ -222,6 +251,8 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+
   useEffect(() => {
     console.log("[App] Mounting...");
     const ctx = getAudioContext();
@@ -417,6 +448,11 @@ export default function App() {
       return;
     }
     getAudioContext();
+    if (currentSource.current) {
+      try { currentSource.current.stop(); } catch(e){}
+      currentSource.current.disconnect();
+      currentSource.current = null;
+    }
     for (let i = 1; i <= 3; i++) {
       if (currentSentenceIndex + i < sentences.length && !audioCache.current.has(currentSentenceIndex + i)) {
         console.log(`[Lookahead] Prefetching sentence ${currentSentenceIndex + i}`);
@@ -445,6 +481,7 @@ export default function App() {
       source.buffer = buffer;
       source.connect(audioContext.current!.destination);
       source.onended = () => {
+        currentSource.current = null;
         console.log(`[Play] Audio ended for sentence ${currentSentenceIndex}`);
         if (isPlaying && currentSession === playbackSessionId.current) {
           advanceSentence();
@@ -477,6 +514,8 @@ export default function App() {
     console.log(`[Click] Line ${lineId} clicked`);
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
+      currentSource.current.disconnect();
+      currentSource.current = null;
     }
     window.speechSynthesis.cancel();
     playbackSessionId.current += 1;
@@ -716,57 +755,11 @@ export default function App() {
     <div style={styles.container}>
       <div style={styles.header}>
         <div style={styles.logoGroup}>
-          <FileText size={24} color="#2563eb" />
-          <h1 style={styles.title}>PDF Reader</h1>
-          <div style={styles.statusGroup}>
-            <div style={getStatusBadgeStyle()}>
-              {ttsStatus === "Loading..." && <Loader2 size={12} />}
-              {ttsStatus === "AI Ready" && <Activity size={12} />}
-              {ttsStatus === "System Voice" && <AlertCircle size={12} />}
-              {ttsStatus}
-            </div>
-            <div style={styles.statItem}>
-              <span style={styles.statLabel}>Status</span>
-              <span style={styles.statValue}>{playbackState}</span>
-            </div>
-            <div style={styles.statItem}>
-              <span style={styles.statLabel}>Cached</span>
-              <span style={styles.statValue}>{cachedCount}</span>
-            </div>
-            <div style={styles.statItem}>
-              <span style={styles.statLabel}>Queue</span>
-              <span style={styles.statValue}>{pendingCount}</span>
-            </div>
-            <div style={styles.statItem}>
-              <span style={styles.statLabel}>Sentence</span>
-              <span style={styles.statValue}>{currentSentenceIndex >= 0 ? `${currentSentenceIndex + 1}/${sentences.length}` : '-'}</span>
-            </div>
-          </div>
+          <img src={logo} style={{width: "36px", height: "36px"}} />
+          <h1 style={styles.title}>bla bla</h1>
         </div>
         <div style={styles.controls}>
-          <button
-            onClick={handleTestAudio}
-            style={{
-              ...styles.testButton,
-              ...((!isModelReady) ? styles.buttonDisabled : {})
-            }}
-            disabled={!isModelReady}
-          >
-            <Beaker size={16} /> Test Voice
-          </button>
-          <div style={styles.playerGroup}>
-            <button
-              onClick={togglePlay}
-              disabled={sentences.length === 0 || !isModelReady}
-              style={{
-                ...styles.iconButton,
-                ...(sentences.length === 0 || !isModelReady ? styles.buttonDisabled : {})
-              }}
-            >
-              {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-            </button>
-          </div>
-          <button onClick={resetReader} style={styles.resetButton}>Reset</button>
+
         </div>
       </div>
       {allLines.length === 0 ? (
@@ -787,6 +780,60 @@ export default function App() {
           ))}
         </div>
       )}
+      <div style={styles.bottomBar}>
+        <div style={getStatusBadgeStyle()}>
+          {ttsStatus === "Loading..." && <Loader2 size={12} />}
+          {ttsStatus === "Ready" && <Activity size={12} />}
+          {ttsStatus === "System Voice" && <AlertCircle size={12} />}
+          {ttsStatus}
+        </div>
+        <div style={styles.playerGroup}>
+          <button
+            onClick={togglePlay}
+            disabled={sentences.length === 0 || !isModelReady}
+            style={{
+              ...styles.iconButton,
+              ...(sentences.length === 0 || !isModelReady ? styles.buttonDisabled : {})
+            }}
+          >
+            {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+          </button>
+        </div>
+        <button onClick={() => setIsMenuOpen(!isMenuOpen)} style={styles.iconButton}>
+          <Menu size={20} />
+        </button>
+        {isMenuOpen && (
+          <div style={styles.menuPopover}>
+            <button onClick={resetReader} style={styles.resetButton}>Reset</button>
+            <button
+              onClick={handleTestAudio}
+              style={{
+                ...styles.testButton,
+                ...((!isModelReady) ? styles.buttonDisabled : {})
+              }}
+              disabled={!isModelReady}
+            >
+              <Beaker size={16} /> Test Voice
+            </button>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Status</span>
+              <span style={styles.statValue}>{playbackState}</span>
+            </div>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Cached</span>
+              <span style={styles.statValue}>{cachedCount}</span>
+            </div>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Queue</span>
+              <span style={styles.statValue}>{pendingCount}</span>
+            </div>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Sentence</span>
+              <span style={styles.statValue}>{currentSentenceIndex >= 0 ? `${currentSentenceIndex + 1}/${sentences.length}` : '-'}</span>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

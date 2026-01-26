@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu } from 'lucide-react';
 import logo from './logo.png';
-
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.mjs`;
 const styles = {
   container: {
@@ -240,6 +239,8 @@ export default function App() {
   const [cachedCount, setCachedCount] = useState(0);
   const [pendingCount, setPendingCount] = useState(0);
   const [playbackState, setPlaybackState] = useState("Idle");
+  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+  const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -252,7 +253,6 @@ export default function App() {
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-
   useEffect(() => {
     console.log("[App] Mounting...");
     const ctx = getAudioContext();
@@ -340,6 +340,7 @@ export default function App() {
     const ctx = getAudioContext();
     const source = ctx.createBufferSource();
     source.buffer = buffer;
+    source.playbackRate.value = playbackSpeed;
     source.connect(ctx.destination);
     source.start(0);
     setPlaybackState("Playing");
@@ -435,7 +436,7 @@ export default function App() {
       if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
       nativeTimeout.current = setTimeout(() => {
         const u = new SpeechSynthesisUtterance(text);
-        u.rate = 1.1;
+        u.rate = playbackSpeed;
         u.onend = () => {
           if (isPlaying && currentSession === playbackSessionId.current) {
             advanceSentence();
@@ -479,6 +480,7 @@ export default function App() {
       console.log(`[Play] Playing buffer for sentence ${currentSentenceIndex}`);
       const source = audioContext.current!.createBufferSource();
       source.buffer = buffer;
+      source.playbackRate.value = playbackSpeed;
       source.connect(audioContext.current!.destination);
       source.onended = () => {
         currentSource.current = null;
@@ -559,6 +561,7 @@ export default function App() {
     const text = "Hello! I am Kokoro.";
     if (usingFallback.current) {
       const u = new SpeechSynthesisUtterance(text);
+      u.rate = playbackSpeed;
       window.speechSynthesis.speak(u);
       setPlaybackState("Testing");
     } else {
@@ -759,7 +762,6 @@ export default function App() {
           <h1 style={styles.title}>bla bla</h1>
         </div>
         <div style={styles.controls}>
-
         </div>
       </div>
       {allLines.length === 0 ? (
@@ -799,6 +801,36 @@ export default function App() {
             {isPlaying ? <Pause size={20} /> : <Play size={20} />}
           </button>
         </div>
+        <button
+          onClick={() => setIsSpeedMenuOpen(!isSpeedMenuOpen)}
+          style={{
+            ...styles.iconButton,
+            fontSize: '0.875rem',
+            fontWeight: '600',
+          }}
+        >
+          {playbackSpeed}x
+        </button>
+        {isSpeedMenuOpen && (
+          <div style={styles.menuPopover}>
+            {[1.0, 1.2, 1.3, 1.5, 1.7, 2.0].map(speed => (
+              <button
+                key={speed}
+                onClick={() => {
+                  setPlaybackSpeed(speed);
+                  setIsSpeedMenuOpen(false);
+                }}
+                style={{
+                  ...styles.resetButton,
+                  backgroundColor: playbackSpeed === speed ? '#dbeafe' : '#e5e7eb',
+                  color: playbackSpeed === speed ? '#1e40af' : '#374151',
+                }}
+              >
+                {speed}x
+              </button>
+            ))}
+          </div>
+        )}
         <button onClick={() => setIsMenuOpen(!isMenuOpen)} style={styles.iconButton}>
           <Menu size={20} />
         </button>

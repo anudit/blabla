@@ -1,9 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity } from 'lucide-react';
-
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.mjs`;
-
 const styles = {
   container: {
     minHeight: '100vh',
@@ -199,7 +197,6 @@ const styles = {
     zIndex: 20,
   },
 };
-
 export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
@@ -212,7 +209,6 @@ export default function App() {
   const [cachedCount, setCachedCount] = useState(0);
   const [pendingCount, setPendingCount] = useState(0);
   const [playbackState, setPlaybackState] = useState("Idle");
-
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -224,18 +220,13 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
-
   useEffect(() => {
     console.log("[App] Mounting...");
-
     const ctx = getAudioContext();
       ctx.resume().catch(console.warn);
-
     workerRef.current = new Worker("/tts.worker.js", { type: 'module' });
-
     workerRef.current.onmessage = (e) => {
       const { status, audio, error, text, lineIndex } = e.data;
-
       if (status === 'ready') {
         setTtsStatus("AI Ready");
         setIsModelReady(true);
@@ -243,13 +234,11 @@ export default function App() {
       }
       else if (status === 'complete') {
         console.log(`[Worker] Audio generated. Size: ${audio.length} for line: ${lineIndex}`);
-
         try {
           const ctx = getAudioContext();
           const buffer = ctx.createBuffer(1, audio.length, 24000);
           buffer.getChannelData(0).set(audio);
           console.log(`Created buffer — sampleRate: ${buffer.sampleRate}, duration: ${(audio.length / buffer.sampleRate).toFixed(2)}s`);
-
           if (text.startsWith("Hello")) {
             playBufferDirectly(buffer);
           } else if (lineIndex !== undefined) {
@@ -271,10 +260,8 @@ export default function App() {
         }
       }
     };
-
     setTtsStatus("Loading...");
     workerRef.current.postMessage({ type: 'init' });
-
     return () => {
       console.log("[App] Unmounting...");
       stopAllAudio();
@@ -282,13 +269,11 @@ export default function App() {
       if (audioContext.current) audioContext.current.close();
     };
   }, []);
-
   useEffect(() => {
     if (isPlaying && currentLineIndex >= 0 && !isWaitingForAudio.current) {
       playCurrentLine();
     }
   }, [isPlaying, currentLineIndex]);
-
   const triggerFallback = () => {
     if (usingFallback.current) return;
     console.warn("[TTS] Switching to System Voice Fallback");
@@ -296,7 +281,6 @@ export default function App() {
     setTtsStatus("System Voice");
     setIsModelReady(true);
   };
-
   const getAudioContext = () => {
     if (!audioContext.current || audioContext.current.state === 'closed') {
       console.log('[AudioCtx] Recreating closed context');
@@ -319,7 +303,6 @@ export default function App() {
     }
     return audioContext.current;
   };
-
   const playBufferDirectly = (buffer: AudioBuffer) => {
     const ctx = getAudioContext();
     const source = ctx.createBufferSource();
@@ -329,19 +312,15 @@ export default function App() {
     setPlaybackState("Playing");
     source.onended = () => setPlaybackState("Ready");
   };
-
   const generateAudioInWorker = (text: string, lineIndex: number): Promise<AudioBuffer | null> => {
     return new Promise((resolve) => {
       if (usingFallback.current || !workerRef.current) {
         resolve(null);
         return;
       }
-
       console.log(`[Generate] Requesting audio for line ${lineIndex}: "${text.substring(0, 30)}..."`);
-
       audioResolvers.current.set(lineIndex, resolve);
       workerRef.current.postMessage({ type: 'generate', text, lineIndex });
-
       setTimeout(() => {
         if (audioResolvers.current.has(lineIndex)) {
           console.log(`[Generate] Timeout for line ${lineIndex}`);
@@ -351,7 +330,6 @@ export default function App() {
       }, 30000);
     });
   };
-
   const stopAllAudio = () => {
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
@@ -363,41 +341,32 @@ export default function App() {
     setPlaybackState("Stopped");
     isWaitingForAudio.current = false;
   };
-
   const updateBufferUI = () => {
     setCachedCount(audioCache.current.size);
     setPendingCount(pendingFetches.current.size);
   };
-
   const processLineAudio = async (index: number, sessionId: number): Promise<AudioBuffer | null> => {
     if (usingFallback.current) return null;
     if (index >= allLines.length) return null;
-
     if (audioCache.current.has(index)) {
       console.log(`[Buffer] Cache hit for line ${index}`);
       return audioCache.current.get(index);
     }
-
     if (pendingFetches.current.has(index)) {
       console.log(`[Buffer] Already fetching line ${index}`);
       return null;
     }
-
     const text = allLines[index].text;
     if (!text.trim()) return null;
-
     console.log(`[Buffer] Starting fetch for line ${index}`);
     pendingFetches.current.add(index);
     updateBufferUI();
-
     try {
       const buffer = await generateAudioInWorker(text, index);
-
       if (!buffer) {
         console.log(`[Buffer] No buffer returned for line ${index}`);
         return null;
       }
-
       if (sessionId === playbackSessionId.current) {
         console.log(`[Buffer] Caching buffer for line ${index}`);
         audioCache.current.set(index, buffer);
@@ -412,7 +381,6 @@ export default function App() {
       updateBufferUI();
     }
   };
-
   const playCurrentLine = async () => {
     if (!isPlaying || currentLineIndex === -1) return;
     if (currentLineIndex >= allLines.length) {
@@ -420,16 +388,12 @@ export default function App() {
       setPlaybackState("Completed");
       return;
     }
-
     const currentSession = playbackSessionId.current;
     const text = allLines[currentLineIndex].text;
-
     console.log(`[Play] Playing line ${currentLineIndex}: "${text.substring(0, 30)}..."`);
-
     if (usingFallback.current) {
       window.speechSynthesis.cancel();
       if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
-
       nativeTimeout.current = setTimeout(() => {
         const u = new SpeechSynthesisUtterance(text);
         u.rate = 1.1;
@@ -444,37 +408,29 @@ export default function App() {
       }, 50);
       return;
     }
-
     getAudioContext();
-
     for (let i = 1; i <= 3; i++) {
       if (currentLineIndex + i < allLines.length && !audioCache.current.has(currentLineIndex + i)) {
         console.log(`[Lookahead] Prefetching line ${currentLineIndex + i}`);
         processLineAudio(currentLineIndex + i, currentSession);
       }
     }
-
     let buffer = audioCache.current.get(currentLineIndex);
     if (!buffer) {
       console.log(`[Play] Buffer not cached, fetching line ${currentLineIndex}`);
       setPlaybackState("Buffering");
       isWaitingForAudio.current = true;
-
       buffer = await processLineAudio(currentLineIndex, currentSession);
-
       isWaitingForAudio.current = false;
     }
-
     if (usingFallback.current) {
       playCurrentLine();
       return;
     }
-
     if (currentSession !== playbackSessionId.current || !isPlaying) {
       console.log(`[Play] Session mismatch or stopped playing`);
       return;
     }
-
     if (buffer) {
       console.log(`[Play] Playing buffer for line ${currentLineIndex}`);
       const source = audioContext.current!.createBufferSource();
@@ -495,7 +451,6 @@ export default function App() {
       playCurrentLine();
     }
   };
-
   const advanceLine = () => {
     console.log(`[Advance] Moving from line ${currentLineIndex} to ${currentLineIndex + 1}`);
     setCurrentLineIndex(prev => {
@@ -507,37 +462,29 @@ export default function App() {
       return nextIndex;
     });
   };
-
   const handleLineClick = (index: number) => {
     console.log(`[Click] Line ${index} clicked`);
-
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
     }
     window.speechSynthesis.cancel();
-
     playbackSessionId.current += 1;
     audioCache.current.clear();
     pendingFetches.current.clear();
     audioResolvers.current.clear();
     updateBufferUI();
     isWaitingForAudio.current = false;
-
     setCurrentLineIndex(index);
     setIsPlaying(true);
-
     const el = document.getElementById(`line-${index}`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
-
   const togglePlay = () => {
     if (!isModelReady) return;
-
     if (currentLineIndex === -1 && allLines.length > 0) {
       handleLineClick(0);
       return;
     }
-
     if (isPlaying) {
       setIsPlaying(false);
       stopAllAudio();
@@ -546,10 +493,8 @@ export default function App() {
       setPlaybackState("Starting");
     }
   };
-
   const handleTestAudio = () => {
     if (!isModelReady) return;
-
     stopAllAudio();
     const text = "Hello! I am Kokoro.";
     if (usingFallback.current) {
@@ -561,7 +506,6 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'generate', text });
     }
   };
-
   const resetReader = () => {
     setIsPlaying(false);
     stopAllAudio();
@@ -576,18 +520,15 @@ export default function App() {
     setPlaybackState("Idle");
     isWaitingForAudio.current = false;
   };
-
   const handleFileDrop = async (e: React.DragEvent | React.ChangeEvent) => {
     e.preventDefault();
     setIsDragOver(false);
-
     let file: File | undefined;
     if ('dataTransfer' in e) {
       file = e.dataTransfer.files[0];
     } else if ('target' in e) {
       file = (e.target as HTMLInputElement).files?.[0];
     }
-
     if (file && file.type === 'application/pdf') {
       const reader = new FileReader();
       reader.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer);
@@ -596,21 +537,18 @@ export default function App() {
       alert("Please drop a valid PDF");
     }
   };
-
   const loadPDF = async (data: ArrayBuffer) => {
     try {
       const doc = await pdfjsLib.getDocument(data).promise;
       setPdfDoc(doc);
       const newPages = [];
       let globalLineList: any[] = [];
-
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
         const scale = 1.5;
         const viewport = page.getViewport({ scale });
         const textContent = await page.getTextContent();
         const lines = processTextContent(textContent, viewport, scale, globalLineList.length);
-
         globalLineList = [...globalLineList, ...lines];
         newPages.push({ page, viewport, lines, pageNumber: i });
       }
@@ -620,7 +558,6 @@ export default function App() {
       console.error(e);
     }
   };
-
   const processTextContent = (textContent: any, viewport: any, scale: number, startIndex: number) => {
     const items = textContent.items.map((item: any) => {
       const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
@@ -633,7 +570,7 @@ export default function App() {
         height: item.height > 0 ? item.height * scale : fontHeight,
       };
     });
-    items.sort((a: any, b: any) => Math.abs(a.y - b.y) > a.height * 0.2 ? b.y - a.y : a.x - b.x);
+    items.sort((a: any, b: any) => Math.abs(a.y - b.y) > a.height * 0.2 ? a.y - b.y : a.x - b.x);
     const lines: any[] = [];
     let currentLine: any = null;
     items.forEach((item: any) => {
@@ -642,7 +579,6 @@ export default function App() {
       else { lines.push(currentLine); currentLine = { items: [item], y: item.y, height: item.height }; }
     });
     if (currentLine) lines.push(currentLine);
-
     return lines.map((line: any, idx: number) => {
       const minX = Math.min(...line.items.map((i: any) => i.x));
       const last = line.items[line.items.length - 1];
@@ -657,11 +593,9 @@ export default function App() {
       };
     });
   };
-
   const PDFPage = ({ data, currentLineIndex, onLineClick }: any) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const renderTaskRef = useRef<any>(null);
-
     useEffect(() => {
       if (canvasRef.current && data) {
         if (renderTaskRef.current) { try { renderTaskRef.current.cancel(); } catch (e) { } }
@@ -671,7 +605,6 @@ export default function App() {
         renderTask.promise.catch((e: any) => { if (e.name !== 'RenderingCancelledException') console.error(e) });
       }
     }, [data]);
-
     return (
       <div style={{ ...styles.pageContainer, width: data.viewport.width, height: data.viewport.height }}>
         <canvas ref={canvasRef} width={data.viewport.width} height={data.viewport.height} style={styles.canvas} />
@@ -695,14 +628,12 @@ export default function App() {
       </div>
     );
   };
-
   const getStatusBadgeStyle = () => {
     if (ttsStatus === "Loading...") return { ...styles.statusBadge, ...styles.statusLoading };
     if (ttsStatus === "AI Ready") return { ...styles.statusBadge, ...styles.statusReady };
     if (ttsStatus === "System Voice") return { ...styles.statusBadge, ...styles.statusFallback };
     return { ...styles.statusBadge, ...styles.statusLoading };
   };
-
   return (
     <div style={styles.container}>
       <div style={styles.header}>
@@ -734,7 +665,6 @@ export default function App() {
             </div>
           </div>
         </div>
-
         <div style={styles.controls}>
           <button
             onClick={handleTestAudio}
@@ -761,7 +691,6 @@ export default function App() {
           <button onClick={resetReader} style={styles.resetButton}>Reset</button>
         </div>
       </div>
-
       {allLines.length === 0 ? (
         <div style={{ ...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {}) }}
           onClick={() => fileInputRef.current?.click()}

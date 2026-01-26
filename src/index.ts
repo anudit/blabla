@@ -3,7 +3,6 @@ import index from "./index.html";
 
 const server = serve({
   routes: {
-    // Serve index.html for all unmatched routes.
     "/*": index,
     "/tts.worker.js": async () => {
       const build = await Bun.build({

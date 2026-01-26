@@ -9,7 +9,7 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
-    backgroundColor: 'white', // Beige background for retro aesthetic
+    backgroundColor: 'white',
     fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
     color: '#333',
   },
@@ -276,7 +276,7 @@ export default function App() {
     workerRef.current.onmessage = (e) => {
       const { status, audio, error, text, lineIndex } = e.data;
       if (status === 'ready') {
-        setTtsStatus("AI Ready");
+        setTtsStatus("Model Ready");
         setIsModelReady(true);
         console.log("[Worker] Model Loaded");
       }
@@ -308,7 +308,7 @@ export default function App() {
         }
       }
     };
-    setTtsStatus("Loading...");
+    setTtsStatus("Downloading Model...");
     workerRef.current.postMessage({ type: 'init' });
     return () => {
       console.log("[App] Unmounting...");
@@ -777,8 +777,8 @@ export default function App() {
     );
   };
   const getStatusBadgeStyle = () => {
-    if (ttsStatus === "Loading...") return { ...styles.statusBadge, ...styles.statusLoading };
-    if (ttsStatus === "AI Ready") return { ...styles.statusBadge, ...styles.statusReady };
+    if (ttsStatus === "Downloading...") return { ...styles.statusBadge, ...styles.statusLoading };
+    if (ttsStatus === "Model Ready") return { ...styles.statusBadge, ...styles.statusReady };
     if (ttsStatus === "System Voice") return { ...styles.statusBadge, ...styles.statusFallback };
     return { ...styles.statusBadge, ...styles.statusLoading };
   };

@@ -1,11 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle } from 'lucide-react';
+import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity } from 'lucide-react';
 
-// --- Configuration ---
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.mjs`;
 
-// --- Style Objects ---
 const styles = {
   container: {
     minHeight: '100vh',
@@ -20,7 +18,7 @@ const styles = {
     width: '100%',
     backgroundColor: '#fff',
     padding: '1rem',
-    position: 'sticky',
+    position: 'sticky' as const,
     top: 0,
     zIndex: 50,
     display: 'flex',
@@ -35,19 +33,58 @@ const styles = {
   },
   title: {
     fontSize: '1.25rem',
-    fontWeight: 'bold',
+    fontWeight: 'bold' as const,
     color: '#1f2937',
     margin: 0,
   },
-  loadingTag: {
+  statusGroup: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.5rem',
+  },
+  statusBadge: {
     display: 'flex',
     alignItems: 'center',
     gap: '0.5rem',
     fontSize: '0.75rem',
+    padding: '0.35rem 0.65rem',
+    borderRadius: '0.375rem',
+    fontWeight: '600' as const,
+  },
+  statusLoading: {
     color: '#2563eb',
     backgroundColor: '#eff6ff',
+    border: '1px solid #bfdbfe',
+  },
+  statusReady: {
+    color: '#059669',
+    backgroundColor: '#d1fae5',
+    border: '1px solid #6ee7b7',
+  },
+  statusFallback: {
+    color: '#d97706',
+    backgroundColor: '#fef3c7',
+    border: '1px solid #fde68a',
+  },
+  statItem: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    fontSize: '0.7rem',
+    color: '#6b7280',
     padding: '0.25rem 0.5rem',
-    borderRadius: '0.25rem',
+    borderLeft: '1px solid #e5e7eb',
+  },
+  statLabel: {
+    fontSize: '0.65rem',
+    color: '#9ca3af',
+    marginBottom: '0.1rem',
+  },
+  statValue: {
+    fontSize: '0.75rem',
+    fontWeight: '600' as const,
+    color: '#374151',
+    fontFamily: 'monospace',
   },
   controls: {
     display: 'flex',
@@ -80,7 +117,7 @@ const styles = {
     gap: '0.5rem',
     padding: '0.5rem 1rem',
     fontSize: '0.875rem',
-    fontWeight: '600',
+    fontWeight: '600' as const,
     backgroundColor: '#dbeafe',
     color: '#1e40af',
     border: 'none',
@@ -88,15 +125,9 @@ const styles = {
     cursor: 'pointer',
     transition: 'background-color 0.2s',
   },
-  statusText: {
-    fontSize: '0.75rem',
-    color: '#6b7280',
-    fontFamily: 'monospace',
-    width: '120px',
-    textAlign: 'center',
-    borderLeft: '1px solid #d1d5db',
-    paddingLeft: '0.5rem',
-    marginLeft: '0.25rem',
+  buttonDisabled: {
+    opacity: 0.5,
+    cursor: 'not-allowed',
   },
   resetButton: {
     padding: '0.5rem 1rem',
@@ -115,7 +146,7 @@ const styles = {
     border: '4px dashed #d1d5db',
     borderRadius: '0.75rem',
     display: 'flex',
-    flexDirection: 'column',
+    flexDirection: 'column' as const,
     alignItems: 'center',
     justifyContent: 'center',
     cursor: 'pointer',
@@ -129,7 +160,7 @@ const styles = {
   },
   viewer: {
     display: 'flex',
-    flexDirection: 'column',
+    flexDirection: 'column' as const,
     alignItems: 'center',
     width: '100%',
     maxWidth: '64rem',
@@ -137,7 +168,7 @@ const styles = {
     paddingBottom: '10rem',
   },
   pageContainer: {
-    position: 'relative',
+    position: 'relative' as const,
     marginBottom: '20px',
     boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)',
     backgroundColor: '#fff',
@@ -147,7 +178,7 @@ const styles = {
     display: 'block',
   },
   overlay: {
-    position: 'absolute',
+    position: 'absolute' as const,
     top: 0,
     left: 0,
     right: 0,
@@ -155,7 +186,7 @@ const styles = {
     zIndex: 10,
   },
   lineBase: {
-    position: 'absolute',
+    position: 'absolute' as const,
     cursor: 'pointer',
     borderRadius: '2px',
     backgroundColor: 'transparent',
@@ -164,25 +195,24 @@ const styles = {
   lineActive: {
     backgroundColor: 'rgba(255, 230, 0, 0.5)',
     boxShadow: '0 0 0 2px rgba(220, 200, 0, 0.6)',
-    mixBlendMode: 'multiply',
+    mixBlendMode: 'multiply' as const,
     zIndex: 20,
   },
 };
 
 export default function App() {
-  // --- State ---
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
   const [allLines, setAllLines] = useState<any[]>([]);
   const [currentLineIndex, setCurrentLineIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
-
-  // TTS State
   const [ttsStatus, setTtsStatus] = useState("Init");
-  const [bufferStatus, setBufferStatus] = useState("Ready");
+  const [isModelReady, setIsModelReady] = useState(false);
+  const [cachedCount, setCachedCount] = useState(0);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [playbackState, setPlaybackState] = useState("Idle");
 
-  // --- Refs ---
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -192,44 +222,43 @@ export default function App() {
   const usingFallback = useRef(false);
   const nativeTimeout = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
+  const isWaitingForAudio = useRef(false);
 
-  // --- Initialization ---
   useEffect(() => {
     console.log("[App] Mounting...");
 
-    // Initialize Worker
-    workerRef.current = new Worker("/tts.worker.js", {
-      type: 'module'
-    });
+    const ctx = getAudioContext();
+      ctx.resume().catch(console.warn);
 
-    // Worker Message Listener
+    workerRef.current = new Worker("/tts.worker.js", { type: 'module' });
+
     workerRef.current.onmessage = (e) => {
-      const { status, audio, error, text } = e.data;
+      const { status, audio, error, text, lineIndex } = e.data;
 
       if (status === 'ready') {
         setTtsStatus("AI Ready");
+        setIsModelReady(true);
         console.log("[Worker] Model Loaded");
       }
       else if (status === 'complete') {
-        // Find which line this audio belongs to (simple matching or index tracking needed in real app)
-        // For now, we process it immediately if it matches pending requests
-        console.log(`[Worker] Audio generated. Size: ${audio.length}`);
+        console.log(`[Worker] Audio generated. Size: ${audio.length} for line: ${lineIndex}`);
 
-        // Convert Float32Array to AudioBuffer
-        // We need to do this on the main thread
         try {
           const ctx = getAudioContext();
           const buffer = ctx.createBuffer(1, audio.length, 24000);
           buffer.getChannelData(0).set(audio);
+          console.log(`Created buffer — sampleRate: ${buffer.sampleRate}, duration: ${(audio.length / buffer.sampleRate).toFixed(2)}s`);
 
-          // Store in cache (simplified logic - normally we'd map this back to an index)
-          // For the "Test" button, we play immediately
           if (text.startsWith("Hello")) {
             playBufferDirectly(buffer);
-          } else {
-             // For PDF reading, we'd store in audioCache based on a request ID
-             // Since we don't have request IDs in this simple snippet, we'll implement
-             // a "callback" style in processLineAudio logic below
+          } else if (lineIndex !== undefined) {
+            const resolver = audioResolvers.current.get(lineIndex);
+            if (resolver) {
+              console.log(`[Audio] Resolving buffer for line ${lineIndex}`);
+              resolver(buffer);
+              audioResolvers.current.delete(lineIndex);
+            }
           }
         } catch (err) {
           console.error("Audio conversion failed", err);
@@ -238,12 +267,11 @@ export default function App() {
       else if (status === 'error') {
         console.error("[Worker Error]", error);
         if (error.includes("import_promises") || error.includes("tokenizer")) {
-            triggerFallback();
+          triggerFallback();
         }
       }
     };
 
-    // Start Model Load
     setTtsStatus("Loading...");
     workerRef.current.postMessage({ type: 'init' });
 
@@ -255,72 +283,75 @@ export default function App() {
     };
   }, []);
 
-  // --- Audio Loop ---
   useEffect(() => {
-    if (isPlaying && currentLineIndex >= 0) {
+    if (isPlaying && currentLineIndex >= 0 && !isWaitingForAudio.current) {
       playCurrentLine();
     }
   }, [isPlaying, currentLineIndex]);
-
 
   const triggerFallback = () => {
     if (usingFallback.current) return;
     console.warn("[TTS] Switching to System Voice Fallback");
     usingFallback.current = true;
     setTtsStatus("System Voice");
+    setIsModelReady(true);
   };
 
   const getAudioContext = () => {
-    if (!audioContext.current) {
-      audioContext.current = new (window.AudioContext || window.webkitAudioContext)();
+    if (!audioContext.current || audioContext.current.state === 'closed') {
+      console.log('[AudioCtx] Recreating closed context');
+      audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({
+        sampleRate: 24000
+      });
     }
-    if (audioContext.current.state === 'suspended') {
-      audioContext.current.resume();
+    // Aggressive resume pattern – browsers are super strict in 2024/2025
+    if (audioContext.current.state !== 'running') {
+      console.log(`[AudioCtx] Current state = ${audioContext.current.state} → forcing resume`);
+      // 1. Classic resume
+      audioContext.current.resume().catch(e => console.warn("[AudioCtx] resume() failed", e));
+      // 2. Some browsers need this dummy unlock
+      if (audioContext.current.state !== 'running') {
+        const oscillator = audioContext.current.createOscillator();
+        oscillator.connect(audioContext.current.destination);
+        oscillator.start();
+        oscillator.stop(audioContext.current.currentTime + 0.001);
+      }
     }
     return audioContext.current;
   };
 
   const playBufferDirectly = (buffer: AudioBuffer) => {
-     const ctx = getAudioContext();
-     const source = ctx.createBufferSource();
-     source.buffer = buffer;
-     source.connect(ctx.destination);
-     source.start(0);
-     setBufferStatus("Playing");
-     source.onended = () => setBufferStatus("Ready");
-  }
+    const ctx = getAudioContext();
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start(0);
+    setPlaybackState("Playing");
+    source.onended = () => setPlaybackState("Ready");
+  };
 
-  // --- Core TTS Logic (Worker Based) ---
-  const generateAudioInWorker = (text: string): Promise<AudioBuffer | null> => {
+  const generateAudioInWorker = (text: string, lineIndex: number): Promise<AudioBuffer | null> => {
     return new Promise((resolve) => {
       if (usingFallback.current || !workerRef.current) {
         resolve(null);
         return;
       }
 
-      // We need a one-time listener for this specific request
-      // This is a simple implementation. A proper one would use IDs.
-      const tempListener = (e: MessageEvent) => {
-        const { status, audio, text: returnedText } = e.data;
-        if (status === 'complete' && returnedText === text) {
-           workerRef.current?.removeEventListener('message', tempListener);
+      console.log(`[Generate] Requesting audio for line ${lineIndex}: "${text.substring(0, 30)}..."`);
 
-           const ctx = getAudioContext();
-           const buffer = ctx.createBuffer(1, audio.length, 24000);
-           buffer.getChannelData(0).set(audio);
-           resolve(buffer);
-        } else if (status === 'error') {
-            workerRef.current?.removeEventListener('message', tempListener);
-            resolve(null);
+      audioResolvers.current.set(lineIndex, resolve);
+      workerRef.current.postMessage({ type: 'generate', text, lineIndex });
+
+      setTimeout(() => {
+        if (audioResolvers.current.has(lineIndex)) {
+          console.log(`[Generate] Timeout for line ${lineIndex}`);
+          audioResolvers.current.delete(lineIndex);
+          resolve(null);
         }
-      };
-
-      workerRef.current.addEventListener('message', tempListener);
-      workerRef.current.postMessage({ type: 'generate', text });
+      }, 30000);
     });
   };
 
-  // --- Audio Processing ---
   const stopAllAudio = () => {
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
@@ -329,45 +360,48 @@ export default function App() {
     window.speechSynthesis.cancel();
     if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
     if (audioContext.current) audioContext.current.suspend();
+    setPlaybackState("Stopped");
+    isWaitingForAudio.current = false;
   };
 
   const updateBufferUI = () => {
-    if (usingFallback.current) {
-      setBufferStatus("System Voice");
-      return;
-    }
-    const cached = audioCache.current.size;
-    const pending = pendingFetches.current.size;
-    setBufferStatus(`Buf:${cached} | Fetch:${pending}`);
+    setCachedCount(audioCache.current.size);
+    setPendingCount(pendingFetches.current.size);
   };
 
-  const processLineAudio = async (index: number, sessionId: number) => {
+  const processLineAudio = async (index: number, sessionId: number): Promise<AudioBuffer | null> => {
     if (usingFallback.current) return null;
     if (index >= allLines.length) return null;
 
     if (audioCache.current.has(index)) {
+      console.log(`[Buffer] Cache hit for line ${index}`);
       return audioCache.current.get(index);
     }
 
-    if (pendingFetches.current.has(index)) return null;
+    if (pendingFetches.current.has(index)) {
+      console.log(`[Buffer] Already fetching line ${index}`);
+      return null;
+    }
 
     const text = allLines[index].text;
     if (!text.trim()) return null;
 
+    console.log(`[Buffer] Starting fetch for line ${index}`);
     pendingFetches.current.add(index);
     updateBufferUI();
 
     try {
-      // Use Worker instead of direct generation
-      const buffer = await generateAudioInWorker(text);
+      const buffer = await generateAudioInWorker(text, index);
 
       if (!buffer) {
-        // If worker failed silently or returned null, likely fallback needed
+        console.log(`[Buffer] No buffer returned for line ${index}`);
         return null;
       }
 
       if (sessionId === playbackSessionId.current) {
+        console.log(`[Buffer] Caching buffer for line ${index}`);
         audioCache.current.set(index, buffer);
+        updateBufferUI();
       }
       return buffer;
     } catch (err) {
@@ -383,13 +417,15 @@ export default function App() {
     if (!isPlaying || currentLineIndex === -1) return;
     if (currentLineIndex >= allLines.length) {
       setIsPlaying(false);
+      setPlaybackState("Completed");
       return;
     }
 
     const currentSession = playbackSessionId.current;
     const text = allLines[currentLineIndex].text;
 
-    // --- Native Fallback Path ---
+    console.log(`[Play] Playing line ${currentLineIndex}: "${text.substring(0, 30)}..."`);
+
     if (usingFallback.current) {
       window.speechSynthesis.cancel();
       if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
@@ -402,25 +438,31 @@ export default function App() {
             advanceLine();
           }
         };
-        u.onerror = (e) => { if (isPlaying) advanceLine(); };
+        u.onerror = () => { if (isPlaying) advanceLine(); };
         window.speechSynthesis.speak(u);
+        setPlaybackState("Playing");
       }, 50);
       return;
     }
 
     getAudioContext();
 
-    // Lookahead
     for (let i = 1; i <= 3; i++) {
-      if (currentLineIndex + i < allLines.length) {
+      if (currentLineIndex + i < allLines.length && !audioCache.current.has(currentLineIndex + i)) {
+        console.log(`[Lookahead] Prefetching line ${currentLineIndex + i}`);
         processLineAudio(currentLineIndex + i, currentSession);
       }
     }
 
     let buffer = audioCache.current.get(currentLineIndex);
     if (!buffer) {
-      setBufferStatus("Buffering...");
+      console.log(`[Play] Buffer not cached, fetching line ${currentLineIndex}`);
+      setPlaybackState("Buffering");
+      isWaitingForAudio.current = true;
+
       buffer = await processLineAudio(currentLineIndex, currentSession);
+
+      isWaitingForAudio.current = false;
     }
 
     if (usingFallback.current) {
@@ -428,39 +470,58 @@ export default function App() {
       return;
     }
 
-    if (currentSession !== playbackSessionId.current || !isPlaying) return;
+    if (currentSession !== playbackSessionId.current || !isPlaying) {
+      console.log(`[Play] Session mismatch or stopped playing`);
+      return;
+    }
 
     if (buffer) {
+      console.log(`[Play] Playing buffer for line ${currentLineIndex}`);
       const source = audioContext.current!.createBufferSource();
       source.buffer = buffer;
       source.connect(audioContext.current!.destination);
       source.onended = () => {
+        console.log(`[Play] Audio ended for line ${currentLineIndex}`);
         if (isPlaying && currentSession === playbackSessionId.current) {
           advanceLine();
         }
       };
       currentSource.current = source;
+      setPlaybackState("Playing");
       source.start(0);
     } else {
+      console.log(`[Play] No buffer available, triggering fallback`);
       triggerFallback();
       playCurrentLine();
     }
   };
 
   const advanceLine = () => {
-    setCurrentLineIndex(prev => prev + 1);
+    console.log(`[Advance] Moving from line ${currentLineIndex} to ${currentLineIndex + 1}`);
+    setCurrentLineIndex(prev => {
+      const nextIndex = prev + 1;
+      setTimeout(() => {
+        const el = document.getElementById(`line-${nextIndex}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 50);
+      return nextIndex;
+    });
   };
 
-  // --- Interaction ---
   const handleLineClick = (index: number) => {
+    console.log(`[Click] Line ${index} clicked`);
+
     if (currentSource.current) {
-       try { currentSource.current.stop(); } catch(e){}
+      try { currentSource.current.stop(); } catch(e){}
     }
     window.speechSynthesis.cancel();
 
     playbackSessionId.current += 1;
     audioCache.current.clear();
     pendingFetches.current.clear();
+    audioResolvers.current.clear();
+    updateBufferUI();
+    isWaitingForAudio.current = false;
 
     setCurrentLineIndex(index);
     setIsPlaying(true);
@@ -470,6 +531,8 @@ export default function App() {
   };
 
   const togglePlay = () => {
+    if (!isModelReady) return;
+
     if (currentLineIndex === -1 && allLines.length > 0) {
       handleLineClick(0);
       return;
@@ -480,17 +543,21 @@ export default function App() {
       stopAllAudio();
     } else {
       setIsPlaying(true);
+      setPlaybackState("Starting");
     }
   };
 
   const handleTestAudio = () => {
+    if (!isModelReady) return;
+
     stopAllAudio();
     const text = "Hello! I am Kokoro.";
     if (usingFallback.current) {
       const u = new SpeechSynthesisUtterance(text);
       window.speechSynthesis.speak(u);
+      setPlaybackState("Testing");
     } else {
-      setBufferStatus("Generating...");
+      setPlaybackState("Generating");
       workerRef.current?.postMessage({ type: 'generate', text });
     }
   };
@@ -503,19 +570,22 @@ export default function App() {
     setAllLines([]);
     setCurrentLineIndex(-1);
     audioCache.current.clear();
+    pendingFetches.current.clear();
+    audioResolvers.current.clear();
+    updateBufferUI();
+    setPlaybackState("Idle");
+    isWaitingForAudio.current = false;
   };
 
-  // --- PDF Processing (Same as before) ---
   const handleFileDrop = async (e: React.DragEvent | React.ChangeEvent) => {
     e.preventDefault();
     setIsDragOver(false);
 
-    // Handle both DragEvent and ChangeEvent
     let file: File | undefined;
     if ('dataTransfer' in e) {
-        file = e.dataTransfer.files[0];
+      file = e.dataTransfer.files[0];
     } else if ('target' in e) {
-        file = (e.target as HTMLInputElement).files?.[0];
+      file = (e.target as HTMLInputElement).files?.[0];
     }
 
     if (file && file.type === 'application/pdf') {
@@ -551,7 +621,6 @@ export default function App() {
     }
   };
 
-  // Helper for text processing (condensed for brevity, same logic as before)
   const processTextContent = (textContent: any, viewport: any, scale: number, startIndex: number) => {
     const items = textContent.items.map((item: any) => {
       const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
@@ -564,50 +633,47 @@ export default function App() {
         height: item.height > 0 ? item.height * scale : fontHeight,
       };
     });
-    // Sort Y then X
     items.sort((a: any, b: any) => Math.abs(a.y - b.y) > a.height * 0.2 ? b.y - a.y : a.x - b.x);
-    // Group lines
     const lines: any[] = [];
     let currentLine: any = null;
     items.forEach((item: any) => {
-        if (!currentLine) currentLine = { items: [item], y: item.y, height: item.height };
-        else if (Math.abs(item.y - currentLine.y) < currentLine.height * 0.5) currentLine.items.push(item);
-        else { lines.push(currentLine); currentLine = { items: [item], y: item.y, height: item.height }; }
+      if (!currentLine) currentLine = { items: [item], y: item.y, height: item.height };
+      else if (Math.abs(item.y - currentLine.y) < currentLine.height * 0.5) currentLine.items.push(item);
+      else { lines.push(currentLine); currentLine = { items: [item], y: item.y, height: item.height }; }
     });
     if (currentLine) lines.push(currentLine);
 
     return lines.map((line: any, idx: number) => {
-        const minX = Math.min(...line.items.map((i:any) => i.x));
-        const last = line.items[line.items.length - 1];
-        const width = (last.x + (last.width || last.str.length * 5)) - minX;
-        return {
-            id: startIndex + idx,
-            text: line.items.map((i:any) => i.str).join(' '),
-            x: minX,
-            y: line.y - line.height * 0.85,
-            width,
-            height: line.height
-        };
+      const minX = Math.min(...line.items.map((i: any) => i.x));
+      const last = line.items[line.items.length - 1];
+      const width = (last.x + (last.width || last.str.length * 5)) - minX;
+      return {
+        id: startIndex + idx,
+        text: line.items.map((i: any) => i.str).join(' '),
+        x: minX,
+        y: line.y - line.height * 0.85,
+        width,
+        height: line.height
+      };
     });
   };
 
-  // --- Sub-Component: PDF Page ---
   const PDFPage = ({ data, currentLineIndex, onLineClick }: any) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const renderTaskRef = useRef<any>(null);
 
     useEffect(() => {
       if (canvasRef.current && data) {
-        if (renderTaskRef.current) { try { renderTaskRef.current.cancel(); } catch(e){} }
+        if (renderTaskRef.current) { try { renderTaskRef.current.cancel(); } catch (e) { } }
         const ctx = canvasRef.current.getContext('2d');
         const renderTask = data.page.render({ canvasContext: ctx, viewport: data.viewport });
         renderTaskRef.current = renderTask;
-        renderTask.promise.catch((e:any) => { if(e.name !== 'RenderingCancelledException') console.error(e) });
+        renderTask.promise.catch((e: any) => { if (e.name !== 'RenderingCancelledException') console.error(e) });
       }
     }, [data]);
 
     return (
-      <div style={{...styles.pageContainer, width: data.viewport.width, height: data.viewport.height}}>
+      <div style={{ ...styles.pageContainer, width: data.viewport.width, height: data.viewport.height }}>
         <canvas ref={canvasRef} width={data.viewport.width} height={data.viewport.height} style={styles.canvas} />
         <div style={styles.overlay}>
           {data.lines.map((line: any) => (
@@ -630,42 +696,82 @@ export default function App() {
     );
   };
 
+  const getStatusBadgeStyle = () => {
+    if (ttsStatus === "Loading...") return { ...styles.statusBadge, ...styles.statusLoading };
+    if (ttsStatus === "AI Ready") return { ...styles.statusBadge, ...styles.statusReady };
+    if (ttsStatus === "System Voice") return { ...styles.statusBadge, ...styles.statusFallback };
+    return { ...styles.statusBadge, ...styles.statusLoading };
+  };
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
         <div style={styles.logoGroup}>
           <FileText size={24} color="#2563eb" />
           <h1 style={styles.title}>PDF Reader</h1>
-          <div style={styles.loadingTag}>
-            {ttsStatus === "Loading..." && <Loader2 size={12} className="animate-spin" />}
-            {ttsStatus}
+          <div style={styles.statusGroup}>
+            <div style={getStatusBadgeStyle()}>
+              {ttsStatus === "Loading..." && <Loader2 size={12} />}
+              {ttsStatus === "AI Ready" && <Activity size={12} />}
+              {ttsStatus === "System Voice" && <AlertCircle size={12} />}
+              {ttsStatus}
+            </div>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Status</span>
+              <span style={styles.statValue}>{playbackState}</span>
+            </div>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Cached</span>
+              <span style={styles.statValue}>{cachedCount}</span>
+            </div>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Queue</span>
+              <span style={styles.statValue}>{pendingCount}</span>
+            </div>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Line</span>
+              <span style={styles.statValue}>{currentLineIndex >= 0 ? `${currentLineIndex + 1}/${allLines.length}` : '-'}</span>
+            </div>
           </div>
         </div>
 
         <div style={styles.controls}>
-          <button onClick={handleTestAudio} style={styles.testButton} disabled={ttsStatus === "Loading..."}>
-             <Beaker size={16} /> Test Voice
+          <button
+            onClick={handleTestAudio}
+            style={{
+              ...styles.testButton,
+              ...((!isModelReady) ? styles.buttonDisabled : {})
+            }}
+            disabled={!isModelReady}
+          >
+            <Beaker size={16} /> Test Voice
           </button>
           <div style={styles.playerGroup}>
-            <button onClick={togglePlay} disabled={allLines.length === 0} style={{...styles.iconButton, opacity: allLines.length === 0 ? 0.5 : 1}}>
+            <button
+              onClick={togglePlay}
+              disabled={allLines.length === 0 || !isModelReady}
+              style={{
+                ...styles.iconButton,
+                ...(allLines.length === 0 || !isModelReady ? styles.buttonDisabled : {})
+              }}
+            >
               {isPlaying ? <Pause size={20} /> : <Play size={20} />}
             </button>
-            <div style={styles.statusText}>{bufferStatus}</div>
           </div>
           <button onClick={resetReader} style={styles.resetButton}>Reset</button>
         </div>
       </div>
 
       {allLines.length === 0 ? (
-        <div style={{...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {})}}
+        <div style={{ ...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {}) }}
           onClick={() => fileInputRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
           onDragLeave={() => setIsDragOver(false)}
           onDrop={handleFileDrop}
         >
-          <Upload size={48} color="#9ca3af" style={{marginBottom: '1rem'}} />
-          <p style={{fontSize: '1.25rem', fontWeight: 600, color: '#4b5563'}}>Drop PDF here</p>
-          <input type="file" ref={fileInputRef} onChange={handleFileDrop} className="hidden" accept="application/pdf" style={{display: 'none'}} />
+          <Upload size={48} color="#9ca3af" style={{ marginBottom: '1rem' }} />
+          <p style={{ fontSize: '1.25rem', fontWeight: 600, color: '#4b5563' }}>Drop PDF here</p>
+          <input type="file" ref={fileInputRef} onChange={handleFileDrop} accept="application/pdf" style={{ display: 'none' }} />
         </div>
       ) : (
         <div style={styles.viewer}>

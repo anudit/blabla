@@ -201,7 +201,9 @@ export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
   const [allLines, setAllLines] = useState<any[]>([]);
-  const [currentLineIndex, setCurrentLineIndex] = useState(-1);
+  const [sentences, setSentences] = useState<any[]>([]);
+  const [currentSentenceIndex, setCurrentSentenceIndex] = useState(-1);
+  const [highlightedLineIds, setHighlightedLineIds] = useState<number[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [ttsStatus, setTtsStatus] = useState("Init");
@@ -270,10 +272,10 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (isPlaying && currentLineIndex >= 0 && !isWaitingForAudio.current) {
-      playCurrentLine();
+    if (isPlaying && currentSentenceIndex >= 0 && !isWaitingForAudio.current) {
+      playCurrentSentence();
     }
-  }, [isPlaying, currentLineIndex]);
+  }, [isPlaying, currentSentenceIndex]);
   const triggerFallback = () => {
     if (usingFallback.current) return;
     console.warn("[TTS] Switching to System Voice Fallback");
@@ -312,19 +314,19 @@ export default function App() {
     setPlaybackState("Playing");
     source.onended = () => setPlaybackState("Ready");
   };
-  const generateAudioInWorker = (text: string, lineIndex: number): Promise<AudioBuffer | null> => {
+  const generateAudioInWorker = (text: string, sentenceIndex: number): Promise<AudioBuffer | null> => {
     return new Promise((resolve) => {
       if (usingFallback.current || !workerRef.current) {
         resolve(null);
         return;
       }
-      console.log(`[Generate] Requesting audio for line ${lineIndex}: "${text.substring(0, 30)}..."`);
-      audioResolvers.current.set(lineIndex, resolve);
-      workerRef.current.postMessage({ type: 'generate', text, lineIndex });
+      console.log(`[Generate] Requesting audio for sentence ${sentenceIndex}: "${text.substring(0, 30)}..."`);
+      audioResolvers.current.set(sentenceIndex, resolve);
+      workerRef.current.postMessage({ type: 'generate', text, lineIndex: sentenceIndex });
       setTimeout(() => {
-        if (audioResolvers.current.has(lineIndex)) {
-          console.log(`[Generate] Timeout for line ${lineIndex}`);
-          audioResolvers.current.delete(lineIndex);
+        if (audioResolvers.current.has(sentenceIndex)) {
+          console.log(`[Generate] Timeout for sentence ${sentenceIndex}`);
+          audioResolvers.current.delete(sentenceIndex);
           resolve(null);
         }
       }, 30000);
@@ -345,52 +347,54 @@ export default function App() {
     setCachedCount(audioCache.current.size);
     setPendingCount(pendingFetches.current.size);
   };
-  const processLineAudio = async (index: number, sessionId: number): Promise<AudioBuffer | null> => {
+  const processSentenceAudio = async (index: number, sessionId: number): Promise<AudioBuffer | null> => {
     if (usingFallback.current) return null;
-    if (index >= allLines.length) return null;
+    if (index >= sentences.length) return null;
     if (audioCache.current.has(index)) {
-      console.log(`[Buffer] Cache hit for line ${index}`);
+      console.log(`[Buffer] Cache hit for sentence ${index}`);
       return audioCache.current.get(index);
     }
     if (pendingFetches.current.has(index)) {
-      console.log(`[Buffer] Already fetching line ${index}`);
+      console.log(`[Buffer] Already fetching sentence ${index}`);
       return null;
     }
-    const text = allLines[index].text;
+    const text = sentences[index].text;
     if (!text.trim()) return null;
-    console.log(`[Buffer] Starting fetch for line ${index}`);
+    console.log(`[Buffer] Starting fetch for sentence ${index}`);
     pendingFetches.current.add(index);
     updateBufferUI();
     try {
       const buffer = await generateAudioInWorker(text, index);
       if (!buffer) {
-        console.log(`[Buffer] No buffer returned for line ${index}`);
+        console.log(`[Buffer] No buffer returned for sentence ${index}`);
         return null;
       }
       if (sessionId === playbackSessionId.current) {
-        console.log(`[Buffer] Caching buffer for line ${index}`);
+        console.log(`[Buffer] Caching buffer for sentence ${index}`);
         audioCache.current.set(index, buffer);
         updateBufferUI();
       }
       return buffer;
     } catch (err) {
-      console.error(`[Buffer] Failed to process line ${index}`, err);
+      console.error(`[Buffer] Failed to process sentence ${index}`, err);
       return null;
     } finally {
       pendingFetches.current.delete(index);
       updateBufferUI();
     }
   };
-  const playCurrentLine = async () => {
-    if (!isPlaying || currentLineIndex === -1) return;
-    if (currentLineIndex >= allLines.length) {
+  const playCurrentSentence = async () => {
+    if (!isPlaying || currentSentenceIndex === -1) return;
+    if (currentSentenceIndex >= sentences.length) {
       setIsPlaying(false);
       setPlaybackState("Completed");
       return;
     }
     const currentSession = playbackSessionId.current;
-    const text = allLines[currentLineIndex].text;
-    console.log(`[Play] Playing line ${currentLineIndex}: "${text.substring(0, 30)}..."`);
+    const unit = sentences[currentSentenceIndex];
+    const text = unit.text;
+    console.log(`[Play] Playing sentence ${currentSentenceIndex}: "${text.substring(0, 30)}..."`);
+    setHighlightedLineIds(unit.lines);
     if (usingFallback.current) {
       window.speechSynthesis.cancel();
       if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
@@ -399,10 +403,10 @@ export default function App() {
         u.rate = 1.1;
         u.onend = () => {
           if (isPlaying && currentSession === playbackSessionId.current) {
-            advanceLine();
+            advanceSentence();
           }
         };
-        u.onerror = () => { if (isPlaying) advanceLine(); };
+        u.onerror = () => { if (isPlaying) advanceSentence(); };
         window.speechSynthesis.speak(u);
         setPlaybackState("Playing");
       }, 50);
@@ -410,21 +414,21 @@ export default function App() {
     }
     getAudioContext();
     for (let i = 1; i <= 3; i++) {
-      if (currentLineIndex + i < allLines.length && !audioCache.current.has(currentLineIndex + i)) {
-        console.log(`[Lookahead] Prefetching line ${currentLineIndex + i}`);
-        processLineAudio(currentLineIndex + i, currentSession);
+      if (currentSentenceIndex + i < sentences.length && !audioCache.current.has(currentSentenceIndex + i)) {
+        console.log(`[Lookahead] Prefetching sentence ${currentSentenceIndex + i}`);
+        processSentenceAudio(currentSentenceIndex + i, currentSession);
       }
     }
-    let buffer = audioCache.current.get(currentLineIndex);
+    let buffer = audioCache.current.get(currentSentenceIndex);
     if (!buffer) {
-      console.log(`[Play] Buffer not cached, fetching line ${currentLineIndex}`);
+      console.log(`[Play] Buffer not cached, fetching sentence ${currentSentenceIndex}`);
       setPlaybackState("Buffering");
       isWaitingForAudio.current = true;
-      buffer = await processLineAudio(currentLineIndex, currentSession);
+      buffer = await processSentenceAudio(currentSentenceIndex, currentSession);
       isWaitingForAudio.current = false;
     }
     if (usingFallback.current) {
-      playCurrentLine();
+      playCurrentSentence();
       return;
     }
     if (currentSession !== playbackSessionId.current || !isPlaying) {
@@ -432,14 +436,14 @@ export default function App() {
       return;
     }
     if (buffer) {
-      console.log(`[Play] Playing buffer for line ${currentLineIndex}`);
+      console.log(`[Play] Playing buffer for sentence ${currentSentenceIndex}`);
       const source = audioContext.current!.createBufferSource();
       source.buffer = buffer;
       source.connect(audioContext.current!.destination);
       source.onended = () => {
-        console.log(`[Play] Audio ended for line ${currentLineIndex}`);
+        console.log(`[Play] Audio ended for sentence ${currentSentenceIndex}`);
         if (isPlaying && currentSession === playbackSessionId.current) {
-          advanceLine();
+          advanceSentence();
         }
       };
       currentSource.current = source;
@@ -448,22 +452,25 @@ export default function App() {
     } else {
       console.log(`[Play] No buffer available, triggering fallback`);
       triggerFallback();
-      playCurrentLine();
+      playCurrentSentence();
     }
   };
-  const advanceLine = () => {
-    console.log(`[Advance] Moving from line ${currentLineIndex} to ${currentLineIndex + 1}`);
-    setCurrentLineIndex(prev => {
+  const advanceSentence = () => {
+    console.log(`[Advance] Moving from sentence ${currentSentenceIndex} to ${currentSentenceIndex + 1}`);
+    setCurrentSentenceIndex(prev => {
       const nextIndex = prev + 1;
       setTimeout(() => {
-        const el = document.getElementById(`line-${nextIndex}`);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (nextIndex < sentences.length) {
+          const firstLineId = sentences[nextIndex].lines[0];
+          const el = document.getElementById(`line-${firstLineId}`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
       }, 50);
       return nextIndex;
     });
   };
-  const handleLineClick = (index: number) => {
-    console.log(`[Click] Line ${index} clicked`);
+  const handleLineClick = (lineId: number) => {
+    console.log(`[Click] Line ${lineId} clicked`);
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
     }
@@ -474,15 +481,25 @@ export default function App() {
     audioResolvers.current.clear();
     updateBufferUI();
     isWaitingForAudio.current = false;
-    setCurrentLineIndex(index);
-    setIsPlaying(true);
-    const el = document.getElementById(`line-${index}`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    let targetSentenceIndex = -1;
+    for (let i = 0; i < sentences.length; i++) {
+      if (sentences[i].lines.includes(lineId)) {
+        targetSentenceIndex = i;
+        break;
+      }
+    }
+    if (targetSentenceIndex !== -1) {
+      setCurrentSentenceIndex(targetSentenceIndex);
+      setIsPlaying(true);
+      const el = document.getElementById(`line-${lineId}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
   };
   const togglePlay = () => {
     if (!isModelReady) return;
-    if (currentLineIndex === -1 && allLines.length > 0) {
-      handleLineClick(0);
+    if (currentSentenceIndex === -1 && sentences.length > 0) {
+      setCurrentSentenceIndex(0);
+      setIsPlaying(true);
       return;
     }
     if (isPlaying) {
@@ -512,7 +529,9 @@ export default function App() {
     setPdfDoc(null);
     setPages([]);
     setAllLines([]);
-    setCurrentLineIndex(-1);
+    setSentences([]);
+    setCurrentSentenceIndex(-1);
+    setHighlightedLineIds([]);
     audioCache.current.clear();
     pendingFetches.current.clear();
     audioResolvers.current.clear();
@@ -552,6 +571,23 @@ export default function App() {
         globalLineList = [...globalLineList, ...lines];
         newPages.push({ page, viewport, lines, pageNumber: i });
       }
+      // Build sentences from lines
+      let currentText = '';
+      let currentLines: number[] = [];
+      const newSentences = [];
+      for (const line of globalLineList) {
+        currentText += line.text + ' ';
+        currentLines.push(line.id);
+        if (/[.!?]\s*$/.test(line.text)) {
+          newSentences.push({ text: currentText.trim(), lines: [...currentLines] });
+          currentText = '';
+          currentLines = [];
+        }
+      }
+      if (currentText) {
+        newSentences.push({ text: currentText.trim(), lines: [...currentLines] });
+      }
+      setSentences(newSentences);
       setAllLines(globalLineList);
       setPages(newPages);
     } catch (e) {
@@ -593,7 +629,7 @@ export default function App() {
       };
     });
   };
-  const PDFPage = ({ data, currentLineIndex, onLineClick }: any) => {
+  const PDFPage = ({ data, highlightedLineIds, onLineClick }: any) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const renderTaskRef = useRef<any>(null);
     useEffect(() => {
@@ -616,7 +652,7 @@ export default function App() {
               onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
               style={{
                 ...styles.lineBase,
-                ...(currentLineIndex === line.id ? styles.lineActive : {}),
+                ...(highlightedLineIds.includes(line.id) ? styles.lineActive : {}),
                 left: line.x,
                 top: line.y,
                 width: line.width,
@@ -660,8 +696,8 @@ export default function App() {
               <span style={styles.statValue}>{pendingCount}</span>
             </div>
             <div style={styles.statItem}>
-              <span style={styles.statLabel}>Line</span>
-              <span style={styles.statValue}>{currentLineIndex >= 0 ? `${currentLineIndex + 1}/${allLines.length}` : '-'}</span>
+              <span style={styles.statLabel}>Sentence</span>
+              <span style={styles.statValue}>{currentSentenceIndex >= 0 ? `${currentSentenceIndex + 1}/${sentences.length}` : '-'}</span>
             </div>
           </div>
         </div>
@@ -679,10 +715,10 @@ export default function App() {
           <div style={styles.playerGroup}>
             <button
               onClick={togglePlay}
-              disabled={allLines.length === 0 || !isModelReady}
+              disabled={sentences.length === 0 || !isModelReady}
               style={{
                 ...styles.iconButton,
-                ...(allLines.length === 0 || !isModelReady ? styles.buttonDisabled : {})
+                ...(sentences.length === 0 || !isModelReady ? styles.buttonDisabled : {})
               }}
             >
               {isPlaying ? <Pause size={20} /> : <Play size={20} />}
@@ -705,7 +741,7 @@ export default function App() {
       ) : (
         <div style={styles.viewer}>
           {pages.map(pageData => (
-            <PDFPage key={pageData.pageNumber} data={pageData} currentLineIndex={currentLineIndex} onLineClick={handleLineClick} />
+            <PDFPage key={pageData.pageNumber} data={pageData} highlightedLineIds={highlightedLineIds} onLineClick={handleLineClick} />
           ))}
         </div>
       )}

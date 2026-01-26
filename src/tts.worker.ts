@@ -3,7 +3,7 @@ import { KokoroTTS } from "kokoro-js";
 // We define a simple message protocol
 type WorkerMessage =
   | { type: 'init' }
-  | { type: 'generate', text: string, lineIndex?: number };
+  | { type: 'generate', text: string, lineIndex?: number, voice?: string };
 const model_id = "onnx-community/Kokoro-82M-v1.0-ONNX";
 let tts: KokoroTTS | null = null;
 // Listen for messages from the main thread
@@ -21,13 +21,13 @@ self.addEventListener("message", async (e: MessageEvent<WorkerMessage>) => {
       self.postMessage({ status: 'ready' });
     }
     else if (type === 'generate') {
-      const { text, lineIndex } = e.data;
+      const { text, lineIndex, voice } = e.data;
       if (!tts) {
         throw new Error("TTS not initialized");
       }
       // Generate audio
       const audio = await tts.generate(text, {
-        voice: "af_bella", // You can make this dynamic if needed
+        voice: voice || "af_bella", // You can make this dynamic if needed
         speed: 1.0,
       });
       // Send the raw audio buffer back to the main thread

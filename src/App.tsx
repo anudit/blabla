@@ -224,6 +224,14 @@ const styles = {
     flexDirection: 'column' as const,
     gap: '0.5rem',
   },
+  select: {
+    padding: '0.5rem',
+    borderRadius: '0.375rem',
+    border: '1px solid #d1d5db',
+    backgroundColor: '#f3f4f6',
+    color: '#374151',
+    cursor: 'pointer',
+  },
 };
 export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
@@ -241,6 +249,7 @@ export default function App() {
   const [playbackState, setPlaybackState] = useState("Idle");
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState('af_bella');
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -253,6 +262,12 @@ export default function App() {
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const voices = [
+    { value: 'af_bella', label: 'af_bella (F)' },
+    { value: 'af_heart', label: 'af_heart (F)' },
+    { value: 'am_fenrir', label: 'am_fenrir (M)' },
+    { value: 'am_puck', label: 'am_puck (M)' },
+  ];
   useEffect(() => {
     console.log("[App] Mounting...");
     const ctx = getAudioContext();
@@ -346,15 +361,15 @@ export default function App() {
     setPlaybackState("Playing");
     source.onended = () => setPlaybackState("Ready");
   };
-  const generateAudioInWorker = (text: string, sentenceIndex: number): Promise<AudioBuffer | null> => {
+  const generateAudioInWorker = (text: string, sentenceIndex: number, voice: string): Promise<AudioBuffer | null> => {
     return new Promise((resolve) => {
       if (usingFallback.current || !workerRef.current) {
         resolve(null);
         return;
       }
-      console.log(`[Generate] Requesting audio for sentence ${sentenceIndex}: "${text.substring(0, 30)}..."`);
+      console.log(`[Generate] Requesting audio for sentence ${sentenceIndex}: "${text.substring(0, 30)}..." with voice ${voice}`);
       audioResolvers.current.set(sentenceIndex, resolve);
-      workerRef.current.postMessage({ type: 'generate', text, lineIndex: sentenceIndex });
+      workerRef.current.postMessage({ type: 'generate', text, lineIndex: sentenceIndex, voice });
       setTimeout(() => {
         if (audioResolvers.current.has(sentenceIndex)) {
           console.log(`[Generate] Timeout for sentence ${sentenceIndex}`);
@@ -383,7 +398,7 @@ export default function App() {
     setCachedCount(audioCache.current.size);
     setPendingCount(pendingFetches.current.size);
   };
-  const processSentenceAudio = async (index: number, sessionId: number): Promise<AudioBuffer | null> => {
+  const processSentenceAudio = async (index: number, sessionId: number, voice: string): Promise<AudioBuffer | null> => {
     if (usingFallback.current) return null;
     if (index >= sentences.length) return null;
     if (audioCache.current.has(index)) {
@@ -400,7 +415,7 @@ export default function App() {
     pendingFetches.current.add(index);
     updateBufferUI();
     try {
-      const buffer = await generateAudioInWorker(text, index);
+      const buffer = await generateAudioInWorker(text, index, voice);
       if (!buffer) {
         console.log(`[Buffer] No buffer returned for sentence ${index}`);
         return null;
@@ -457,7 +472,7 @@ export default function App() {
     for (let i = 1; i <= 3; i++) {
       if (currentSentenceIndex + i < sentences.length && !audioCache.current.has(currentSentenceIndex + i)) {
         console.log(`[Lookahead] Prefetching sentence ${currentSentenceIndex + i}`);
-        processSentenceAudio(currentSentenceIndex + i, currentSession);
+        processSentenceAudio(currentSentenceIndex + i, currentSession, selectedVoice);
       }
     }
     let buffer = audioCache.current.get(currentSentenceIndex);
@@ -465,7 +480,7 @@ export default function App() {
       console.log(`[Play] Buffer not cached, fetching sentence ${currentSentenceIndex}`);
       setPlaybackState("Buffering");
       isWaitingForAudio.current = true;
-      buffer = await processSentenceAudio(currentSentenceIndex, currentSession);
+      buffer = await processSentenceAudio(currentSentenceIndex, currentSession, selectedVoice);
       isWaitingForAudio.current = false;
     }
     if (usingFallback.current) {
@@ -566,7 +581,7 @@ export default function App() {
       setPlaybackState("Testing");
     } else {
       setPlaybackState("Generating");
-      workerRef.current?.postMessage({ type: 'generate', text });
+      workerRef.current?.postMessage({ type: 'generate', text, voice: selectedVoice });
     }
   };
   const resetReader = () => {
@@ -584,6 +599,19 @@ export default function App() {
     updateBufferUI();
     setPlaybackState("Idle");
     isWaitingForAudio.current = false;
+  };
+  const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newVoice = e.target.value;
+    setSelectedVoice(newVoice);
+    audioCache.current.clear();
+    pendingFetches.current.clear();
+    audioResolvers.current.clear();
+    updateBufferUI();
+    if (isPlaying) {
+      stopAllAudio();
+      setPlaybackState("Starting");
+      playCurrentSentence();
+    }
   };
   const handleFileDrop = async (e: React.DragEvent | React.ChangeEvent) => {
     e.preventDefault();
@@ -831,6 +859,21 @@ export default function App() {
             ))}
           </div>
         )}
+        <select
+          value={selectedVoice}
+          onChange={handleVoiceChange}
+          disabled={usingFallback.current || !isModelReady}
+          style={{
+            ...styles.select,
+            ...(usingFallback.current || !isModelReady ? styles.buttonDisabled : {}),
+          }}
+        >
+          {voices.map(v => (
+            <option key={v.value} value={v.value}>
+              {v.label}
+            </option>
+          ))}
+        </select>
         <button onClick={() => setIsMenuOpen(!isMenuOpen)} style={styles.iconButton}>
           <Menu size={20} />
         </button>

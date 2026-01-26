@@ -335,11 +335,15 @@ export default function App() {
   const stopAllAudio = () => {
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
+      currentSource.current.disconnect();
       currentSource.current = null;
     }
     window.speechSynthesis.cancel();
     if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
-    if (audioContext.current) audioContext.current.suspend();
+    if (audioContext.current) {
+      audioContext.current.close();
+      audioContext.current = null;
+    }
     setPlaybackState("Stopped");
     isWaitingForAudio.current = false;
   };

@@ -188,7 +188,7 @@ const styles = {
     cursor: 'pointer',
     borderRadius: '2px',
     backgroundColor: 'transparent',
-    transition: 'background-color 0.2s ease',
+    transition: 'background-color 0.3s ease, box-shadow 0.3s ease',
   },
   lineActive: {
     backgroundColor: 'rgba(255, 230, 0, 0.5)',
@@ -571,23 +571,61 @@ export default function App() {
         globalLineList = [...globalLineList, ...lines];
         newPages.push({ page, viewport, lines, pageNumber: i });
       }
-      // Build sentences from lines
-      let currentText = '';
-      let currentLines: number[] = [];
-      const newSentences = [];
-      for (const line of globalLineList) {
-        currentText += line.text + ' ';
-        currentLines.push(line.id);
-        if (/[.!?]\s*$/.test(line.text)) {
-          newSentences.push({ text: currentText.trim(), lines: [...currentLines] });
-          currentText = '';
-          currentLines = [];
+      // Build sentences properly
+      const fullText = globalLineList.map(l => l.text).join(' ');
+      const sentenceRegex = /[^.!?]+[.!?]/g;
+      let match;
+      const sentenceTexts = [];
+      while ((match = sentenceRegex.exec(fullText)) !== null) {
+        sentenceTexts.push({
+          text: match[0].trim(),
+          start: match.index,
+          end: match.index + match[0].length
+        });
+      }
+      if (fullText.slice(sentenceTexts[sentenceTexts.length - 1]?.end || 0).trim()) {
+        sentenceTexts.push({
+          text: fullText.slice(sentenceTexts[sentenceTexts.length - 1]?.end || 0).trim(),
+          start: sentenceTexts[sentenceTexts.length - 1]?.end || 0,
+          end: fullText.length
+        });
+      }
+      // Map to lines
+      let cumPos = 0;
+      globalLineList.forEach(line => {
+        line.startPos = cumPos;
+        cumPos += line.text.length + 1; // + space
+      });
+      const newSentences = sentenceTexts.map(sent => {
+        const sentLines = globalLineList.filter(line =>
+          line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start
+        ).map(line => line.id);
+        return { text: sent.text, lines: sentLines };
+      }).filter(sent => sent.text && sent.lines.length > 0);
+      // Split long sentences
+      const maxTextLength = 1000; // Adjust based on model limits ~510 tokens ~2000 chars, but safe
+      const finalSentences = [];
+      for (let sent of newSentences) {
+        if (sent.text.length <= maxTextLength) {
+          finalSentences.push(sent);
+        } else {
+          const subTexts = [];
+          let remaining = sent.text;
+          while (remaining.length > maxTextLength) {
+            let splitPos = remaining.lastIndexOf('.', maxTextLength);
+            if (splitPos === -1) splitPos = remaining.lastIndexOf(',', maxTextLength);
+            if (splitPos === -1) splitPos = remaining.lastIndexOf(' ', maxTextLength);
+            if (splitPos === -1) splitPos = maxTextLength;
+            subTexts.push(remaining.slice(0, splitPos + (remaining[splitPos] === '.' ? 1 : 0)).trim());
+            remaining = remaining.slice(splitPos + (remaining[splitPos] === '.' ? 1 : 0)).trim();
+          }
+          if (remaining) subTexts.push(remaining);
+          subTexts.forEach(subText => {
+            finalSentences.push({ text: subText, lines: sent.lines }); // Approximate same lines
+          });
         }
       }
-      if (currentText) {
-        newSentences.push({ text: currentText.trim(), lines: [...currentLines] });
-      }
-      setSentences(newSentences);
+      setSentences(finalSentences);
       setAllLines(globalLineList);
       setPages(newPages);
     } catch (e) {

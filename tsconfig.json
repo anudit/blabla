@@ -22,15 +22,15 @@
     "noImplicitOverride": true,
 
     "baseUrl": ".",
-    "paths": {
-      "@/*": ["./src/*"]
-    },
+    // "paths": {
+    //   "@/*": ["./src/*"]
+    // },
 
     // Some stricter flags (disabled by default)
     "noUnusedLocals": false,
     "noUnusedParameters": false,
-    "noPropertyAccessFromIndexSignature": false
+    "noPropertyAccessFromIndexSignature": false,
   },
 
-  "exclude": ["dist", "node_modules"]
+  "exclude": ["dist", "node_modules"],
 }

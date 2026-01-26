@@ -1,8 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
+
 import * as pdfjsLib from 'pdfjs-dist';
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
+
 import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu } from 'lucide-react';
 import logo from './logo.png';
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.mjs`;
+
 const styles = {
   container: {
     minHeight: '100vh',

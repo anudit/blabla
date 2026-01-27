@@ -288,10 +288,10 @@ export default function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   const voices = [
-    { value: 'af_bella', label: 'Bella (English - F)' },
-    { value: 'af_heart', label: 'Heart (English - F)' },
-    { value: 'am_fenrir', label: 'Fenrir (English - M)' },
-    { value: 'am_puck', label: 'Puck (English - M)' },
+    { value: 'af_bella', label: 'Bella (Eng F)' },
+    { value: 'af_heart', label: 'Heart (Eng F)' },
+    { value: 'am_fenrir', label: 'Fenrir (Eng M)' },
+    { value: 'am_puck', label: 'Puck (Eng M)' },
   ];
 
   useEffect(() => {

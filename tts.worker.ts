@@ -62,8 +62,7 @@ self.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Prom
     getRequest.onerror = () => reject(getRequest.error);
   });
 };
-
-// --- OPTIMIZATION: WebGPU Detection ---
+// --- HELPER: WebGPU Detection ---
 async function detectWebGPU() {
   try {
     if (!navigator.gpu) return false;
@@ -72,6 +71,20 @@ async function detectWebGPU() {
   } catch (e) {
     return false;
   }
+}
+
+// --- HELPER: Environment Checks ---
+function getSystemCapabilities() {
+  const ua = navigator.userAgent.toLowerCase();
+
+  // 1. Detect Mobile/Tablet
+  const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(ua);
+
+  // 2. Detect RAM (Note: Browser caps this at 8GB for privacy)
+  // If undefined, we assume 4GB to be safe.
+  const memory = (navigator as any).deviceMemory || 4;
+
+  return { isMobile, memory };
 }
 
 // --- Worker Logic ---
@@ -89,16 +102,23 @@ self.addEventListener("message", async (e: MessageEvent<WorkerMessage>) => {
     if (type === 'init') {
       if (tts) return;
 
-      // 1. Detect environment
       const hasWebGPU = await detectWebGPU();
-      const device = hasWebGPU ? "webgpu" : "wasm";
+      const { isMobile, memory } = getSystemCapabilities();
 
-      // 2. Select optimization level
-      // Mobile/CPU benefits significantly from q8 (8-bit quantization)
-      // instead of fp32, reducing memory usage and calculation time.
+      // DECISION LOGIC:
+      // We force WASM/q8 if:
+      // 1. WebGPU is missing.
+      // 2. OR Device is Mobile (Pixel 8 has WebGPU but crashes on fp32 models due to driver instability).
+      // 3. OR RAM is < 8GB (Low spec desktop/laptop).
+      const forceWasm = !hasWebGPU || isMobile || memory < 8;
+
+      const device = forceWasm ? "wasm" : "webgpu";
+
+      // q8 is standard for wasm. fp32 is standard for webgpu.
       const dtype = device === "wasm" ? "q8" : "fp32";
 
-      console.log(`[Worker] Initializing with device: ${device}, dtype: ${dtype}`);
+      console.log(`[Worker] Init: Mobile=${isMobile}, RAM=${memory}GB, WebGPU=${hasWebGPU}`);
+      console.log(`[Worker] Selected: Device=${device}, Dtype=${dtype}`);
 
       tts = await KokoroTTS.from_pretrained(model_id, {
         dtype: dtype,
@@ -118,7 +138,7 @@ self.addEventListener("message", async (e: MessageEvent<WorkerMessage>) => {
 
       self.postMessage({
         status: 'complete',
-        audio: audio.audio, // Float32Array
+        audio: audio.audio,
         text,
         lineIndex
       });

@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-
 import * as pdfjsLib from 'pdfjs-dist';
-pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
-
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu } from 'lucide-react';
+import ePub from 'epubjs';
+import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen } from 'lucide-react';
 import logo from './logo.png';
+
+// Set worker source
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
 
 const styles = {
   container: {
@@ -36,9 +37,9 @@ const styles = {
   title: {
     fontSize: '1.25rem',
     fontWeight: 'bold' as const,
-    color: 'blue', // Red for "bla bla" aesthetic
+    color: 'blue',
     margin: 0,
-    fontFamily: 'Arial', // Retro font feel
+    fontFamily: 'Arial',
   },
   statusGroup: {
     display: 'flex',
@@ -235,7 +236,28 @@ const styles = {
     color: '#374151',
     cursor: 'pointer',
   },
+  // EPUB SPECIFIC STYLES
+  epubContainer: {
+    width: '100%',
+    maxWidth: '48rem',
+    padding: '2rem',
+    paddingBottom: '10rem',
+    lineHeight: '1.8',
+    fontSize: '1.125rem',
+    textAlign: 'left' as const,
+  },
+  epubSentence: {
+    cursor: 'pointer',
+    padding: '2px 0',
+    transition: 'background-color 0.2s',
+    borderRadius: '4px',
+  },
+  epubHighlight: {
+    backgroundColor: '#bae6fd',
+    boxShadow: '0 0 0 2px #bae6fd',
+  }
 };
+
 export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
@@ -245,6 +267,11 @@ export default function App() {
   const [highlightedLineIds, setHighlightedLineIds] = useState<number[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
+
+  // File type state
+  const [fileType, setFileType] = useState<'pdf' | 'epub' | null>(null);
+  const [epubContent, setEpubContent] = useState<any[]>([]);
+
   const [ttsStatus, setTtsStatus] = useState("Init");
   const [isModelReady, setIsModelReady] = useState(false);
   const [cachedCount, setCachedCount] = useState(0);
@@ -253,6 +280,7 @@ export default function App() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState('af_bella');
+
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -265,16 +293,18 @@ export default function App() {
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+
   const voices = [
     { value: 'af_bella', label: 'af_bella (F)' },
     { value: 'af_heart', label: 'af_heart (F)' },
     { value: 'am_fenrir', label: 'am_fenrir (M)' },
     { value: 'am_puck', label: 'am_puck (M)' },
   ];
+
   useEffect(() => {
     console.log("[App] Mounting...");
     const ctx = getAudioContext();
-      ctx.resume().catch(console.warn);
+    ctx.resume().catch(console.warn);
     workerRef.current = new Worker("/tts.worker.js", { type: 'module' });
     workerRef.current.onmessage = (e) => {
       const { status, audio, error, text, lineIndex } = e.data;
@@ -289,13 +319,12 @@ export default function App() {
           const ctx = getAudioContext();
           const buffer = ctx.createBuffer(1, audio.length, 24000);
           buffer.getChannelData(0).set(audio);
-          console.log(`Created buffer — sampleRate: ${buffer.sampleRate}, duration: ${(audio.length / buffer.sampleRate).toFixed(2)}s`);
-          if (text.startsWith("Hello")) {
+
+          if (text.startsWith("Hello! I am")) {
             playBufferDirectly(buffer);
           } else if (lineIndex !== undefined) {
             const resolver = audioResolvers.current.get(lineIndex);
             if (resolver) {
-              console.log(`[Audio] Resolving buffer for line ${lineIndex}`);
               resolver(buffer);
               audioResolvers.current.delete(lineIndex);
             }
@@ -313,6 +342,7 @@ export default function App() {
     };
     setTtsStatus("Downloading Model...");
     workerRef.current.postMessage({ type: 'init' });
+
     return () => {
       console.log("[App] Unmounting...");
       stopAllAudio();
@@ -320,11 +350,13 @@ export default function App() {
       if (audioContext.current) audioContext.current.close();
     };
   }, []);
+
   useEffect(() => {
     if (isPlaying && currentSentenceIndex >= 0 && !isWaitingForAudio.current) {
       playCurrentSentence();
     }
   }, [isPlaying, currentSentenceIndex]);
+
   const triggerFallback = () => {
     if (usingFallback.current) return;
     console.warn("[TTS] Switching to System Voice Fallback");
@@ -332,19 +364,15 @@ export default function App() {
     setTtsStatus("System Voice");
     setIsModelReady(true);
   };
+
   const getAudioContext = () => {
     if (!audioContext.current || audioContext.current.state === 'closed') {
-      console.log('[AudioCtx] Recreating closed context');
       audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: 24000
       });
     }
-    // Aggressive resume pattern – browsers are super strict in 2024/2025
     if (audioContext.current.state !== 'running') {
-      console.log(`[AudioCtx] Current state = ${audioContext.current.state} → forcing resume`);
-      // 1. Classic resume
       audioContext.current.resume().catch(e => console.warn("[AudioCtx] resume() failed", e));
-      // 2. Some browsers need this dummy unlock
       if (audioContext.current.state !== 'running') {
         const oscillator = audioContext.current.createOscillator();
         oscillator.connect(audioContext.current.destination);
@@ -354,6 +382,7 @@ export default function App() {
     }
     return audioContext.current;
   };
+
   const playBufferDirectly = (buffer: AudioBuffer) => {
     const ctx = getAudioContext();
     const source = ctx.createBufferSource();
@@ -364,24 +393,24 @@ export default function App() {
     setPlaybackState("Playing");
     source.onended = () => setPlaybackState("Ready");
   };
+
   const generateAudioInWorker = (text: string, sentenceIndex: number, voice: string): Promise<AudioBuffer | null> => {
     return new Promise((resolve) => {
       if (usingFallback.current || !workerRef.current) {
         resolve(null);
         return;
       }
-      console.log(`[Generate] Requesting audio for sentence ${sentenceIndex}: "${text.substring(0, 30)}..." with voice ${voice}`);
       audioResolvers.current.set(sentenceIndex, resolve);
       workerRef.current.postMessage({ type: 'generate', text, lineIndex: sentenceIndex, voice });
       setTimeout(() => {
         if (audioResolvers.current.has(sentenceIndex)) {
-          console.log(`[Generate] Timeout for sentence ${sentenceIndex}`);
           audioResolvers.current.delete(sentenceIndex);
           resolve(null);
         }
       }, 30000);
     });
   };
+
   const stopAllAudio = () => {
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
@@ -397,34 +426,28 @@ export default function App() {
     setPlaybackState("Stopped");
     isWaitingForAudio.current = false;
   };
+
   const updateBufferUI = () => {
     setCachedCount(audioCache.current.size);
     setPendingCount(pendingFetches.current.size);
   };
+
   const processSentenceAudio = async (index: number, sessionId: number, voice: string): Promise<AudioBuffer | null> => {
     if (usingFallback.current) return null;
     if (index >= sentences.length) return null;
-    if (audioCache.current.has(index)) {
-      console.log(`[Buffer] Cache hit for sentence ${index}`);
-      return audioCache.current.get(index);
-    }
-    if (pendingFetches.current.has(index)) {
-      console.log(`[Buffer] Already fetching sentence ${index}`);
-      return null;
-    }
+    if (audioCache.current.has(index)) return audioCache.current.get(index);
+    if (pendingFetches.current.has(index)) return null;
+
     const text = sentences[index].text;
     if (!text.trim()) return null;
-    console.log(`[Buffer] Starting fetch for sentence ${index}`);
+
     pendingFetches.current.add(index);
     updateBufferUI();
     try {
       const buffer = await generateAudioInWorker(text, index, voice);
-      if (!buffer) {
-        console.log(`[Buffer] No buffer returned for sentence ${index}`);
-        return null;
-      }
+      if (!buffer) return null;
+
       if (sessionId === playbackSessionId.current) {
-        console.log(`[Buffer] Caching buffer for sentence ${index}`);
         audioCache.current.set(index, buffer);
         updateBufferUI();
       }
@@ -437,6 +460,7 @@ export default function App() {
       updateBufferUI();
     }
   };
+
   const playCurrentSentence = async () => {
     if (!isPlaying || currentSentenceIndex === -1) return;
     if (currentSentenceIndex >= sentences.length) {
@@ -444,11 +468,20 @@ export default function App() {
       setPlaybackState("Completed");
       return;
     }
+
     const currentSession = playbackSessionId.current;
     const unit = sentences[currentSentenceIndex];
     const text = unit.text;
-    console.log(`[Play] Playing sentence ${currentSentenceIndex}: "${text.substring(0, 30)}..."`);
+
     setHighlightedLineIds(unit.lines);
+
+    // Auto-scroll logic for both PDF (div overlay) and EPUB (span)
+    setTimeout(() => {
+      const firstLineId = unit.lines[0];
+      const el = document.getElementById(`line-${firstLineId}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 50);
+
     if (usingFallback.current) {
       window.speechSynthesis.cancel();
       if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
@@ -466,43 +499,43 @@ export default function App() {
       }, 50);
       return;
     }
+
     getAudioContext();
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
       currentSource.current.disconnect();
       currentSource.current = null;
     }
+
+    // Prefetch next 3
     for (let i = 1; i <= 3; i++) {
       if (currentSentenceIndex + i < sentences.length && !audioCache.current.has(currentSentenceIndex + i)) {
-        console.log(`[Lookahead] Prefetching sentence ${currentSentenceIndex + i}`);
         processSentenceAudio(currentSentenceIndex + i, currentSession, selectedVoice);
       }
     }
+
     let buffer = audioCache.current.get(currentSentenceIndex);
     if (!buffer) {
-      console.log(`[Play] Buffer not cached, fetching sentence ${currentSentenceIndex}`);
       setPlaybackState("Buffering");
       isWaitingForAudio.current = true;
       buffer = await processSentenceAudio(currentSentenceIndex, currentSession, selectedVoice);
       isWaitingForAudio.current = false;
     }
+
     if (usingFallback.current) {
       playCurrentSentence();
       return;
     }
-    if (currentSession !== playbackSessionId.current || !isPlaying) {
-      console.log(`[Play] Session mismatch or stopped playing`);
-      return;
-    }
+
+    if (currentSession !== playbackSessionId.current || !isPlaying) return;
+
     if (buffer) {
-      console.log(`[Play] Playing buffer for sentence ${currentSentenceIndex}`);
       const source = audioContext.current!.createBufferSource();
       source.buffer = buffer;
       source.playbackRate.value = playbackSpeed;
       source.connect(audioContext.current!.destination);
       source.onended = () => {
         currentSource.current = null;
-        console.log(`[Play] Audio ended for sentence ${currentSentenceIndex}`);
         if (isPlaying && currentSession === playbackSessionId.current) {
           advanceSentence();
         }
@@ -511,27 +544,16 @@ export default function App() {
       setPlaybackState("Playing");
       source.start(0);
     } else {
-      console.log(`[Play] No buffer available, triggering fallback`);
       triggerFallback();
       playCurrentSentence();
     }
   };
+
   const advanceSentence = () => {
-    console.log(`[Advance] Moving from sentence ${currentSentenceIndex} to ${currentSentenceIndex + 1}`);
-    setCurrentSentenceIndex(prev => {
-      const nextIndex = prev + 1;
-      setTimeout(() => {
-        if (nextIndex < sentences.length) {
-          const firstLineId = sentences[nextIndex].lines[0];
-          const el = document.getElementById(`line-${firstLineId}`);
-          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }, 50);
-      return nextIndex;
-    });
+    setCurrentSentenceIndex(prev => prev + 1);
   };
+
   const handleLineClick = (lineId: number) => {
-    console.log(`[Click] Line ${lineId} clicked`);
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
       currentSource.current.disconnect();
@@ -544,6 +566,7 @@ export default function App() {
     audioResolvers.current.clear();
     updateBufferUI();
     isWaitingForAudio.current = false;
+
     let targetSentenceIndex = -1;
     for (let i = 0; i < sentences.length; i++) {
       if (sentences[i].lines.includes(lineId)) {
@@ -558,6 +581,7 @@ export default function App() {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   };
+
   const togglePlay = () => {
     if (!isModelReady) return;
     if (currentSentenceIndex === -1 && sentences.length > 0) {
@@ -573,6 +597,7 @@ export default function App() {
       setPlaybackState("Starting");
     }
   };
+
   const handleTestAudio = () => {
     if (!isModelReady) return;
     stopAllAudio();
@@ -587,6 +612,7 @@ export default function App() {
       workerRef.current?.postMessage({ type: 'generate', text, voice: selectedVoice });
     }
   };
+
   const resetReader = () => {
     setIsPlaying(false);
     stopAllAudio();
@@ -594,6 +620,10 @@ export default function App() {
     setPages([]);
     setAllLines([]);
     setSentences([]);
+    // Reset file types
+    setFileType(null);
+    setEpubContent([]);
+
     setCurrentSentenceIndex(-1);
     setHighlightedLineIds([]);
     audioCache.current.clear();
@@ -603,6 +633,7 @@ export default function App() {
     setPlaybackState("Idle");
     isWaitingForAudio.current = false;
   };
+
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newVoice = e.target.value;
     setSelectedVoice(newVoice);
@@ -616,6 +647,7 @@ export default function App() {
       playCurrentSentence();
     }
   };
+
   const handleFileDrop = async (e: React.DragEvent | React.ChangeEvent) => {
     e.preventDefault();
     setIsDragOver(false);
@@ -625,15 +657,79 @@ export default function App() {
     } else if ('target' in e) {
       file = (e.target as HTMLInputElement).files?.[0];
     }
-    if (file && file.type === 'application/pdf') {
-      const reader = new FileReader();
-      reader.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer);
-      reader.readAsArrayBuffer(file);
-    } else {
-      alert("Please drop a valid PDF");
+
+    if (file) {
+      if (file.type === 'application/pdf') {
+        const reader = new FileReader();
+        reader.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer);
+        reader.readAsArrayBuffer(file);
+      } else if (file.type === 'application/epub+zip' || file.name.endsWith('.epub')) {
+        const reader = new FileReader();
+        reader.onload = (ev) => loadEPUB(ev.target?.result as ArrayBuffer);
+        reader.readAsArrayBuffer(file);
+      } else {
+        alert("Please drop a valid PDF or EPUB file");
+      }
     }
   };
+
+  const loadEPUB = async (data: ArrayBuffer) => {
+    try {
+      setFileType('epub');
+      const book = ePub(data);
+      await book.ready;
+
+      const spine = book.spine;
+      const newSentences: any[] = [];
+      const contentData: any[] = [];
+      let globalLineIdCounter = 0;
+
+      // Access spine items directly
+      const items = (spine as any).items || [];
+
+      for (const item of items) {
+        try {
+          // Load document to extract raw text
+          const doc = await book.load(item.href);
+          if (!doc) continue;
+
+          // Get text content - simplified extraction
+          // For a more robust reader, you'd traverse the DOM
+          const text = doc.body.innerText;
+          if (!text || !text.trim()) continue;
+
+          const sentenceRegex = /[^.!?]+[.!?]/g;
+          let match;
+
+          while ((match = sentenceRegex.exec(text)) !== null) {
+            const sText = match[0].trim().replace(/\s+/g, ' ');
+            if (sText.length > 0) {
+              const lineId = globalLineIdCounter++;
+              newSentences.push({
+                text: sText,
+                lines: [lineId]
+              });
+              contentData.push({
+                id: lineId,
+                text: sText
+              });
+            }
+          }
+        } catch (err) {
+          console.error("Error loading chapter", err);
+        }
+      }
+
+      setSentences(newSentences);
+      setEpubContent(contentData);
+    } catch (e) {
+      console.error("Failed to load EPUB", e);
+      alert("Could not load EPUB file");
+    }
+  };
+
   const loadPDF = async (data: ArrayBuffer) => {
+    setFileType('pdf');
     try {
       const doc = await pdfjsLib.getDocument(data).promise;
       setPdfDoc(doc);
@@ -648,7 +744,7 @@ export default function App() {
         globalLineList = [...globalLineList, ...lines];
         newPages.push({ page, viewport, lines, pageNumber: i });
       }
-      // Build sentences properly
+
       const fullText = globalLineList.map(l => l.text).join(' ');
       const sentenceRegex = /[^.!?]+[.!?]/g;
       let match;
@@ -667,20 +763,22 @@ export default function App() {
           end: fullText.length
         });
       }
-      // Map to lines
+
       let cumPos = 0;
       globalLineList.forEach(line => {
         line.startPos = cumPos;
-        cumPos += line.text.length + 1; // + space
+        cumPos += line.text.length + 1;
       });
+
       const newSentences = sentenceTexts.map(sent => {
         const sentLines = globalLineList.filter(line =>
           line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start
         ).map(line => line.id);
         return { text: sent.text, lines: sentLines };
       }).filter(sent => sent.text && sent.lines.length > 0);
+
       // Split long sentences
-      const maxTextLength = 1000; // Adjust based on model limits ~510 tokens ~2000 chars, but safe
+      const maxTextLength = 1000;
       const finalSentences = [];
       for (let sent of newSentences) {
         if (sent.text.length <= maxTextLength) {
@@ -698,7 +796,7 @@ export default function App() {
           }
           if (remaining) subTexts.push(remaining);
           subTexts.forEach(subText => {
-            finalSentences.push({ text: subText, lines: sent.lines }); // Approximate same lines
+            finalSentences.push({ text: subText, lines: sent.lines });
           });
         }
       }
@@ -709,6 +807,7 @@ export default function App() {
       console.error(e);
     }
   };
+
   const processTextContent = (textContent: any, viewport: any, scale: number, startIndex: number) => {
     const items = textContent.items.map((item: any) => {
       const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
@@ -744,6 +843,7 @@ export default function App() {
       };
     });
   };
+
   const PDFPage = ({ data, highlightedLineIds, onLineClick }: any) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const renderTaskRef = useRef<any>(null);
@@ -779,12 +879,14 @@ export default function App() {
       </div>
     );
   };
+
   const getStatusBadgeStyle = () => {
     if (ttsStatus === "Downloading...") return { ...styles.statusBadge, ...styles.statusLoading };
     if (ttsStatus === "Model Ready") return { ...styles.statusBadge, ...styles.statusReady };
     if (ttsStatus === "System Voice") return { ...styles.statusBadge, ...styles.statusFallback };
     return { ...styles.statusBadge, ...styles.statusLoading };
   };
+
   return (
     <div style={styles.container}>
       <div style={styles.header}>
@@ -795,7 +897,8 @@ export default function App() {
         <div style={styles.controls}>
         </div>
       </div>
-      {allLines.length === 0 ? (
+
+      {sentences.length === 0 ? (
         <div style={{ ...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {}) }}
           onClick={() => fileInputRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
@@ -803,16 +906,44 @@ export default function App() {
           onDrop={handleFileDrop}
         >
           <Upload size={48} color="#9ca3af" style={{ marginBottom: '1rem' }} />
-          <p style={{ fontSize: '1.25rem', fontWeight: 600, color: '#4b5563' }}>Drop PDF here</p>
-          <input type="file" ref={fileInputRef} onChange={handleFileDrop} accept="application/pdf" style={{ display: 'none' }} />
+          <p style={{ fontSize: '1.25rem', fontWeight: 600, color: '#4b5563' }}>Drop PDF or EPUB here</p>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileDrop}
+            accept="application/pdf,.epub"
+            style={{ display: 'none' }}
+          />
         </div>
       ) : (
         <div style={styles.viewer}>
-          {pages.map(pageData => (
+          {fileType === 'pdf' && pages.map(pageData => (
             <PDFPage key={pageData.pageNumber} data={pageData} highlightedLineIds={highlightedLineIds} onLineClick={handleLineClick} />
           ))}
+
+          {fileType === 'epub' && (
+            <div style={styles.epubContainer}>
+              {epubContent.map((item) => {
+                const isActive = highlightedLineIds.includes(item.id);
+                return (
+                  <span
+                    key={item.id}
+                    id={`line-${item.id}`}
+                    onClick={() => handleLineClick(item.id)}
+                    style={{
+                        ...styles.epubSentence,
+                        ...(isActive ? styles.epubHighlight : {})
+                    }}
+                  >
+                      {item.text}{' '}
+                  </span>
+                )
+              })}
+            </div>
+          )}
         </div>
       )}
+
       <div style={styles.bottomBar}>
         <div style={getStatusBadgeStyle()}>
           {ttsStatus === "Loading..." && <Loader2 size={12} />}

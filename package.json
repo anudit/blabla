@@ -9,6 +9,7 @@
     "start": "NODE_ENV=production bun index.ts"
   },
   "dependencies": {
+    "epubjs": "^0.3.93",
     "kokoro-js": "^1.2.1",
     "lucide-react": "^0.563.0",
     "pdfjs-dist": "^5.4.530",

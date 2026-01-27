@@ -1,6 +1,5 @@
 // index.ts
 import { serve } from "bun";
-import index from "./index.html";
 
 const server = serve({
   routes: {
@@ -35,7 +34,7 @@ const server = serve({
     "/logo.png": Bun.file("./logo.png"),
 
     // 4. Serve Index (Fallback for SPA)
-    "/*": index
+    "/*": Bun.file("./index.html")
   },
   development: process.env.NODE_ENV !== "production" && {
     hmr: true,

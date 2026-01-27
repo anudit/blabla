@@ -300,9 +300,9 @@ export default function App() {
     ctx.resume().catch(console.warn);
     workerRef.current = new Worker("/tts.worker.js", { type: 'module' });
     workerRef.current.onmessage = (e) => {
-      const { status, audio, error, text, lineIndex } = e.data;
+      const { status, audio, error, text, lineIndex, device, dtype } = e.data;
       if (status === 'ready') {
-        setTtsStatus("Model Ready");
+        setTtsStatus(`Ready (${device}/${dtype})`);
         setIsModelReady(true);
       }
       else if (status === 'complete') {

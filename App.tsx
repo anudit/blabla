@@ -246,6 +246,16 @@ const styles = {
     fontSize: '1.125rem',
     textAlign: 'left' as const,
   },
+  epubChapterTitle: {
+    display: 'block',
+    fontSize: '1.5rem',
+    fontWeight: '700',
+    marginTop: '2.5rem',
+    marginBottom: '1rem',
+    color: '#1e3a8a',
+    borderBottom: '2px solid #e5e7eb',
+    paddingBottom: '0.5rem',
+  },
   epubSentence: {
     cursor: 'pointer',
     padding: '2px 0',
@@ -679,6 +689,9 @@ export default function App() {
       const book = ePub(data);
       await book.ready;
 
+      // Ensure locations are generated (helps with nav)
+      // await book.locations.generate(1000);
+
       const spine = book.spine;
       const newSentences: any[] = [];
       const contentData: any[] = [];
@@ -687,14 +700,59 @@ export default function App() {
       // Access spine items directly
       const items = (spine as any).items || [];
 
+      // Wait for navigation to load to map hrefs to titles
+      const navigation = await book.loaded.navigation;
+
       for (const item of items) {
         try {
           // Load document to extract raw text
           const doc = await book.load(item.href);
           if (!doc) continue;
 
+          // Attempt to find a Chapter Title
+          let chapterTitle = null;
+
+          // Strategy 1: Check if this spine item matches a TOC entry
+          // book.navigation is an Object where keys are sometimes IDs or HREFs.
+          // It's safer to traverse the TOC array if available.
+          const findTitleInToc = (toc: any[], href: string): string | null => {
+            for (const entry of toc) {
+              if (href.includes(entry.href)) return entry.label;
+              if (entry.subitems) {
+                const sub = findTitleInToc(entry.subitems, href);
+                if (sub) return sub;
+              }
+            }
+            return null;
+          };
+
+          if (navigation && (navigation as any).toc) {
+            chapterTitle = findTitleInToc((navigation as any).toc, item.href);
+          }
+
+          // Strategy 2: Fallback to the first <h1> or <h2> in the document itself
+          if (!chapterTitle) {
+            const h1 = doc.querySelector('h1');
+            if (h1 && h1.innerText.trim().length > 0) {
+               chapterTitle = h1.innerText.trim();
+            } else {
+               const h2 = doc.querySelector('h2');
+               if (h2 && h2.innerText.trim().length > 0) {
+                 chapterTitle = h2.innerText.trim();
+               }
+            }
+          }
+
+          // If we found a title, push a HEADER block
+          if (chapterTitle) {
+            contentData.push({
+              type: 'header',
+              id: `header-${globalLineIdCounter}`, // Just a unique key
+              text: chapterTitle
+            });
+          }
+
           // Get text content - simplified extraction
-          // For a more robust reader, you'd traverse the DOM
           const text = doc.body.innerText;
           if (!text || !text.trim()) continue;
 
@@ -703,6 +761,10 @@ export default function App() {
 
           while ((match = sentenceRegex.exec(text)) !== null) {
             const sText = match[0].trim().replace(/\s+/g, ' ');
+
+            // Avoid adding the chapter title again if it was just read as text
+            if (chapterTitle && sText === chapterTitle) continue;
+
             if (sText.length > 0) {
               const lineId = globalLineIdCounter++;
               newSentences.push({
@@ -710,6 +772,7 @@ export default function App() {
                 lines: [lineId]
               });
               contentData.push({
+                type: 'text',
                 id: lineId,
                 text: sText
               });
@@ -892,7 +955,7 @@ export default function App() {
       <div style={styles.header}>
         <div style={styles.logoGroup}>
           <img src={logo} style={{width: "36px", height: "36px"}} />
-          <h1 style={styles.title}>bla bla</h1>
+          <h1 style={styles.title}>BlaBla</h1>
         </div>
         <div style={styles.controls}>
         </div>
@@ -924,6 +987,14 @@ export default function App() {
           {fileType === 'epub' && (
             <div style={styles.epubContainer}>
               {epubContent.map((item) => {
+                if (item.type === 'header') {
+                  return (
+                    <div key={item.id} style={styles.epubChapterTitle}>
+                      {item.text}
+                    </div>
+                  );
+                }
+
                 const isActive = highlightedLineIds.includes(item.id);
                 return (
                   <span

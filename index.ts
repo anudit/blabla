@@ -1,11 +1,13 @@
+// index.ts
 import { serve } from "bun";
-import index from "./index.html"; // Correct: same dir as index.ts
+import index from "./index.html";
 
 const server = serve({
   routes: {
-    "/tts.worker.js": async () => {
+    // 1. Build the Main App (Bundling React + dependencies)
+    "/bundle.js": async () => {
       const build = await Bun.build({
-        entrypoints: ["./tts.worker.ts"], // Relative to src/
+        entrypoints: ["./frontend.tsx"],
         target: "browser",
         minify: process.env.NODE_ENV === "production",
       });
@@ -13,19 +15,32 @@ const server = serve({
         headers: { 'Content-Type': 'application/javascript' }
       });
     },
-    "/pdf.worker.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.mjs"),
 
-    // Standard routes (for normal requests)
+    // 2. Build the TTS Worker
+    "/tts.worker.js": async () => {
+      const build = await Bun.build({
+        entrypoints: ["./tts.worker.ts"],
+        target: "browser",
+        minify: process.env.NODE_ENV === "production",
+      });
+      return new Response(build.outputs[0], {
+        headers: { 'Content-Type': 'application/javascript' }
+      });
+    },
+
+    // 3. Serve Static Assets
+    "/pdf.worker.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.mjs"),
     "/manifest.json": Bun.file("./manifest.json"),
     "/sw.js": Bun.file("./sw.js"),
     "/logo.png": Bun.file("./logo.png"),
-    "/frontend.tsx": Bun.file("./frontend.tsx"),
+
+    // 4. Serve Index (Fallback for SPA)
     "/*": index
   },
   development: process.env.NODE_ENV !== "production" && {
     hmr: true,
-    console: true,
   },
   port: 3031,
 });
+
 console.log("🚀 Server running at " + server.url);

@@ -1,41 +1,69 @@
+// sw.js
 const cacheName = 'bla-bla-v1';
 const appAssets = [
   '/',
   '/index.html',
-  '/frontend.tsx',
+  '/bundle.js',       // Changed from frontend.tsx
   '/logo.png',
   '/tts.worker.js',
   '/pdf.worker.mjs',
-  '/manifest.json',
-  // Add any other static assets (e.g., if you have CSS files)
+  '/manifest.json'
 ];
 
-// Install event: Cache assets
+// Install: Cache core assets
 self.addEventListener('install', (e) => {
+  console.log('[SW] Installing...');
+  // Force SW to activate immediately
+  self.skipWaiting();
+
   e.waitUntil(
     caches.open(cacheName).then((cache) => {
+      console.log('[SW] Caching all assets');
       return cache.addAll(appAssets);
     })
   );
 });
 
-// Fetch event: Serve from cache, fallback to network, cache new resources
+// Activate: Clean up old caches if needed
+self.addEventListener('activate', (e) => {
+  console.log('[SW] Activated');
+  // Take control of all open clients immediately
+  e.waitUntil(self.clients.claim());
+});
+
+// Fetch: Network first (for dev) or Cache first (for prod)
+// For this PWA to work offline reliably, we use Cache First, falling back to Network.
 self.addEventListener('fetch', (e) => {
+  const url = new URL(e.request.url);
+
+  // Helper to handle navigation requests (SPA support)
+  if (e.request.mode === 'navigate') {
+    e.respondWith(
+      caches.match('/index.html').then((r) => r || fetch(e.request))
+    );
+    return;
+  }
+
   e.respondWith(
     caches.match(e.request).then((cachedResponse) => {
       if (cachedResponse) {
         return cachedResponse;
       }
+
       return fetch(e.request).then((networkResponse) => {
-        return caches.open(cacheName).then((cache) => {
-          cache.put(e.request, networkResponse.clone());
+        // Don't cache data from other domains or invalid responses
+        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
           return networkResponse;
-        });
-      }).catch(() => {
-        // Offline fallback: Serve cached index.html for navigations
-        if (e.request.mode === 'navigate') {
-          return caches.match('/index.html');
         }
+
+        const responseToCache = networkResponse.clone();
+        caches.open(cacheName).then((cache) => {
+          cache.put(e.request, responseToCache);
+        });
+
+        return networkResponse;
+      }).catch((err) => {
+        console.log('[SW] Fetch failed (offline):', e.request.url);
       });
     })
   );

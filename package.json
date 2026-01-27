@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "bun --hot index.ts",
     "build": "bun run build.ts",
+    "serve": "bunx live-server ./dist",
     "start": "NODE_ENV=production bun index.ts"
   },
   "dependencies": {

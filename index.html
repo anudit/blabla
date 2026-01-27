@@ -3,14 +3,83 @@
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+        />
+
+        <!-- Primary Meta Tags -->
+        <title>BlaBla – Private AI PDF & ePub Reader</title>
+        <meta name="title" content="BlaBla – Private AI PDF & ePub Reader" />
+        <meta
+            name="description"
+            content="Read PDFs and ePubs with AI assistance right in your browser. 100% offline, fully local, private — your files never leave your device."
+        />
+
+        <meta
+            property="og:title"
+            content="BlaBla – Private AI PDF & ePub Reader"
+        />
+        <meta
+            property="og:description"
+            content="Smart PDF and ePub reader powered by AI. Works completely offline, fully in-browser, zero data leaves your device."
+        />
+        <meta property="og:image" content="https://blabla.anudit.dev/og.png" />
+        <meta property="og:image:alt" content="BlaBla reader" />
+        <meta property="og:image:width" content="1280" />
+        <meta property="og:image:height" content="720" />
+        <meta property="og:url" content="https://blabla.anudit.dev/" />
+        <meta property="og:type" content="website" />
+        <meta property="og:site_name" content="BlaBla" />
+
+        <!-- Twitter / X Cards -->
+        <meta name="twitter:card" content="summary_large_image" />
+        <meta
+            name="twitter:title"
+            content="BlaBla – Private AI PDF & ePub Reader"
+        />
+        <meta
+            name="twitter:description"
+            content="Offline, local, private AI-powered PDF and ePub reader that runs entirely in your browser."
+        />
+        <meta name="twitter:image" content="https://blabla.anudit.dev/og.png" />
+        <meta name="twitter:image:alt" content="BlaBla image." />
+
+        <!-- SEO & Crawlers -->
+        <meta name="robots" content="index, follow" />
+        <meta name="googlebot" content="index, follow" />
+        <meta name="application-name" content="BlaBla" />
+        <meta name="apple-mobile-web-app-title" content="BlaBla" />
+        <meta
+            name="theme-color"
+            content="#ffffff"
+            media="(prefers-color-scheme: light)"
+        />
+        <meta
+            name="theme-color"
+            content="#ffffff"
+            media="(prefers-color-scheme: dark)"
+        />
+
+        <!-- Canonical (important if you have www vs non-www or subdomains later) -->
+        <link rel="canonical" href="https://blabla.anudit.dev/" />
+
+        <!-- Favicons & App Icons (you should generate all sizes) -->
+        <link rel="icon" type="image/png" href="32.png" sizes="32x32" />
+        <link rel="icon" type="image/png" href="16.png" sizes="16x16" />
+        <link rel="apple-touch-icon" sizes="180x180" href="180.png" />
         <link rel="icon" type="image/png" href="logo.png" />
-        <link rel="manifest" href="./manifest.json" />
-        <title>Bla Bla</title>
+        <link rel="manifest" href="/manifest.json" />
+
+        <!-- Optional: very short name for homescreen -->
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     </head>
     <body>
         <div id="root"></div>
-        <!-- CHANGE THIS LINE: point to bundle.js -->
+
+        <!-- CHANGE THIS LINE: point to your actual bundle -->
         <script type="module" src="/bundle.js"></script>
     </body>
 </html>

@@ -26,6 +26,11 @@ console.log("📂 Copying Static Assets...");
 await cp("./index.html", "./dist/index.html");
 await cp("./manifest.json", "./dist/manifest.json");
 await cp("./logo.png", "./dist/logo.png");
+await cp("./16.png", "./dist/16.png");
+await cp("./32.png", "./dist/32.png");
+await cp("./128.png", "./dist/128.png");
+await cp("./180.png", "./dist/180.png");
+await cp("./og.png", "./dist/og.png");
 await cp("./sw.js", "./dist/sw.js");
 
 // Critical: Copy the PDF worker from node_modules to dist

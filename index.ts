@@ -32,6 +32,12 @@ const server = serve({
     "/manifest.json": Bun.file("./manifest.json"),
     "/sw.js": Bun.file("./sw.js"),
     "/logo.png": Bun.file("./logo.png"),
+    "/16.png": Bun.file("./16.png"),
+    "/32.png": Bun.file("./32.png"),
+    "/128.png": Bun.file("./128.png"),
+    "/180.png": Bun.file("./180.png"),
+    "/og.png": Bun.file("./og.png"),
+
 
     // 4. Serve Index (Fallback for SPA)
     "/*": Bun.file("./index.html")

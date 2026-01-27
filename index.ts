@@ -13,7 +13,7 @@ const server = serve({
         headers: { 'Content-Type': 'application/javascript' }
       });
     },
-    "/pdf.worker.mjs": Bun.file("./node_modules/pdfjs-dist/build/pdf.worker.mjs"),
+    "/pdf.worker.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.mjs"),
 
     // Standard routes (for normal requests)
     "/manifest.json": Bun.file("./manifest.json"),

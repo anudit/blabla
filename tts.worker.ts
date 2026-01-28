@@ -112,10 +112,10 @@ self.addEventListener("message", async (e: MessageEvent<WorkerMessage>) => {
       // 3. OR RAM is < 8GB (Low spec desktop/laptop).
       const forceWasm = !hasWebGPU || isMobile || memory < 8;
 
-      const device = forceWasm ? "wasm" : "webgpu";
+      const device = "webgpu";
 
       // q8 is standard for wasm. fp32 is standard for webgpu.
-      const dtype = device === "wasm" ? "q8" : "fp32";
+      const dtype = forceWasm ? "q4" : "fp32";
 
       console.log(`[Worker] Init: Mobile=${isMobile}, RAM=${memory}GB, WebGPU=${hasWebGPU}`);
       console.log(`[Worker] Selected: Device=${device}, Dtype=${dtype}`);

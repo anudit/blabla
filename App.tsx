@@ -6,6 +6,13 @@ import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, 
 // Set worker source
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
 
+const VOICES = [
+  { value: 'af_bella', label: 'Bella (Eng F)' },
+  { value: 'af_heart', label: 'Heart (Eng F)' },
+  { value: 'am_fenrir', label: 'Fenrir (Eng M)' },
+  { value: 'am_puck', label: 'Puck (Eng M)' },
+];
+
 const styles = {
   container: {
     minHeight: '100vh',
@@ -251,6 +258,63 @@ const styles = {
   }
 };
 
+const PDFPage = React.memo(({ data, highlightedLineIds, onLineClick }: any) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const renderTaskRef = useRef<any>(null);
+
+  useEffect(() => {
+    const renderPage = async () => {
+      if (canvasRef.current && data) {
+        if (renderTaskRef.current) {
+          try { await renderTaskRef.current.cancel(); } catch (e) {}
+        }
+        const ctx = canvasRef.current.getContext('2d');
+        if (!ctx) return;
+        const renderTask = data.page.render({ canvasContext: ctx, viewport: data.viewport });
+        renderTaskRef.current = renderTask;
+        try {
+          await renderTask.promise;
+        } catch (e: any) {
+          if (e.name !== 'RenderingCancelledException') console.error("Render error:", e);
+        }
+      }
+    };
+    renderPage();
+    return () => { if (renderTaskRef.current) renderTaskRef.current.cancel(); };
+  }, [data]);
+
+  return (
+    <div style={{ ...styles.pageContainer, maxWidth: data.viewport.width }}>
+      <canvas ref={canvasRef} width={data.viewport.width} height={data.viewport.height} style={styles.canvas} />
+      <div style={styles.overlay}>
+        {data.lines.map((line: any) => (
+          <div
+            key={line.id}
+            id={`line-${line.id}`}
+            onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
+            style={{
+              ...styles.lineBase,
+              ...(highlightedLineIds.includes(line.id) ? styles.lineActive : {}),
+              left: line.left, top: line.top, width: line.width, height: line.height,
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+});
+
+function findTitleInToc(toc: any[], href: string): string | null {
+  for (const entry of toc) {
+    if (href.includes(entry.href)) return entry.label;
+    if (entry.subitems) {
+      const sub = findTitleInToc(entry.subitems, href);
+      if (sub) return sub;
+    }
+  }
+  return null;
+}
+
 export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
@@ -269,8 +333,6 @@ export default function App() {
 
   const [ttsStatus, setTtsStatus] = useState("Init");
   const [isModelReady, setIsModelReady] = useState(false);
-  const [cachedCount, setCachedCount] = useState(0);
-  const [pendingCount, setPendingCount] = useState(0);
   const [playbackState, setPlaybackState] = useState("Idle");
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
@@ -288,13 +350,6 @@ export default function App() {
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-
-  const voices = [
-    { value: 'af_bella', label: 'Bella (Eng F)' },
-    { value: 'af_heart', label: 'Heart (Eng F)' },
-    { value: 'am_fenrir', label: 'Fenrir (Eng M)' },
-    { value: 'am_puck', label: 'Puck (Eng M)' },
-  ];
 
   useEffect(() => {
     console.log("[App] Mounting...");
@@ -417,6 +472,7 @@ export default function App() {
   };
 
   const stopAllAudio = () => {
+    playbackSessionId.current += 1;
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
       currentSource.current.disconnect();
@@ -432,11 +488,6 @@ export default function App() {
     isWaitingForAudio.current = false;
   };
 
-  const updateBufferUI = () => {
-    setCachedCount(audioCache.current.size);
-    setPendingCount(pendingFetches.current.size);
-  };
-
   const processSentenceAudio = async (index: number, sessionId: number, voice: string): Promise<AudioBuffer | null> => {
     if (usingFallback.current) return null;
     if (index >= sentences.length) return null;
@@ -447,14 +498,12 @@ export default function App() {
     if (!text.trim()) return null;
 
     pendingFetches.current.add(index);
-    updateBufferUI();
     try {
       const buffer = await generateAudioInWorker(text, index, voice);
       if (!buffer) return null;
 
       if (sessionId === playbackSessionId.current) {
         audioCache.current.set(index, buffer);
-        updateBufferUI();
       }
       return buffer;
     } catch (err) {
@@ -462,7 +511,6 @@ export default function App() {
       return null;
     } finally {
       pendingFetches.current.delete(index);
-      updateBufferUI();
     }
   };
 
@@ -567,7 +615,6 @@ export default function App() {
     audioCache.current.clear();
     pendingFetches.current.clear();
     audioResolvers.current.clear();
-    updateBufferUI();
     isWaitingForAudio.current = false;
 
     let targetSentenceIndex = -1;
@@ -630,7 +677,6 @@ export default function App() {
     audioCache.current.clear();
     pendingFetches.current.clear();
     audioResolvers.current.clear();
-    updateBufferUI();
     setPlaybackState("Idle");
     isWaitingForAudio.current = false;
     setIsMenuOpen(false);
@@ -644,7 +690,6 @@ export default function App() {
     audioCache.current.clear();
     pendingFetches.current.clear();
     audioResolvers.current.clear();
-    updateBufferUI();
     if (isPlaying) {
       stopAllAudio();
       setPlaybackState("Starting");
@@ -731,16 +776,6 @@ export default function App() {
           const doc = await book.load(item.href);
           if (!doc) continue;
           let chapterTitle = null;
-          const findTitleInToc = (toc: any[], href: string): string | null => {
-            for (const entry of toc) {
-              if (href.includes(entry.href)) return entry.label;
-              if (entry.subitems) {
-                const sub = findTitleInToc(entry.subitems, href);
-                if (sub) return sub;
-              }
-            }
-            return null;
-          };
           if (navigation && (navigation as any).toc) {
             chapterTitle = findTitleInToc((navigation as any).toc, item.href);
           }
@@ -791,7 +826,7 @@ export default function App() {
         const viewport = page.getViewport({ scale });
         const textContent = await page.getTextContent();
         const lines = processTextContent(textContent, viewport, scale, globalLineList.length);
-        globalLineList = [...globalLineList, ...lines];
+        globalLineList.push(...lines);
         newPages.push({ page, viewport, lines, pageNumber: i });
       }
 
@@ -884,81 +919,6 @@ export default function App() {
         startPos: 0
       };
     });
-  };
-
-  const PDFPage = ({ data, highlightedLineIds, onLineClick }: any) => {
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const renderTaskRef = useRef<any>(null);
-
-    useEffect(() => {
-      const renderPage = async () => {
-        if (canvasRef.current && data) {
-          // Cleanup previous render task if it exists
-          if (renderTaskRef.current) {
-             try {
-               await renderTaskRef.current.cancel();
-             } catch (e) {
-               // Ignore cancellation errors
-             }
-          }
-
-          const ctx = canvasRef.current.getContext('2d');
-          if (!ctx) return;
-
-          const renderTask = data.page.render({
-            canvasContext: ctx,
-            viewport: data.viewport
-          });
-
-          renderTaskRef.current = renderTask;
-
-          try {
-            await renderTask.promise;
-          } catch (e: any) {
-            if (e.name !== 'RenderingCancelledException') {
-              console.error("Render error:", e);
-            }
-          }
-        }
-      };
-
-      renderPage();
-
-      return () => {
-        if (renderTaskRef.current) {
-          renderTaskRef.current.cancel();
-        }
-      };
-    }, [data]);
-
-    // We use data.viewport.width/height to set the aspect ratio, but CSS makes it responsive
-    return (
-      <div style={{ ...styles.pageContainer, maxWidth: data.viewport.width }}>
-        <canvas
-          ref={canvasRef}
-          width={data.viewport.width}
-          height={data.viewport.height}
-          style={styles.canvas}
-        />
-        <div style={styles.overlay}>
-          {data.lines.map((line: any) => (
-            <div
-              key={line.id}
-              id={`line-${line.id}`}
-              onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
-              style={{
-                ...styles.lineBase,
-                ...(highlightedLineIds.includes(line.id) ? styles.lineActive : {}),
-                left: line.left,
-                top: line.top,
-                width: line.width,
-                height: line.height,
-              }}
-            />
-          ))}
-        </div>
-      </div>
-    );
   };
 
   const getStatusBadgeStyle = () => {
@@ -1119,7 +1079,7 @@ export default function App() {
                 disabled={usingFallback.current || !isModelReady}
                 style={{...styles.select, ...(usingFallback.current || !isModelReady ? styles.buttonDisabled : {})}}
               >
-                {voices.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
+                {VOICES.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
               </select>
               <ChevronDown size={14} style={{position:'absolute', right:'10px', top:'12px', pointerEvents:'none', color:'#9ca3af'}}/>
             </div>

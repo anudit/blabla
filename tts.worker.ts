@@ -6,8 +6,10 @@ const DB_NAME = 'KokoroModelCache';
 const DB_VERSION = 1;
 const STORE_NAME = 'modelFiles';
 
-async function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+let _dbPromise: Promise<IDBDatabase> | null = null;
+function openDatabase(): Promise<IDBDatabase> {
+  if (_dbPromise) return _dbPromise;
+  _dbPromise = new Promise((resolve, reject) => {
     const request = self.indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
@@ -16,8 +18,9 @@ async function openDatabase(): Promise<IDBDatabase> {
       }
     };
     request.onsuccess = (event) => resolve((event.target as IDBOpenDBRequest).result);
-    request.onerror = (event) => reject((event.target as IDBOpenDBRequest).error);
+    request.onerror = (event) => { _dbPromise = null; reject((event.target as IDBOpenDBRequest).error); };
   });
+  return _dbPromise;
 }
 
 const originalFetch = self.fetch.bind(self);
@@ -141,7 +144,7 @@ self.addEventListener("message", async (e: MessageEvent<WorkerMessage>) => {
         audio: audio.audio,
         text,
         lineIndex
-      });
+      }, [audio.audio.buffer]);
     }
   } catch (err: any) {
     console.error(err);

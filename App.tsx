@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown } from 'lucide-react';
+import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard } from 'lucide-react';
 
 // Set worker source
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
@@ -262,8 +262,10 @@ export default function App() {
   const [isDragOver, setIsDragOver] = useState(false);
 
   // File type state
-  const [fileType, setFileType] = useState<'pdf' | 'epub' | null>(null);
+  const [fileType, setFileType] = useState<'pdf' | 'epub' | 'text' | null>(null);
   const [epubContent, setEpubContent] = useState<any[]>([]);
+  const [showTextInput, setShowTextInput] = useState(false);
+  const [textInputValue, setTextInputValue] = useState('');
 
   const [ttsStatus, setTtsStatus] = useState("Init");
   const [isModelReady, setIsModelReady] = useState(false);
@@ -346,6 +348,26 @@ export default function App() {
       playCurrentSentence();
     }
   }, [isPlaying, currentSentenceIndex]);
+
+  useEffect(() => {
+    const handleKeyDown = async (e: KeyboardEvent) => {
+      const isPaste = (e.metaKey || e.ctrlKey) && e.key === 'v';
+      if (!isPaste || sentences.length > 0) return;
+      // Don't intercept if focus is inside a textarea/input
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+      e.preventDefault();
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text.trim()) loadText(text);
+        else setShowTextInput(true);
+      } catch {
+        setShowTextInput(true);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [sentences.length]);
 
   const triggerFallback = () => {
     if (usingFallback.current) return;
@@ -612,6 +634,8 @@ export default function App() {
     setPlaybackState("Idle");
     isWaitingForAudio.current = false;
     setIsMenuOpen(false);
+    setShowTextInput(false);
+    setTextInputValue('');
   };
 
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -650,6 +674,43 @@ export default function App() {
       } else {
         alert("Please drop a valid PDF or EPUB file");
       }
+    }
+  };
+
+  const loadText = (text: string) => {
+    const newSentences: any[] = [];
+    const contentData: any[] = [];
+    let globalLineIdCounter = 0;
+    const sentenceRegex = /[^.!?]+[.!?]/g;
+    let match;
+    while ((match = sentenceRegex.exec(text)) !== null) {
+      const sText = match[0].trim().replace(/\s+/g, ' ');
+      if (sText.length > 0) {
+        const lineId = globalLineIdCounter++;
+        newSentences.push({ text: sText, lines: [lineId] });
+        contentData.push({ type: 'text', id: lineId, text: sText });
+      }
+    }
+    if (newSentences.length === 0) return;
+    setFileType('text');
+    setSentences(newSentences);
+    setEpubContent(contentData);
+    setShowTextInput(false);
+    setTextInputValue('');
+  };
+
+  const handleClipboardPaste = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text.trim()) {
+        loadText(text);
+      } else {
+        setShowTextInput(true);
+      }
+    } catch {
+      // Permission denied or API unavailable — fall back to textarea
+      setShowTextInput(true);
     }
   };
 
@@ -931,6 +992,43 @@ export default function App() {
             accept="application/pdf,.epub"
             style={{ display: 'none' }}
           />
+          <div style={{ width: '100%', borderTop: '1px solid #e5e7eb', margin: '1rem 0' }} />
+          <button
+            onClick={handleClipboardPaste}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
+              padding: '0.5rem 1rem', fontSize: '0.875rem', fontWeight: 600,
+              backgroundColor: '#eff6ff', color: '#2563eb', border: '1px solid #bfdbfe',
+              borderRadius: '0.375rem', cursor: 'pointer',
+            }}
+          >
+            <Clipboard size={16} /> Paste from Clipboard
+          </button>
+          {showTextInput && (
+            <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', marginTop: '1rem' }}>
+              <textarea
+                value={textInputValue}
+                onChange={(e) => setTextInputValue(e.target.value)}
+                placeholder="Paste your text here..."
+                style={{
+                  width: '100%', minHeight: '100px', padding: '0.5rem',
+                  borderRadius: '0.375rem', border: '1px solid #d1d5db',
+                  fontSize: '0.875rem', color: '#374151', boxSizing: 'border-box' as const,
+                  resize: 'vertical',
+                }}
+              />
+              <button
+                onClick={(e) => { e.stopPropagation(); if (textInputValue.trim()) loadText(textInputValue); }}
+                style={{
+                  marginTop: '0.5rem', width: '100%', padding: '0.5rem',
+                  fontSize: '0.875rem', fontWeight: 600, backgroundColor: '#2563eb',
+                  color: 'white', border: 'none', borderRadius: '0.375rem', cursor: 'pointer',
+                }}
+              >
+                Start Reading
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div style={styles.viewer}>
@@ -938,7 +1036,7 @@ export default function App() {
             <PDFPage key={pageData.pageNumber} data={pageData} highlightedLineIds={highlightedLineIds} onLineClick={handleLineClick} />
           ))}
 
-          {fileType === 'epub' && (
+          {(fileType === 'epub' || fileType === 'text') && (
             <div style={styles.epubContainer}>
               {epubContent.map((item) => {
                 if (item.type === 'header') return <div key={item.id} style={{fontSize: '1.5rem', fontWeight: 'bold', margin: '2rem 0 1rem 0', color: '#1e3a8a'}}>{item.text}</div>;

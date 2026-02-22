@@ -26,16 +26,19 @@ const styles = {
   },
   bottomBar: {
     position: 'fixed' as const,
-    bottom: 0,
-    left: 0,
-    right: 0,
+    bottom: '1.5rem',
+    left: '50%',
+    transform: 'translateX(-50%)',
     backgroundColor: '#fff',
-    padding: '0.75rem 1rem',
+    padding: '0.4rem 0.75rem',
     display: 'flex',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    boxShadow: '0 -4px 6px -1px rgba(0,0,0,0.05)',
+    gap: '0.4rem',
+    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
     zIndex: 50,
+    borderRadius: '999px',
+    border: '1px solid #e5e7eb',
+    whiteSpace: 'nowrap' as const,
   },
   logoGroup: {
     display: 'flex',
@@ -439,6 +442,29 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [sentences.length]);
 
+  useEffect(() => {
+    const handleMediaKey = (e: KeyboardEvent) => {
+      if (e.key === 'MediaPlayPause') {
+        e.preventDefault();
+        togglePlay();
+      }
+    };
+    window.addEventListener('keydown', handleMediaKey);
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.setActionHandler('play', () => togglePlay());
+      navigator.mediaSession.setActionHandler('pause', () => togglePlay());
+    }
+    return () => {
+      window.removeEventListener('keydown', handleMediaKey);
+      if ('mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.setActionHandler('play', null);
+          navigator.mediaSession.setActionHandler('pause', null);
+        } catch (e) {}
+      }
+    };
+  }, [isPlaying, sentences.length, isModelReady, currentSentenceIndex]);
+
   const triggerFallback = () => {
     if (usingFallback.current) return;
     usingFallback.current = true;
@@ -540,6 +566,11 @@ export default function App() {
     const currentSession = playbackSessionId.current;
     const unit = sentences[currentSentenceIndex];
     const text = unit.text;
+
+    if (text.trim().length <= 1) {
+      advanceSentence();
+      return;
+    }
 
     setHighlightedLineIds(unit.lines);
 
@@ -1063,39 +1094,34 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Bar: Logo Left, Controls Right */}
+      {/* Bottom Bar: Floating Centered Pill */}
       <div style={styles.bottomBar}>
-        <div style={styles.logoGroup}>
-          <img src="./logo.png" style={{width: "36px", height: "36px"}} alt="logo" />
-          <h1 style={styles.title}>BlaBla</h1>
-        </div>
+        <img src="./logo.png" style={{width: "32px", height: "32px"}} alt="logo" />
 
-        <div style={styles.controlsGroup}>
-          <button
-            onClick={() => setIsSpeedMenuOpen(!isSpeedMenuOpen)}
-            style={styles.speedButton}
-          >
-            {playbackSpeed}x
-          </button>
+        <button
+          onClick={() => setIsSpeedMenuOpen(!isSpeedMenuOpen)}
+          style={styles.speedButton}
+        >
+          {playbackSpeed}x
+        </button>
 
-          <button
-            onClick={togglePlay}
-            disabled={sentences.length === 0 || !isModelReady}
-            style={{
-              ...styles.playButton,
-              ...(sentences.length === 0 || !isModelReady ? styles.buttonDisabled : {})
-            }}
-          >
-            {isPlaying ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" style={{marginLeft:'2px'}} />}
-          </button>
+        <button
+          onClick={togglePlay}
+          disabled={sentences.length === 0 || !isModelReady}
+          style={{
+            ...styles.playButton,
+            ...(sentences.length === 0 || !isModelReady ? styles.buttonDisabled : {})
+          }}
+        >
+          {isPlaying ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" style={{marginLeft:'2px'}} />}
+        </button>
 
-          <button onClick={() => setIsMenuOpen(!isMenuOpen)} style={styles.iconButton}>
-            <Menu size={24} />
-          </button>
-        </div>
+        <button onClick={() => setIsMenuOpen(!isMenuOpen)} style={styles.iconButton}>
+          <Menu size={24} />
+        </button>
 
         {isSpeedMenuOpen && (
-          <div style={{...styles.menuPopover, width: '100px', right: '4rem', bottom: '3.5rem'}}>
+          <div style={{...styles.menuPopover, width: '100px', right: '0', bottom: 'calc(100% + 10px)'}}>
             {[1.0, 1.25, 1.5, 2.0].map(speed => (
               <button
                 key={speed}

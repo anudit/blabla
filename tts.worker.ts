@@ -118,7 +118,7 @@ self.addEventListener("message", async (e: MessageEvent<WorkerMessage>) => {
       const device = "webgpu";
 
       // q8 is standard for wasm. fp32 is standard for webgpu.
-      const dtype = forceWasm ? "q4" : "fp32";
+      const dtype =  "fp32";
 
       console.log(`[Worker] Init: Mobile=${isMobile}, RAM=${memory}GB, WebGPU=${hasWebGPU}`);
       console.log(`[Worker] Selected: Device=${device}, Dtype=${dtype}`);

@@ -315,6 +315,21 @@ function findTitleInToc(toc: any[], href: string): string | null {
   return null;
 }
 
+function extractSentences(text: string): string[] {
+  const sentences: string[] = [];
+  const sentenceRegex = /[^.!?]+[.!?]+/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = sentenceRegex.exec(text)) !== null) {
+    const sText = match[0].trim().replace(/\s+/g, ' ');
+    if (sText.length > 0) sentences.push(sText);
+    lastIndex = match.index + match[0].length;
+  }
+  const remaining = text.slice(lastIndex).trim().replace(/\s+/g, ' ');
+  if (remaining.length > 0) sentences.push(remaining);
+  return sentences;
+}
+
 export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
@@ -726,16 +741,25 @@ export default function App() {
     const newSentences: any[] = [];
     const contentData: any[] = [];
     let globalLineIdCounter = 0;
-    const sentenceRegex = /[^.!?]+[.!?]/g;
-    let match;
-    while ((match = sentenceRegex.exec(text)) !== null) {
-      const sText = match[0].trim().replace(/\s+/g, ' ');
-      if (sText.length > 0) {
+
+    const paragraphs = text
+      .split(/\n{2,}/)
+      .map(p => p.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim())
+      .filter(p => p.length > 0);
+
+    for (const paraText of paragraphs) {
+      const paraId = `para-${globalLineIdCounter}`;
+      const paraSentences: any[] = [];
+      for (const sText of extractSentences(paraText)) {
         const lineId = globalLineIdCounter++;
         newSentences.push({ text: sText, lines: [lineId] });
-        contentData.push({ type: 'text', id: lineId, text: sText });
+        paraSentences.push({ id: lineId, text: sText });
+      }
+      if (paraSentences.length > 0) {
+        contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
       }
     }
+
     if (newSentences.length === 0) return;
     setFileType('text');
     setSentences(newSentences);
@@ -788,18 +812,25 @@ export default function App() {
             contentData.push({ type: 'header', id: `header-${globalLineIdCounter}`, text: chapterTitle });
           }
 
-          const text = doc.body.innerText;
-          if (!text || !text.trim()) continue;
+          // Query block-level elements to preserve paragraph structure
+          const blockEls = Array.from(doc.querySelectorAll('p, li, blockquote'));
+          const elementsToProcess: Element[] = blockEls.length > 0 ? blockEls : [doc.body];
 
-          const sentenceRegex = /[^.!?]+[.!?]/g;
-          let match;
-          while ((match = sentenceRegex.exec(text)) !== null) {
-            const sText = match[0].trim().replace(/\s+/g, ' ');
-            if (chapterTitle && sText === chapterTitle) continue;
-            if (sText.length > 0) {
+          for (const el of elementsToProcess) {
+            const rawText = (el as HTMLElement).innerText || el.textContent || '';
+            const cleanText = rawText.trim().replace(/\s+/g, ' ');
+            if (!cleanText) continue;
+
+            const paraId = `para-${globalLineIdCounter}`;
+            const paraSentences: any[] = [];
+            for (const sText of extractSentences(cleanText)) {
+              if (chapterTitle && sText.trim() === chapterTitle) continue;
               const lineId = globalLineIdCounter++;
               newSentences.push({ text: sText, lines: [lineId] });
-              contentData.push({ type: 'text', id: lineId, text: sText });
+              paraSentences.push({ id: lineId, text: sText });
+            }
+            if (paraSentences.length > 0) {
+              contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
             }
           }
         } catch (err) { console.error("Error loading chapter", err); }
@@ -999,13 +1030,33 @@ export default function App() {
           {(fileType === 'epub' || fileType === 'text') && (
             <div style={styles.epubContainer}>
               {epubContent.map((item) => {
-                if (item.type === 'header') return <div key={item.id} style={{fontSize: '1.5rem', fontWeight: 'bold', margin: '2rem 0 1rem 0', color: '#1e3a8a'}}>{item.text}</div>;
-                const isActive = highlightedLineIds.includes(item.id);
-                return (
-                  <span key={item.id} id={`line-${item.id}`} onClick={() => handleLineClick(item.id)} style={{...styles.epubSentence, ...(isActive ? styles.epubHighlight : {})}}>
-                      {item.text}{' '}
-                  </span>
-                )
+                if (item.type === 'header') {
+                  return (
+                    <div key={item.id} style={{ fontSize: '1.5rem', fontWeight: 'bold', margin: '2rem 0 1rem 0', color: '#1e3a8a' }}>
+                      {item.text}
+                    </div>
+                  );
+                }
+                if (item.type === 'paragraph') {
+                  return (
+                    <p key={item.id} style={{ margin: '0 0 1em 0', padding: 0 }}>
+                      {item.sentences.map((sentence: any) => {
+                        const isActive = highlightedLineIds.includes(sentence.id);
+                        return (
+                          <span
+                            key={sentence.id}
+                            id={`line-${sentence.id}`}
+                            onClick={() => handleLineClick(sentence.id)}
+                            style={{ ...styles.epubSentence, ...(isActive ? styles.epubHighlight : {}) }}
+                          >
+                            {sentence.text}{' '}
+                          </span>
+                        );
+                      })}
+                    </p>
+                  );
+                }
+                return null;
               })}
             </div>
           )}

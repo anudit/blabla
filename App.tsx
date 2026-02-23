@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard } from 'lucide-react';
+import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon } from 'lucide-react';
 
 // Set worker source
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
@@ -13,255 +13,109 @@ const VOICES = [
   { value: 'am_puck', label: 'Puck (Eng M)' },
 ];
 
-const styles = {
-  container: {
-    minHeight: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    backgroundColor: '#f9fafb',
-    fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
-    color: '#333',
-    paddingTop: '1rem',
-  },
-  bottomBar: {
-    position: 'fixed' as const,
-    bottom: '1.5rem',
-    left: '50%',
-    transform: 'translateX(-50%)',
-    backgroundColor: '#fff',
-    padding: '0.4rem 0.75rem',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '0.4rem',
-    boxShadow: '0 4px 20px rgba(0,0,0,0.15)',
-    zIndex: 50,
-    borderRadius: '999px',
-    border: '1px solid #e5e7eb',
-    whiteSpace: 'nowrap' as const,
-  },
-  logoGroup: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '0.5rem',
-  },
-  title: {
-    fontSize: '1.1rem',
-    fontWeight: '800' as const,
-    color: '#2563eb',
-    margin: 0,
-    letterSpacing: '-0.025em',
-  },
-  controlsGroup: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '0.75rem',
-  },
-  statusBadgeMenu: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '0.5rem',
-    fontSize: '0.75rem',
-    padding: '0.5rem',
-    borderRadius: '0.375rem',
-    fontWeight: '600' as const,
-    marginBottom: '0.5rem',
-    width: '100%',
-  },
-  statusLoading: { color: '#2563eb', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe' },
-  statusReady: { color: '#059669', backgroundColor: '#d1fae5', border: '1px solid #6ee7b7' },
-  statusFallback: { color: '#d97706', backgroundColor: '#fef3c7', border: '1px solid #fde68a' },
-  statItem: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    fontSize: '0.8rem',
-    color: '#6b7280',
-    padding: '0.5rem 0.25rem',
-    borderBottom: '1px solid #f3f4f6',
-  },
-  statLabel: { fontSize: '0.75rem', color: '#9ca3af' },
-  statValue: { fontSize: '0.8rem', fontWeight: '600' as const, color: '#374151', fontFamily: 'monospace' },
-  playButton: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '42px',
-    height: '42px',
-    borderRadius: '50%',
-    backgroundColor: '#2563eb',
-    color: 'white',
-    border: 'none',
-    cursor: 'pointer',
-    boxShadow: '0 2px 4px rgba(37, 99, 235, 0.3)',
-    transition: 'transform 0.1s',
-  },
-  iconButton: {
-    padding: '0.5rem',
-    borderRadius: '0.375rem',
-    border: 'none',
-    cursor: 'pointer',
-    backgroundColor: 'transparent',
-    color: '#4b5563',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  speedButton: {
-    fontSize: '0.8rem',
-    fontWeight: '700',
-    color: '#4b5563',
-    backgroundColor: '#f3f4f6',
-    padding: '0.25rem 0.5rem',
-    borderRadius: '0.25rem',
-    border: 'none',
-    minWidth: '2.5rem',
-  },
-  menuPopover: {
-    position: 'absolute' as const,
-    bottom: 'calc(100% + 10px)',
-    right: '1rem',
-    width: '260px',
-    backgroundColor: '#fff',
-    padding: '1rem',
-    borderRadius: '0.75rem',
-    boxShadow: '0 10px 25px -5px rgba(0,0,0,0.1), 0 8px 10px -6px rgba(0,0,0,0.1)',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: '0.5rem',
-    border: '1px solid #e5e7eb',
-    zIndex: 100,
-  },
-  selectLabel: {
-    fontSize: '0.75rem',
-    fontWeight: '600',
-    color: '#6b7280',
-    marginTop: '0.5rem',
-    marginBottom: '0.25rem',
-  },
-  select: {
-    width: '100%',
-    padding: '0.5rem',
-    borderRadius: '0.375rem',
-    border: '1px solid #d1d5db',
-    backgroundColor: '#f9fafb',
-    color: '#374151',
-    fontSize: '0.875rem',
-    cursor: 'pointer',
-  },
-  testButton: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '0.5rem',
-    padding: '0.5rem',
-    fontSize: '0.875rem',
-    fontWeight: '600' as const,
-    backgroundColor: '#eff6ff',
-    color: '#2563eb',
-    border: '1px solid #bfdbfe',
-    borderRadius: '0.375rem',
-    cursor: 'pointer',
-    marginTop: '0.5rem',
-  },
-  resetButton: {
-    padding: '0.5rem',
-    fontSize: '0.875rem',
-    backgroundColor: '#f3f4f6',
-    color: '#ef4444',
-    border: 'none',
-    borderRadius: '0.375rem',
-    cursor: 'pointer',
-    width: '100%',
-    marginTop: '0.5rem',
-  },
-  buttonDisabled: { opacity: 0.5, cursor: 'not-allowed', filter: 'grayscale(1)' },
-  dropZone: {
-    marginTop: '2rem',
-    width: '90%',
-    maxWidth: '42rem',
-    minHeight: '200px',
-    border: '3px dashed #d1d5db',
-    borderRadius: '1rem',
-    display: 'flex',
-    flexDirection: 'column' as const,
-    alignItems: 'center',
-    justifyContent: 'center',
-    cursor: 'pointer',
-    backgroundColor: '#fff',
-    transition: 'all 0.3s ease',
-    padding: '1rem',
-    textAlign: 'center' as const,
-  },
-  dropZoneHover: { borderColor: '#3b82f6', backgroundColor: '#eff6ff', transform: 'scale(1.01)' },
-  viewer: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    alignItems: 'center',
-    width: '100%',
-    maxWidth: '48rem', // Constrain max width for desktop reading comfort
-    padding: '1rem',
-    paddingBottom: '6rem',
-    boxSizing: 'border-box' as const,
-  },
-  pageContainer: {
-    position: 'relative' as const,
-    marginBottom: '1rem',
-    boxShadow: '0 2px 4px -1px rgba(0,0,0,0.1)',
-    backgroundColor: '#fff',
-    width: '100%', // Responsive width
-    height: 'auto',
-  },
-  canvas: {
-    display: 'block',
-    width: '100%', // Scale canvas to container
-    height: 'auto',
-  },
-  overlay: {
-    position: 'absolute' as const,
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    zIndex: 10,
-    pointerEvents: 'none' as const, // Let clicks pass through to container if needed, but we handle line clicks on divs
-  },
-  lineBase: {
-    position: 'absolute' as const,
-    cursor: 'pointer',
-    borderRadius: '2px',
-    backgroundColor: 'transparent',
-    transition: 'background-color 0.2s ease',
-    pointerEvents: 'auto' as const, // Re-enable pointer events for lines
-  },
-  lineActive: {
-    backgroundColor: 'rgba(255, 255, 0, 0.25)', // Softer yellow
-    boxShadow: '0 0 0 1px rgba(220, 220, 0, 0.5)',
-    mixBlendMode: 'multiply' as const,
-    zIndex: 20,
-  },
-  epubContainer: {
-    width: '100%',
-    padding: '0',
-    lineHeight: '1.6',
-    fontSize: '1.1rem',
-    textAlign: 'left' as const,
-    backgroundColor: 'white',
-    borderRadius: '8px',
-  },
-  epubSentence: {
-    cursor: 'pointer',
-    padding: '2px 0',
-    transition: 'background-color 0.2s',
-    borderRadius: '4px',
-  },
-  epubHighlight: {
-    backgroundColor: '#fef08a',
-  }
+// ── Fixed yellow highlight (same on both themes) ───────────────────────
+const LINE_ACTIVE_STYLE = {
+  backgroundColor: 'rgba(250, 204, 21, 0.45)',
+  boxShadow: '0 0 0 1px rgba(210, 170, 0, 0.4)',
+  zIndex: 20,
 };
 
-const PDFPage = React.memo(({ data, highlightedLineIds, onLineClick }: any) => {
+const EPUB_HIGHLIGHT_STYLE = {
+  backgroundColor: 'rgba(250, 204, 21, 0.45)',
+};
+
+// ── Static styles (layout / structure, no theming) ─────────────────────
+const staticStyles = {
+  canvas: { display: 'block', width: '100%', height: 'auto' } as React.CSSProperties,
+  overlay: {
+    position: 'absolute' as const, top: 0, left: 0, right: 0, bottom: 0,
+    zIndex: 10, pointerEvents: 'none' as const,
+  },
+  lineBase: {
+    position: 'absolute' as const, cursor: 'pointer', borderRadius: '2px',
+    backgroundColor: 'transparent', transition: 'background-color 0.2s ease',
+    pointerEvents: 'auto' as const,
+  },
+  buttonDisabled: { opacity: 0.5, cursor: 'not-allowed' as const, filter: 'grayscale(1)' },
+  playButton: {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '42px', height: '42px', borderRadius: '50%',
+    backgroundColor: '#2563eb', color: 'white', border: 'none', cursor: 'pointer' as const,
+    boxShadow: '0 2px 4px rgba(37,99,235,0.3)', transition: 'transform 0.1s',
+    flexShrink: 0,
+  },
+  statusLoading: { color: '#2563eb', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe' },
+  statusReady:   { color: '#059669', backgroundColor: '#d1fae5', border: '1px solid #6ee7b7' },
+  statusFallback:{ color: '#d97706', backgroundColor: '#fef3c7', border: '1px solid #fde68a' },
+};
+
+// ── Theme tokens ───────────────────────────────────────────────────────
+//   light → muted warm-paper tones
+//   dark  → muted dark tones
+//   bar always uses the opposite side
+const THEMES = {
+  light: {
+    // Content area
+    bg:            '#f5efe3',
+    text:          '#3a3028',
+    textMuted:     '#7a6e60',
+    dropBg:        '#faf6ef',
+    dropBorder:    '#c4b8a0',
+    epubBg:        '#f5efe3',
+    headerColor:   '#2c2218',
+    menuBg:        '#f0ebe0',
+    menuBorder:    '#d0c4b0',
+    selectBg:      '#faf6ef',
+    selectBorder:  '#c4b8a0',
+    inputBg:       '#faf6ef',
+    inputBorder:   '#c4b8a0',
+    statBorder:    '#e0d8c8',
+    resetBtnBg:    '#e8e0d0',
+    testBtnBg:     '#e8f0ff',
+    testBtnColor:  '#2563eb',
+    testBtnBorder: '#bfdbfe',
+    pageShadow:    '0 2px 8px rgba(100,80,60,0.12)',
+    speedHighlight:'#d8e8f4',
+    // Bottom bar (opposite = dark)
+    barBg:         '#2a2015',
+    barBorder:     '#1a1510',
+    barIconColor:  '#b8ac9c',
+    barSpeedBg:    '#3a3020',
+    barSpeedColor: '#e8ddd0',
+  },
+  dark: {
+    // Content area
+    bg:            '#1a1917',
+    text:          '#c8bfb0',
+    textMuted:     '#8a8070',
+    dropBg:        '#242018',
+    dropBorder:    '#4a4235',
+    epubBg:        '#1a1917',
+    headerColor:   '#e8ddd0',
+    menuBg:        '#242018',
+    menuBorder:    '#3a3428',
+    selectBg:      '#2a2520',
+    selectBorder:  '#4a4235',
+    inputBg:       '#2a2520',
+    inputBorder:   '#4a4235',
+    statBorder:    '#2e2a22',
+    resetBtnBg:    '#3a3428',
+    testBtnBg:     '#1e2d45',
+    testBtnColor:  '#93c5fd',
+    testBtnBorder: '#1d4ed8',
+    pageShadow:    '0 2px 8px rgba(0,0,0,0.5)',
+    speedHighlight:'#2a3a50',
+    // Bottom bar (opposite = light cream)
+    barBg:         '#ede8df',
+    barBorder:     '#d0c8b8',
+    barIconColor:  '#5a4f44',
+    barSpeedBg:    '#ddd8cf',
+    barSpeedColor: '#2a2015',
+  },
+};
+
+// ── PDFPage (receives pageContainerStyle as prop for theming) ──────────
+const PDFPage = React.memo(({ data, highlightedLineIds, onLineClick, pageContainerStyle }: any) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
 
@@ -287,17 +141,17 @@ const PDFPage = React.memo(({ data, highlightedLineIds, onLineClick }: any) => {
   }, [data]);
 
   return (
-    <div style={{ ...styles.pageContainer, maxWidth: data.viewport.width }}>
-      <canvas ref={canvasRef} width={data.viewport.width} height={data.viewport.height} style={styles.canvas} />
-      <div style={styles.overlay}>
+    <div style={{ ...pageContainerStyle, maxWidth: data.viewport.width }}>
+      <canvas ref={canvasRef} width={data.viewport.width} height={data.viewport.height} style={staticStyles.canvas} />
+      <div style={staticStyles.overlay}>
         {data.lines.map((line: any) => (
           <div
             key={line.id}
             id={`line-${line.id}`}
             onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
             style={{
-              ...styles.lineBase,
-              ...(highlightedLineIds.includes(line.id) ? styles.lineActive : {}),
+              ...staticStyles.lineBase,
+              ...(highlightedLineIds.includes(line.id) ? LINE_ACTIVE_STYLE : {}),
               left: line.left, top: line.top, width: line.width, height: line.height,
             }}
           />
@@ -343,6 +197,9 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
 
+  // Theme
+  const [isDarkMode, setIsDarkMode] = useState(false);
+
   // File type state
   const [fileType, setFileType] = useState<'pdf' | 'epub' | 'text' | null>(null);
   const [epubContent, setEpubContent] = useState<any[]>([]);
@@ -368,6 +225,199 @@ export default function App() {
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+
+  // ── Derive theme tokens ──────────────────────────────────────────────
+  const t = isDarkMode ? THEMES.dark : THEMES.light;
+
+  // ── Themed style objects (computed from t) ───────────────────────────
+  const styles = {
+    container: {
+      minHeight: '100vh',
+      display: 'flex',
+      flexDirection: 'column' as const,
+      alignItems: 'center',
+      backgroundColor: t.bg,
+      fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
+      color: t.text,
+      paddingTop: '1rem',
+      transition: 'background-color 0.25s, color 0.25s',
+    },
+    bottomBar: {
+      position: 'fixed' as const,
+      bottom: '1.5rem',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      backgroundColor: t.barBg,
+      padding: '0.4rem 0.75rem',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.4rem',
+      boxShadow: '0 4px 20px rgba(0,0,0,0.28)',
+      zIndex: 50,
+      borderRadius: '999px',
+      border: `1px solid ${t.barBorder}`,
+      whiteSpace: 'nowrap' as const,
+      transition: 'background-color 0.25s, border-color 0.25s',
+    },
+    statusBadgeMenu: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '0.5rem',
+      fontSize: '0.75rem',
+      padding: '0.5rem',
+      borderRadius: '0.375rem',
+      fontWeight: '600' as const,
+      marginBottom: '0.5rem',
+    },
+    statItem: {
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      fontSize: '0.8rem',
+      color: t.textMuted,
+      padding: '0.5rem 0.25rem',
+      borderBottom: `1px solid ${t.statBorder}`,
+    },
+    statLabel: { fontSize: '0.75rem', color: t.textMuted },
+    statValue: { fontSize: '0.8rem', fontWeight: '600' as const, color: t.text, fontFamily: 'monospace' },
+    iconButton: {
+      padding: '0.5rem',
+      borderRadius: '0.375rem',
+      border: 'none',
+      cursor: 'pointer' as const,
+      backgroundColor: 'transparent',
+      color: t.barIconColor,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    speedButton: {
+      fontSize: '0.8rem',
+      fontWeight: '700' as const,
+      color: t.barSpeedColor,
+      backgroundColor: t.barSpeedBg,
+      padding: '0.25rem 0.5rem',
+      borderRadius: '0.25rem',
+      border: 'none',
+      minWidth: '2.5rem',
+      cursor: 'pointer' as const,
+    },
+    menuPopover: {
+      position: 'absolute' as const,
+      bottom: 'calc(100% + 10px)',
+      right: '1rem',
+      width: '260px',
+      backgroundColor: t.menuBg,
+      padding: '1rem',
+      borderRadius: '0.75rem',
+      boxShadow: '0 10px 25px -5px rgba(0,0,0,0.18), 0 8px 10px -6px rgba(0,0,0,0.12)',
+      display: 'flex',
+      flexDirection: 'column' as const,
+      gap: '0.5rem',
+      border: `1px solid ${t.menuBorder}`,
+      zIndex: 100,
+    },
+    selectLabel: {
+      fontSize: '0.75rem',
+      fontWeight: '600' as const,
+      color: t.textMuted,
+      marginTop: '0.5rem',
+      marginBottom: '0.25rem',
+    },
+    select: {
+      width: '100%',
+      padding: '0.5rem',
+      borderRadius: '0.375rem',
+      border: `1px solid ${t.selectBorder}`,
+      backgroundColor: t.selectBg,
+      color: t.text,
+      fontSize: '0.875rem',
+      cursor: 'pointer' as const,
+    },
+    testButton: {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: '0.5rem',
+      padding: '0.5rem',
+      fontSize: '0.875rem',
+      fontWeight: '600' as const,
+      backgroundColor: t.testBtnBg,
+      color: t.testBtnColor,
+      border: `1px solid ${t.testBtnBorder}`,
+      borderRadius: '0.375rem',
+      cursor: 'pointer' as const,
+      marginTop: '0.5rem',
+    },
+    resetButton: {
+      padding: '0.5rem',
+      fontSize: '0.875rem',
+      backgroundColor: t.resetBtnBg,
+      color: '#ef4444',
+      border: 'none',
+      borderRadius: '0.375rem',
+      cursor: 'pointer' as const,
+      width: '100%',
+      marginTop: '0.5rem',
+    },
+    dropZone: {
+      marginTop: '2rem',
+      width: '90%',
+      maxWidth: '42rem',
+      minHeight: '200px',
+      border: `3px dashed ${t.dropBorder}`,
+      borderRadius: '1rem',
+      display: 'flex',
+      flexDirection: 'column' as const,
+      alignItems: 'center',
+      justifyContent: 'center',
+      cursor: 'pointer' as const,
+      backgroundColor: t.dropBg,
+      transition: 'all 0.3s ease',
+      padding: '1rem',
+      textAlign: 'center' as const,
+    },
+    dropZoneHover: {
+      borderColor: '#6b9fd4',
+      backgroundColor: isDarkMode ? '#1e2d3d' : '#eef4fb',
+      transform: 'scale(1.01)',
+    },
+    viewer: {
+      display: 'flex',
+      flexDirection: 'column' as const,
+      alignItems: 'center',
+      width: '100%',
+      maxWidth: '48rem',
+      padding: '1rem',
+      paddingBottom: '6rem',
+      boxSizing: 'border-box' as const,
+    },
+    pageContainer: {
+      position: 'relative' as const,
+      marginBottom: '1rem',
+      boxShadow: t.pageShadow,
+      backgroundColor: '#fff', // PDF canvas always renders on white
+      width: '100%',
+      height: 'auto',
+    },
+    epubContainer: {
+      width: '100%',
+      padding: '0',
+      lineHeight: '1.6',
+      fontSize: '1.1rem',
+      textAlign: 'left' as const,
+      backgroundColor: t.epubBg,
+      borderRadius: '8px',
+      color: t.text,
+    },
+    epubSentence: {
+      cursor: 'pointer' as const,
+      padding: '2px 0',
+      transition: 'background-color 0.2s',
+      borderRadius: '4px',
+    },
+  };
 
   useEffect(() => {
     console.log("[App] Mounting...");
@@ -426,7 +476,6 @@ export default function App() {
     const handleKeyDown = async (e: KeyboardEvent) => {
       const isPaste = (e.metaKey || e.ctrlKey) && e.key === 'v';
       if (!isPaste || sentences.length > 0) return;
-      // Don't intercept if focus is inside a textarea/input
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'TEXTAREA' || tag === 'INPUT') return;
       e.preventDefault();
@@ -809,7 +858,6 @@ export default function App() {
         setShowTextInput(true);
       }
     } catch {
-      // Permission denied or API unavailable — fall back to textarea
       setShowTextInput(true);
     }
   };
@@ -843,7 +891,6 @@ export default function App() {
             contentData.push({ type: 'header', id: `header-${globalLineIdCounter}`, text: chapterTitle });
           }
 
-          // Query block-level elements to preserve paragraph structure
           const blockEls = Array.from(doc.querySelectorAll('p, li, blockquote'));
           const elementsToProcess: Element[] = blockEls.length > 0 ? blockEls : [doc.body];
 
@@ -883,7 +930,6 @@ export default function App() {
       let globalLineList: any[] = [];
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
-        // Using a good scale for clarity
         const scale = 1.5;
         const viewport = page.getViewport({ scale });
         const textContent = await page.getTextContent();
@@ -920,10 +966,8 @@ export default function App() {
   };
 
   const processTextContent = (textContent: any, viewport: any, scale: number, startIndex: number) => {
-    // Process items and transform to Viewport coordinates (Pixel space)
     const items = textContent.items.map((item: any) => {
       const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-      // tx[5] is usually the baseline in top-left origin system
       const fontHeight = Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3]));
       return {
         str: item.str,
@@ -934,13 +978,11 @@ export default function App() {
       };
     });
 
-    // Sort items to rebuild lines (Top to Bottom, Left to Right)
     items.sort((a: any, b: any) => Math.abs(a.y - b.y) > a.height * 0.2 ? a.y - b.y : a.x - b.x);
 
     const lines: any[] = [];
     let currentLine: any = null;
 
-    // Group items into lines
     items.forEach((item: any) => {
       if (!currentLine) {
         currentLine = { items: [item], y: item.y, height: item.height };
@@ -955,56 +997,52 @@ export default function App() {
     });
     if (currentLine) lines.push(currentLine);
 
-    // Convert line data to Percentage (%) coordinates relative to the viewport
     return lines.map((line: any, idx: number) => {
       const minX = Math.min(...line.items.map((i: any) => i.x));
       const last = line.items[line.items.length - 1];
       const maxX = last.x + (last.width || last.str.length * 5);
       const width = maxX - minX;
 
-      // Calculate positions as percentages
-      const leftPct = (minX / viewport.width) * 100;
-      // y is baseline. To box it, we move up by height.
-      const topPct = ((line.y - line.height) / viewport.height) * 100;
+      const leftPct  = (minX / viewport.width) * 100;
+      const topPct   = ((line.y - line.height) / viewport.height) * 100;
       const widthPct = (width / viewport.width) * 100;
-      const heightPct = (line.height / viewport.height) * 100;
+      const heightPct= (line.height / viewport.height) * 100;
 
       return {
         id: startIndex + idx,
         text: line.items.map((i: any) => i.str).join(' '),
-        // Store percentage strings for CSS
         left: `${leftPct}%`,
         top: `${topPct}%`,
         width: `${widthPct}%`,
         height: `${heightPct}%`,
-        // Store raw startPos for sentence mapping logic later (not used for display)
         startPos: 0
       };
     });
   };
 
   const getStatusBadgeStyle = () => {
-    if (ttsStatus === "Downloading...") return { ...styles.statusBadgeMenu, ...styles.statusLoading };
-    if (ttsStatus === "Model Ready") return { ...styles.statusBadgeMenu, ...styles.statusReady };
-    if (ttsStatus === "System Voice") return { ...styles.statusBadgeMenu, ...styles.statusFallback };
-    return { ...styles.statusBadgeMenu, ...styles.statusLoading };
+    if (ttsStatus === "Downloading...") return { ...styles.statusBadgeMenu, ...staticStyles.statusLoading };
+    if (ttsStatus === "Model Ready")    return { ...styles.statusBadgeMenu, ...staticStyles.statusReady };
+    if (ttsStatus === "System Voice")   return { ...styles.statusBadgeMenu, ...staticStyles.statusFallback };
+    return { ...styles.statusBadgeMenu, ...staticStyles.statusLoading };
   };
 
   return (
     <div style={styles.container}>
 
       {sentences.length === 0 ? (
-        <div style={{ ...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {}) }}
+        <div
+          style={{ ...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {}) }}
           onClick={() => fileInputRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
           onDragLeave={() => setIsDragOver(false)}
           onDrop={handleFileDrop}
         >
-          <Upload size={32} color="#9ca3af" style={{ marginBottom: '1rem' }} />
-          <p style={{ fontSize: '1.1rem', fontWeight: 600, color: '#4b5563', marginBottom: '0.5rem' }}>
+          <Upload size={32} color={t.textMuted} style={{ marginBottom: '1rem' }} />
+          <p style={{ fontSize: '1.1rem', fontWeight: 600, color: t.text, marginBottom: '0.5rem' }}>
             Drop PDF or EPUB here
           </p>
-          <p style={{ fontSize: '0.85rem', color: '#6b7280' }}>
+          <p style={{ fontSize: '0.85rem', color: t.textMuted }}>
             or tap to browse files
           </p>
           <input
@@ -1014,13 +1052,13 @@ export default function App() {
             accept="application/pdf,.epub"
             style={{ display: 'none' }}
           />
-          <div style={{ width: '100%', borderTop: '1px solid #e5e7eb', margin: '1rem 0' }} />
+          <div style={{ width: '100%', borderTop: `1px solid ${t.dropBorder}`, margin: '1rem 0' }} />
           <button
             onClick={handleClipboardPaste}
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
               padding: '0.5rem 1rem', fontSize: '0.875rem', fontWeight: 600,
-              backgroundColor: '#eff6ff', color: '#2563eb', border: '1px solid #bfdbfe',
+              backgroundColor: t.testBtnBg, color: t.testBtnColor, border: `1px solid ${t.testBtnBorder}`,
               borderRadius: '0.375rem', cursor: 'pointer',
             }}
           >
@@ -1034,9 +1072,9 @@ export default function App() {
                 placeholder="Paste your text here..."
                 style={{
                   width: '100%', minHeight: '100px', padding: '0.5rem',
-                  borderRadius: '0.375rem', border: '1px solid #d1d5db',
-                  fontSize: '0.875rem', color: '#374151', boxSizing: 'border-box' as const,
-                  resize: 'vertical',
+                  borderRadius: '0.375rem', border: `1px solid ${t.inputBorder}`,
+                  fontSize: '0.875rem', color: t.text, backgroundColor: t.inputBg,
+                  boxSizing: 'border-box' as const, resize: 'vertical',
                 }}
               />
               <button
@@ -1055,7 +1093,13 @@ export default function App() {
       ) : (
         <div style={styles.viewer}>
           {fileType === 'pdf' && pages.map(pageData => (
-            <PDFPage key={pageData.pageNumber} data={pageData} highlightedLineIds={highlightedLineIds} onLineClick={handleLineClick} />
+            <PDFPage
+              key={pageData.pageNumber}
+              data={pageData}
+              highlightedLineIds={highlightedLineIds}
+              onLineClick={handleLineClick}
+              pageContainerStyle={styles.pageContainer}
+            />
           ))}
 
           {(fileType === 'epub' || fileType === 'text') && (
@@ -1063,7 +1107,7 @@ export default function App() {
               {epubContent.map((item) => {
                 if (item.type === 'header') {
                   return (
-                    <div key={item.id} style={{ fontSize: '1.5rem', fontWeight: 'bold', margin: '2rem 0 1rem 0', color: '#1e3a8a' }}>
+                    <div key={item.id} style={{ fontSize: '1.5rem', fontWeight: 'bold', margin: '2rem 0 1rem 0', color: t.headerColor }}>
                       {item.text}
                     </div>
                   );
@@ -1078,7 +1122,7 @@ export default function App() {
                             key={sentence.id}
                             id={`line-${sentence.id}`}
                             onClick={() => handleLineClick(sentence.id)}
-                            style={{ ...styles.epubSentence, ...(isActive ? styles.epubHighlight : {}) }}
+                            style={{ ...styles.epubSentence, ...(isActive ? EPUB_HIGHLIGHT_STYLE : {}) }}
                           >
                             {sentence.text}{' '}
                           </span>
@@ -1094,9 +1138,9 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Bar: Floating Centered Pill */}
+      {/* Bottom Bar */}
       <div style={styles.bottomBar}>
-        <img src="./logo.png" style={{width: "32px", height: "32px"}} alt="logo" />
+        <img src="./logo.png" style={{ width: '32px', height: '32px' }} alt="logo" />
 
         <button
           onClick={() => setIsSpeedMenuOpen(!isSpeedMenuOpen)}
@@ -1109,26 +1153,41 @@ export default function App() {
           onClick={togglePlay}
           disabled={sentences.length === 0 || !isModelReady}
           style={{
-            ...styles.playButton,
-            ...(sentences.length === 0 || !isModelReady ? styles.buttonDisabled : {})
+            ...staticStyles.playButton,
+            ...(sentences.length === 0 || !isModelReady ? staticStyles.buttonDisabled : {})
           }}
         >
-          {isPlaying ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" style={{marginLeft:'2px'}} />}
+          {isPlaying
+            ? <Pause size={20} fill="white" />
+            : <Play size={20} fill="white" style={{ marginLeft: '2px' }} />
+          }
         </button>
 
         <button onClick={() => setIsMenuOpen(!isMenuOpen)} style={styles.iconButton}>
           <Menu size={24} />
         </button>
 
+        {/* Theme toggle — at the end of the bar */}
+        <button
+          onClick={() => setIsDarkMode(!isDarkMode)}
+          style={styles.iconButton}
+          title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
+        </button>
+
         {isSpeedMenuOpen && (
-          <div style={{...styles.menuPopover, width: '100px', right: '0', bottom: 'calc(100% + 10px)'}}>
+          <div style={{ ...styles.menuPopover, width: '100px', right: '0', bottom: 'calc(100% + 10px)' }}>
             {[1.0, 1.25, 1.5, 2.0].map(speed => (
               <button
                 key={speed}
                 onClick={() => { setPlaybackSpeed(speed); setIsSpeedMenuOpen(false); }}
                 style={{
                   ...styles.statItem,
-                  width: '100%', cursor: 'pointer', backgroundColor: playbackSpeed === speed ? '#eff6ff' : 'transparent', border: 'none'
+                  width: '100%', cursor: 'pointer',
+                  backgroundColor: playbackSpeed === speed ? t.speedHighlight : 'transparent',
+                  border: 'none',
+                  color: t.text,
                 }}
               >
                 {speed}x
@@ -1139,36 +1198,43 @@ export default function App() {
 
         {isMenuOpen && (
           <div style={styles.menuPopover}>
-            {/* Status Badge moved here */}
             <div style={getStatusBadgeStyle()}>
-              {ttsStatus === "Loading..." && <Loader2 size={14} className="animate-spin" />}
-              {ttsStatus === "Model Ready" && <Activity size={14} />}
+              {ttsStatus === "Loading..."   && <Loader2 size={14} className="animate-spin" />}
+              {ttsStatus === "Model Ready"  && <Activity size={14} />}
               {ttsStatus === "System Voice" && <AlertCircle size={14} />}
               {ttsStatus}
             </div>
 
-            {/* Voice Selector moved here */}
             <label style={styles.selectLabel}>Select Voice</label>
-            <div style={{position:'relative'}}>
+            <div style={{ position: 'relative' }}>
               <select
                 value={selectedVoice}
                 onChange={handleVoiceChange}
                 disabled={usingFallback.current || !isModelReady}
-                style={{...styles.select, ...(usingFallback.current || !isModelReady ? styles.buttonDisabled : {})}}
+                style={{ ...styles.select, ...(usingFallback.current || !isModelReady ? staticStyles.buttonDisabled : {}) }}
               >
                 {VOICES.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
               </select>
-              <ChevronDown size={14} style={{position:'absolute', right:'10px', top:'12px', pointerEvents:'none', color:'#9ca3af'}}/>
             </div>
 
-            {/* Stats */}
-            <div style={{marginTop: '0.5rem'}}>
-              <div style={styles.statItem}><span style={styles.statLabel}>State</span><span style={styles.statValue}>{playbackState}</span></div>
-              <div style={styles.statItem}><span style={styles.statLabel}>Progress</span><span style={styles.statValue}>{currentSentenceIndex >= 0 ? `${Math.round((currentSentenceIndex/sentences.length)*100)}%` : '0%'}</span></div>
+            <div style={{ marginTop: '0.5rem' }}>
+              <div style={styles.statItem}>
+                <span style={styles.statLabel}>State</span>
+                <span style={styles.statValue}>{playbackState}</span>
+              </div>
+              <div style={styles.statItem}>
+                <span style={styles.statLabel}>Progress</span>
+                <span style={styles.statValue}>
+                  {currentSentenceIndex >= 0 ? `${Math.round((currentSentenceIndex / sentences.length) * 100)}%` : '0%'}
+                </span>
+              </div>
             </div>
 
-            {/* Actions */}
-            <button onClick={handleTestAudio} style={{...styles.testButton, ...((!isModelReady) ? styles.buttonDisabled : {})}} disabled={!isModelReady}>
+            <button
+              onClick={handleTestAudio}
+              style={{ ...styles.testButton, ...(!isModelReady ? staticStyles.buttonDisabled : {}) }}
+              disabled={!isModelReady}
+            >
               <Beaker size={14} /> Test Voice
             </button>
             <button onClick={resetReader} style={styles.resetButton}>Reset Document</button>

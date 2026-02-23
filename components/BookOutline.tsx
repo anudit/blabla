@@ -4,6 +4,7 @@ import { AlignJustify, X } from 'lucide-react';
 export interface OutlineEntry {
   id: string;
   text: string;
+  level?: number; // 1-6; present for markdown headings
 }
 
 interface Props {
@@ -158,14 +159,18 @@ export default function BookOutline({ entries, activeId, isDarkMode }: Props) {
                     display: 'block',
                     width: '100%',
                     textAlign: 'left',
-                    padding: '0.42rem 1rem',
+                    paddingTop: '0.42rem',
+                    paddingBottom: '0.42rem',
+                    paddingRight: '1rem',
+                    // Indent sub-headings: each level beyond 1 adds 0.75rem
+                    paddingLeft: `calc(1rem + ${((entry.level ?? 1) - 1) * 0.75}rem)`,
                     background: active ? t.activeBg : 'none',
                     border: 'none',
                     borderLeft: `2px solid ${active ? t.activeColor : 'transparent'}`,
                     cursor: 'pointer',
-                    color: active ? t.activeColor : t.text,
-                    fontSize: '0.82rem',
-                    fontWeight: active ? 600 : 400,
+                    color: active ? t.activeColor : (entry.level && entry.level > 1 ? t.textMuted : t.text),
+                    fontSize: entry.level && entry.level > 2 ? '0.76rem' : '0.82rem',
+                    fontWeight: active ? 600 : (entry.level === 1 || !entry.level ? 500 : 400),
                     lineHeight: 1.45,
                     transition: 'background 0.12s, color 0.12s',
                   }}

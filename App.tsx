@@ -189,6 +189,53 @@ function extractSentences(text: string): string[] {
   return sentences;
 }
 
+// ── Markdown helpers (no deps, works offline) ─────────────────────────
+
+/** Strip inline markdown syntax for clean TTS text. */
+function stripMd(s: string): string {
+  return s
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/_([^_]+)_/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+}
+
+/** True if the text looks like markdown (has at least one ATX heading). */
+function isMarkdown(text: string): boolean {
+  return /^#{1,6} \S/m.test(text);
+}
+
+// Matches **bold**, __bold__, ~~strike~~, *italic*, _italic_, `code`, [text](url)
+const INLINE_MD_RE = /\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/g;
+
+/** Render inline markdown to React nodes for visual display. */
+function renderMd(text: string): React.ReactNode {
+  const parts: React.ReactNode[] = [];
+  let ki = 0, last = 0;
+  for (const m of text.matchAll(new RegExp(INLINE_MD_RE.source, 'g'))) {
+    if (m.index! > last) parts.push(text.slice(last, m.index));
+    const s = m[0];
+    if (s.startsWith('**') || s.startsWith('__')) {
+      parts.push(<strong key={ki++}>{s.slice(2, -2)}</strong>);
+    } else if (s.startsWith('~~')) {
+      parts.push(<s key={ki++}>{s.slice(2, -2)}</s>);
+    } else if (s.startsWith('*') || s.startsWith('_')) {
+      parts.push(<em key={ki++}>{s.slice(1, -1)}</em>);
+    } else if (s.startsWith('`')) {
+      parts.push(<code key={ki++} style={{ fontFamily: 'monospace', fontSize: '0.88em', padding: '0.1em 0.25em', backgroundColor: 'rgba(127,127,127,0.15)', borderRadius: '3px' }}>{s.slice(1, -1)}</code>);
+    } else {
+      // Link: show text, drop href
+      parts.push((s.match(/\[([^\]]+)\]/) || ['', s])[1]);
+    }
+    last = m.index! + s.length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts.length > 0 ? <>{parts}</> : text;
+}
+
 export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
@@ -899,13 +946,100 @@ export default function App() {
         const reader = new FileReader();
         reader.onload = (ev) => loadEPUB(ev.target?.result as ArrayBuffer);
         reader.readAsArrayBuffer(file);
+      } else if (file.name.endsWith('.md') || file.name.endsWith('.markdown') || file.type === 'text/markdown' || file.type === 'text/x-markdown') {
+        const reader = new FileReader();
+        reader.onload = (ev) => loadMarkdown(ev.target?.result as string);
+        reader.readAsText(file);
       } else {
-        alert("Please drop a valid PDF or EPUB file");
+        alert("Please drop a valid PDF, EPUB or Markdown file");
       }
     }
   };
 
+  const loadMarkdown = (raw: string) => {
+    const newSentences: any[] = [];
+    const contentData: any[] = [];
+    let idCounter = 0;
+    let inFence = false;
+    let fenceLines: string[] = [];
+    let paraLines: string[] = [];
+
+    const flushPara = () => {
+      if (!paraLines.length) return;
+      const block = paraLines.join(' ').replace(/\s+/g, ' ').trim();
+      paraLines = [];
+      if (!block) return;
+      const paraId = `para-${idCounter}`;
+      const paraSentences: any[] = [];
+      for (const s of extractSentences(block)) {
+        const clean = stripMd(s);
+        if (!clean.trim()) continue;
+        const lineId = idCounter++;
+        newSentences.push({ text: clean, lines: [lineId] });
+        // Store original markdown text only when it differs (has inline syntax)
+        paraSentences.push({ id: lineId, text: clean, ...(clean !== s ? { md: s } : {}) });
+      }
+      if (paraSentences.length > 0) {
+        contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
+      }
+    };
+
+    for (const line of raw.split('\n')) {
+      // Fenced code block open/close
+      if (/^(`{3,}|~{3,})/.test(line)) {
+        if (!inFence) { flushPara(); inFence = true; fenceLines = []; }
+        else { inFence = false; contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n') }); }
+        continue;
+      }
+      if (inFence) { fenceLines.push(line); continue; }
+
+      // ATX heading: # … ######
+      const hm = line.match(/^(#{1,6})\s+(.+)$/);
+      if (hm) {
+        flushPara();
+        contentData.push({ type: 'header', id: `header-${idCounter++}`, text: stripMd(hm[2].replace(/\s+#+\s*$/, '').trim()), level: hm[1].length });
+        continue;
+      }
+
+      // Thematic break (---, ***, ___)
+      if (/^\s{0,3}([-*_]\s*){3,}$/.test(line) && !/\w/.test(line)) {
+        flushPara();
+        contentData.push({ type: 'hr', id: `hr-${idCounter++}` });
+        continue;
+      }
+
+      // Blank line → end of paragraph block
+      if (!line.trim()) { flushPara(); continue; }
+
+      // List item — strip marker, ensure ends with sentence-ending punct
+      const li = line.match(/^\s*(?:[-*+]|\d+[.)]) (.*)/);
+      if (li) {
+        const t = li[1].trim();
+        paraLines.push(/[.!?:;]$/.test(t) ? t : t + '.');
+        continue;
+      }
+
+      // Blockquote
+      const bq = line.match(/^>\s*(.*)/);
+      if (bq) { paraLines.push(bq[1]); continue; }
+
+      paraLines.push(line);
+    }
+
+    // Flush any unclosed fence or trailing paragraph
+    if (inFence) contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n') });
+    flushPara();
+
+    if (!newSentences.length) return;
+    setFileType('text');
+    setSentences(newSentences);
+    setEpubContent(contentData);
+    setShowTextInput(false);
+    setTextInputValue('');
+  };
+
   const loadText = (text: string) => {
+    if (isMarkdown(text)) { loadMarkdown(text); return; }
     const newSentences: any[] = [];
     const contentData: any[] = [];
     let globalLineIdCounter = 0;
@@ -1110,7 +1244,7 @@ export default function App() {
 
   // ── Outline (TOC) derived from epub/text headers ──────────────────────
   const outline: OutlineEntry[] = useMemo(() =>
-    epubContent.filter(i => i.type === 'header').map(i => ({ id: i.id, text: i.text })),
+    epubContent.filter(i => i.type === 'header').map(i => ({ id: i.id, text: i.text, level: i.level })),
     [epubContent]
   );
 
@@ -1151,7 +1285,7 @@ export default function App() {
         >
           <Upload size={32} color={t.textMuted} style={{ marginBottom: '1rem' }} />
           <p style={{ fontSize: '1.1rem', fontWeight: 600, color: t.text, marginBottom: '0.5rem' }}>
-            Drop PDF or EPUB here
+            Drop PDF, EPUB or Markdown here
           </p>
           <p style={{ fontSize: '0.85rem', color: t.textMuted }}>
             or tap to browse files
@@ -1160,7 +1294,7 @@ export default function App() {
             type="file"
             ref={fileInputRef}
             onChange={handleFileDrop}
-            accept="application/pdf,.epub"
+            accept="application/pdf,.epub,.md,.markdown"
             style={{ display: 'none' }}
           />
           <div style={{ width: '100%', borderTop: `1px solid ${t.dropBorder}`, margin: '1rem 0' }} />
@@ -1225,13 +1359,17 @@ export default function App() {
               <div style={styles.epubContainer}>
                 {(() => {
                   let headersSeen = 0;
+                  const H_SIZE: Record<number, string> = { 1: '1.45rem', 2: '1.25rem', 3: '1.1rem', 4: '1rem', 5: '0.95rem', 6: '0.9rem' };
                   return epubContent.map((item) => {
                     if (item.type === 'header') {
                       const isFirst = headersSeen === 0;
                       headersSeen++;
+                      const lvl: number = item.level ?? 1;
+                      // Show a section divider only before top-level headings (or EPUB chapters which have no level)
+                      const showDivider = !isFirst && lvl <= 1;
                       return (
                         <React.Fragment key={item.id}>
-                          {!isFirst && (
+                          {showDivider && (
                             <hr style={{
                               border: 'none',
                               borderTop: `1px solid ${t.statBorder}`,
@@ -1242,12 +1380,12 @@ export default function App() {
                           <div
                             id={item.id}
                             style={{
-                              fontSize: '1.45rem',
-                              fontWeight: 700,
-                              margin: isFirst ? '0 0 1.4rem' : '0 0 1.4rem',
+                              fontSize: H_SIZE[lvl] ?? '1.45rem',
+                              fontWeight: lvl <= 2 ? 700 : 600,
+                              margin: isFirst ? `0 0 ${lvl === 1 ? '1.4rem' : '1rem'}` : `${lvl === 1 ? '2rem' : '1.4rem'} 0 ${lvl === 1 ? '1.4rem' : '0.6rem'}`,
                               color: t.headerColor,
                               lineHeight: 1.25,
-                              letterSpacing: '-0.015em',
+                              letterSpacing: lvl === 1 ? '-0.015em' : 'normal',
                               scrollMarginTop: '1.5rem',
                             }}
                           >
@@ -1268,12 +1406,34 @@ export default function App() {
                                 onClick={() => handleLineClick(sentence.id)}
                                 style={{ ...styles.epubSentence, ...(isActive ? EPUB_HIGHLIGHT_STYLE : {}) }}
                               >
-                                {sentence.text}{' '}
+                                {sentence.md ? renderMd(sentence.md) : sentence.text}{' '}
                               </span>
                             );
                           })}
                         </p>
                       );
+                    }
+                    if (item.type === 'code') {
+                      return (
+                        <pre key={item.id} style={{
+                          backgroundColor: isDarkMode ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.04)',
+                          border: `1px solid ${t.statBorder}`,
+                          borderRadius: '0.5rem',
+                          padding: '0.75rem 1rem',
+                          overflowX: 'auto',
+                          fontSize: '0.82rem',
+                          fontFamily: 'monospace',
+                          lineHeight: 1.6,
+                          margin: '0 0 1.1em',
+                          color: t.text,
+                          whiteSpace: 'pre',
+                        }}>
+                          <code>{item.text}</code>
+                        </pre>
+                      );
+                    }
+                    if (item.type === 'hr') {
+                      return <hr key={item.id} style={{ border: 'none', borderTop: `1px solid ${t.statBorder}`, margin: '1.5rem 0', opacity: 0.5 }} />;
                     }
                     return null;
                   });

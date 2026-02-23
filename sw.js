@@ -1,6 +1,6 @@
 // sw.js
-const cacheName = 'bla-bla-v2'; // bumped to trigger old-cache cleanup
-const appAssets = [
+const CACHE_VERSION = 'bla-bla-v3';
+const APP_SHELL = [
   '/',
   '/index.html',
   '/bundle.js',
@@ -10,68 +10,89 @@ const appAssets = [
   '/manifest.json'
 ];
 
-// Install: cache core app assets
+// Install: pre-cache app shell and activate immediately
 self.addEventListener('install', (e) => {
   console.log('[SW] Installing...');
   self.skipWaiting();
   e.waitUntil(
-    caches.open(cacheName).then((cache) => {
-      console.log('[SW] Caching core assets');
-      return cache.addAll(appAssets);
+    caches.open(CACHE_VERSION).then((cache) => {
+      console.log('[SW] Caching app shell');
+      return cache.addAll(APP_SHELL);
     })
   );
 });
 
-// Activate: delete stale caches from previous versions
+// Activate: clean up old bla-bla-vX caches only — leave transformers.js model caches alone
 self.addEventListener('activate', (e) => {
-  console.log('[SW] Activated');
+  console.log('[SW] Activating...');
   e.waitUntil(
-    caches.keys().then((keyList) =>
-      Promise.all(
-        keyList.map((key) => {
-          if (key !== cacheName) {
+    caches.keys()
+      .then((keys) => Promise.all(
+        keys.map((key) => {
+          if (key.startsWith('bla-bla-') && key !== CACHE_VERSION) {
             console.log('[SW] Removing old cache:', key);
             return caches.delete(key);
           }
         })
-      )
-    ).then(() => self.clients.claim())
+      ))
+      .then(() => self.clients.claim())
   );
 });
 
-// Fetch: cache-first for app assets, bypass for HuggingFace (IndexedDB handles those)
+// Fetch: network-first for app shell (picks up new deployments automatically),
+// pass-through for cross-origin (model files handled by transformers.js Cache Storage)
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
 
-  // HuggingFace model files are cached in IndexedDB by the TTS worker — don't double-cache them
-  if (url.hostname === 'huggingface.co') return;
+  // Only handle same-origin GET requests — let everything else pass through
+  if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
 
-  // SPA navigation → always serve index.html
+  // SPA navigation → network-first, fall back to cached index.html when offline
   if (e.request.mode === 'navigate') {
-    e.respondWith(caches.match('/index.html').then((r) => r || fetch(e.request)));
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE_VERSION).then((c) => c.put(e.request, copy));
+          return res;
+        })
+        .catch(() => caches.match('/index.html'))
+    );
     return;
   }
 
+  // App shell assets: network-first so new deployments are always fetched,
+  // fall back to stale cache when offline
+  if (APP_SHELL.includes(url.pathname)) {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE_VERSION).then((c) => c.put(e.request, copy));
+          }
+          return res;
+        })
+        .catch(() => {
+          console.log('[SW] Offline, serving cached:', url.pathname);
+          return caches.match(e.request);
+        })
+    );
+    return;
+  }
+
+  // Other same-origin assets: cache-first
   e.respondWith(
-    caches.match(e.request).then((cachedResponse) => {
-      if (cachedResponse) return cachedResponse;
-
-      return fetch(e.request).then((networkResponse) => {
-        // Only cache same-origin, successful, GET responses
-        if (
-          !networkResponse ||
-          networkResponse.status !== 200 ||
-          networkResponse.type !== 'basic' ||
-          e.request.method !== 'GET'
-        ) {
-          return networkResponse;
+    caches.match(e.request).then((cached) => {
+      if (cached) return cached;
+      return fetch(e.request).then((res) => {
+        if (res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE_VERSION).then((c) => c.put(e.request, copy));
         }
-
-        const responseToCache = networkResponse.clone();
-        caches.open(cacheName).then((cache) => cache.put(e.request, responseToCache));
-        return networkResponse;
+        return res;
       }).catch(() => {
-        console.log('[SW] Fetch failed (offline):', e.request.url);
+        console.log('[SW] Fetch failed (offline):', url.pathname);
       });
     })
   );

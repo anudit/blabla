@@ -1,72 +1,9 @@
 // src/tts.worker.ts
 import { KokoroTTS } from "kokoro-js";
 
-// --- IndexedDB Cache Logic (Kept mostly the same) ---
-const DB_NAME = 'KokoroModelCache';
-const DB_VERSION = 1;
-const STORE_NAME = 'modelFiles';
+// Model files are cached automatically by transformers.js using Cache Storage —
+// no custom IndexedDB interceptor needed.
 
-let _dbPromise: Promise<IDBDatabase> | null = null;
-function openDatabase(): Promise<IDBDatabase> {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise((resolve, reject) => {
-    const request = self.indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'url' });
-      }
-    };
-    request.onsuccess = (event) => resolve((event.target as IDBOpenDBRequest).result);
-    request.onerror = (event) => { _dbPromise = null; reject((event.target as IDBOpenDBRequest).error); };
-  });
-  return _dbPromise;
-}
-
-const originalFetch = self.fetch.bind(self);
-self.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  if (typeof input !== 'string' || !input.includes('huggingface.co')) {
-    return originalFetch(input, init);
-  }
-  const url = input;
-  const db = await openDatabase();
-
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(STORE_NAME, 'readonly');
-    // Prevent hanging promises if the transaction aborts unexpectedly
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(new Error('IDB transaction aborted'));
-
-    const store = transaction.objectStore(STORE_NAME);
-    const getRequest = store.get(url);
-
-    getRequest.onsuccess = () => {
-      const cached = getRequest.result;
-      if (cached) {
-        resolve(new Response(cached.blob, {
-          status: 200,
-          statusText: 'OK',
-          headers: { 'Content-Type': cached.contentType || '' },
-        }));
-      } else {
-        const fetchPromise = originalFetch(url, init)
-          .then(async (response) => {
-            if (!response.ok) return response;
-            const blob = await response.clone().blob();
-            const contentType = response.headers.get('Content-Type') || '';
-            const putDb = await openDatabase();
-            const putTransaction = putDb.transaction(STORE_NAME, 'readwrite');
-            putTransaction.onerror = (err) => console.error('[Cache] IDB write failed', err);
-            putTransaction.objectStore(STORE_NAME).put({ url, blob, contentType });
-            return response;
-          })
-          .catch(reject);
-        resolve(fetchPromise);
-      }
-    };
-    getRequest.onerror = () => reject(getRequest.error);
-  });
-};
 // --- HELPER: WebGPU Detection ---
 async function detectWebGPU() {
   try {

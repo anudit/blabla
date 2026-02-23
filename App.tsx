@@ -15,16 +15,6 @@ const VOICES = [
   { value: 'am_puck', label: 'Puck (Eng M)' },
 ];
 
-// ── Fixed yellow highlight (same on both themes) ───────────────────────
-const LINE_ACTIVE_STYLE = {
-  backgroundColor: 'rgba(250, 204, 21, 0.45)',
-  boxShadow: '0 0 0 1px rgba(210, 170, 0, 0.4)',
-  zIndex: 20,
-};
-
-const EPUB_HIGHLIGHT_STYLE = {
-  backgroundColor: 'rgba(250, 204, 21, 0.45)',
-};
 
 // ── Static styles (layout / structure, no theming) ─────────────────────
 const staticStyles = {
@@ -117,7 +107,7 @@ const THEMES = {
 };
 
 // ── PDFPage (receives pageContainerStyle as prop for theming) ──────────
-const PDFPage = React.memo(({ data, highlightedLineIds, onLineClick, pageContainerStyle }: any) => {
+const PDFPage = React.memo(({ data, onLineClick, pageContainerStyle }: any) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderTaskRef = useRef<any>(null);
 
@@ -153,7 +143,6 @@ const PDFPage = React.memo(({ data, highlightedLineIds, onLineClick, pageContain
             onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
             style={{
               ...staticStyles.lineBase,
-              ...(highlightedLineIds.includes(line.id) ? LINE_ACTIVE_STYLE : {}),
               left: line.left, top: line.top, width: line.width, height: line.height,
             }}
           />
@@ -161,7 +150,8 @@ const PDFPage = React.memo(({ data, highlightedLineIds, onLineClick, pageContain
       </div>
     </div>
   );
-});
+// Only re-render when the actual page data changes (page number is stable after load)
+}, (prev, next) => prev.data.pageNumber === next.data.pageNumber);
 
 function findTitleInToc(toc: any[], href: string): string | null {
   for (const entry of toc) {
@@ -236,18 +226,56 @@ function renderMd(text: string): React.ReactNode {
   return parts.length > 0 ? <>{parts}</> : text;
 }
 
+// ── EPUB inline-formatting helpers ────────────────────────────────────
+type TextRun = { text: string; em: boolean; strong: boolean; br?: boolean };
+
+/** Walk a DOM element and collect text runs with italic/bold context. */
+function extractRuns(el: Element): TextRun[] {
+  const runs: TextRun[] = [];
+  function walk(node: Node, em: boolean, strong: boolean) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = node.textContent ?? '';
+      if (t) runs.push({ text: t, em, strong });
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const tag = (node as Element).tagName.toLowerCase();
+      if (tag === 'script' || tag === 'style') return;
+      if (tag === 'br') { runs.push({ text: '', em, strong, br: true }); return; }
+      const nextEm     = em     || tag === 'em' || tag === 'i';
+      const nextStrong = strong || tag === 'strong' || tag === 'b';
+      Array.from(node.childNodes).forEach(c => walk(c, nextEm, nextStrong));
+    }
+  }
+  Array.from(el.childNodes).forEach(c => walk(c, false, false));
+  return runs;
+}
+
+/** Convert runs to a React node, preserving em/strong/br formatting. */
+function runsToReactNode(runs: TextRun[]): React.ReactNode {
+  const parts: React.ReactNode[] = [];
+  let ki = 0;
+  for (const run of runs) {
+    if (run.br) { parts.push(<br key={ki++} />); continue; }
+    const text = run.text;
+    if (!text) continue;
+    if (run.em && run.strong) parts.push(<strong key={ki++}><em>{text}</em></strong>);
+    else if (run.em)           parts.push(<em key={ki++}>{text}</em>);
+    else if (run.strong)       parts.push(<strong key={ki++}>{text}</strong>);
+    else                       parts.push(text);
+  }
+  return parts.length ? <>{parts}</> : null;
+}
+
 export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
   const [allLines, setAllLines] = useState<any[]>([]);
   const [sentences, setSentences] = useState<any[]>([]);
   const [currentSentenceIndex, setCurrentSentenceIndex] = useState(-1);
-  const [highlightedLineIds, setHighlightedLineIds] = useState<number[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  // Theme
-  const [isDarkMode, setIsDarkMode] = useState(false);
+  // Theme — persisted in localStorage
+  const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
 
   // File type state
   const [fileType, setFileType] = useState<'pdf' | 'epub' | 'text' | null>(null);
@@ -261,6 +289,8 @@ export default function App() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState('af_bella');
+  // Incremented to force-restart playback after speed/voice changes
+  const [restartTrigger, setRestartTrigger] = useState(0);
 
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
@@ -447,7 +477,7 @@ export default function App() {
       textAlign: 'center' as const,
     },
     dropZoneHover: {
-      borderColor: '#6b9fd4',
+      border: '3px dashed #6b9fd4',
       backgroundColor: isDarkMode ? '#1e2d3d' : '#eef4fb',
       transform: 'scale(1.01)',
     },
@@ -538,7 +568,41 @@ export default function App() {
     if (isPlaying && currentSentenceIndex >= 0 && !isWaitingForAudio.current) {
       playCurrentSentence();
     }
-  }, [isPlaying, currentSentenceIndex]);
+  }, [isPlaying, currentSentenceIndex, restartTrigger]);
+
+  // ── DOM-based highlight + smart scroll (bypasses React diffing entirely) ──
+  useEffect(() => {
+    // Always clear previous highlights first
+    document.querySelectorAll('.epub-highlight-active').forEach(el => el.classList.remove('epub-highlight-active'));
+    document.querySelectorAll('.pdf-highlight-active').forEach(el => el.classList.remove('pdf-highlight-active'));
+
+    const unit = sentences[currentSentenceIndex];
+    if (currentSentenceIndex < 0 || !unit) return;
+
+    // Apply new highlights via class, not React state
+    unit.lines.forEach((id: number) => {
+      const el = document.getElementById(`line-${id}`);
+      if (!el) return;
+      if (fileType === 'pdf') {
+        el.classList.add('pdf-highlight-active');
+      } else {
+        // EPUB rich paragraphs use zero-size marker spans → highlight parent <p>
+        const target = (el.textContent === '' && el.closest('p')) ? el.closest('p')! : el;
+        target.classList.add('epub-highlight-active');
+      }
+    });
+
+    // Smart scroll: only scroll if the line is outside the visible area
+    const firstId = unit.lines[0];
+    const target = document.getElementById(`line-${firstId}`);
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const vh = window.innerHeight || document.documentElement.clientHeight;
+    const isVisible = rect.top >= 80 && rect.bottom <= vh - 120;
+    if (!isVisible) {
+      setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+    }
+  }, [currentSentenceIndex, sentences, fileType]);
 
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
@@ -588,15 +652,8 @@ export default function App() {
       const idx = Math.min(pendingResumeRef.current, sentences.length - 1);
       pendingResumeRef.current = -1;
       setCurrentSentenceIndex(idx);
-      setHighlightedLineIds(sentences[idx]?.lines || []);
       setIsPlaying(true);
-      setTimeout(() => {
-        const lineId = sentences[idx]?.lines?.[0];
-        if (lineId !== undefined) {
-          const el = document.getElementById(`line-${lineId}`);
-          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }, 350);
+      // Scroll is handled by the DOM highlight effect when currentSentenceIndex changes
     }
   }, [sentences]);
 
@@ -679,6 +736,12 @@ export default function App() {
     });
   };
 
+  /** Resolve all pending audio promises with null so no caller hangs, then clear. */
+  const drainResolvers = () => {
+    audioResolvers.current.forEach(resolve => resolve(null));
+    audioResolvers.current.clear();
+  };
+
   const stopAllAudio = () => {
     playbackSessionId.current += 1;
     if (currentSource.current) {
@@ -738,14 +801,6 @@ export default function App() {
       advanceSentence();
       return;
     }
-
-    setHighlightedLineIds(unit.lines);
-
-    setTimeout(() => {
-      const firstLineId = unit.lines[0];
-      const el = document.getElementById(`line-${firstLineId}`);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }, 50);
 
     if (usingFallback.current) {
       window.speechSynthesis.cancel();
@@ -816,7 +871,14 @@ export default function App() {
   };
 
   const advanceSentence = () => {
-    setCurrentSentenceIndex(prev => prev + 1);
+    setCurrentSentenceIndex(prev => {
+      const next = prev + 1;
+      // Sliding-window memory manager: keep only prev-1..next+3 in cache
+      for (const key of Array.from(audioCache.current.keys())) {
+        if (key < next - 1 || key > next + 3) audioCache.current.delete(key);
+      }
+      return next;
+    });
   };
 
   const handleLineClick = (lineId: number) => {
@@ -829,7 +891,7 @@ export default function App() {
     playbackSessionId.current += 1;
     audioCache.current.clear();
     pendingFetches.current.clear();
-    audioResolvers.current.clear();
+    drainResolvers();
     isWaitingForAudio.current = false;
 
     let targetSentenceIndex = -1;
@@ -888,10 +950,9 @@ export default function App() {
     setFileType(null);
     setEpubContent([]);
     setCurrentSentenceIndex(-1);
-    setHighlightedLineIds([]);
     audioCache.current.clear();
     pendingFetches.current.clear();
-    audioResolvers.current.clear();
+    drainResolvers();
     setPlaybackState("Idle");
     isWaitingForAudio.current = false;
     setIsMenuOpen(false);
@@ -910,14 +971,21 @@ export default function App() {
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newVoice = e.target.value;
     setSelectedVoice(newVoice);
+    drainResolvers();
     audioCache.current.clear();
     pendingFetches.current.clear();
-    audioResolvers.current.clear();
-    if (isPlaying) {
-      stopAllAudio();
-      setPlaybackState("Starting");
-      playCurrentSentence();
+    // Stop whatever is currently playing
+    if (currentSource.current) {
+      try { currentSource.current.stop(); } catch(e) {}
+      currentSource.current.disconnect();
+      currentSource.current = null;
     }
+    window.speechSynthesis.cancel();
+    playbackSessionId.current += 1;
+    isWaitingForAudio.current = false;
+    // Re-trigger playback effect — by this point setSelectedVoice is batched
+    // into the same render, so playCurrentSentence will use the new voice
+    if (isPlaying) setRestartTrigger(p => p + 1);
   };
 
   const handleFileDrop = async (e: React.DragEvent | React.ChangeEvent) => {
@@ -1095,32 +1163,58 @@ export default function App() {
       let globalLineIdCounter = 0;
       const items = (spine as any).items || [];
       const navigation = await book.loaded.navigation;
+      // Normalise whitespace (incl. non-breaking spaces) for reliable dedup comparisons
+      const normHead = (s: string) => s.replace(/[\u00a0\s]+/g, ' ').trim();
+      // Tracks the last header text we actually pushed, so we never emit consecutive dupes
+      // regardless of which spine item or element produced the title.
+      let lastAddedHeaderText: string | null = null;
 
       for (const item of items) {
         try {
           const doc = await book.load(item.href);
           if (!doc) continue;
-          let chapterTitle = null;
+          let chapterTitle: string | null = null;
           if (navigation && (navigation as any).toc) {
             chapterTitle = findTitleInToc((navigation as any).toc, item.href);
           }
           if (!chapterTitle) {
             const h1 = doc.querySelector('h1');
-            if (h1 && h1.innerText.trim().length > 0) chapterTitle = h1.innerText.trim();
+            const raw = (h1?.textContent || '').trim();
+            if (raw) chapterTitle = raw;
           }
 
           if (chapterTitle) {
-            contentData.push({ type: 'header', id: `header-${globalLineIdCounter}`, text: chapterTitle });
+            const norm = normHead(chapterTitle);
+            if (norm && norm !== lastAddedHeaderText) {
+              lastAddedHeaderText = norm;
+              contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: norm, level: 1 });
+            }
           }
 
-          const blockEls = Array.from(doc.querySelectorAll('p, li, blockquote'));
-          const elementsToProcess: Element[] = blockEls.length > 0 ? blockEls : [doc.body];
+          const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote'));
+          const elementsToProcess: Element[] = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
 
           for (const el of elementsToProcess) {
-            const rawText = (el as HTMLElement).innerText || el.textContent || '';
-            const cleanText = rawText.trim().replace(/\s+/g, ' ');
+            const tag = el.tagName.toLowerCase();
+
+            // Sub-headings within a chapter
+            if (/^h[1-6]$/.test(tag)) {
+              const headText = normHead(el.textContent || '');
+              // Skip if empty OR if it is the same as the last header we added
+              // (covers: same as chapterTitle, same as a previously-added sub-heading,
+              //  or just a duplicate spine item pointing at the same chapter heading)
+              if (!headText || headText === lastAddedHeaderText) continue;
+              lastAddedHeaderText = headText;
+              contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: headText, level: parseInt(tag[1]) });
+              continue;
+            }
+
+            const runs = extractRuns(el);
+            const rawText = runs.filter(r => !r.br).map(r => r.text).join('');
+            const cleanText = rawText.replace(/\s+/g, ' ').trim();
             if (!cleanText) continue;
 
+            const richNode = runsToReactNode(runs);
             const paraId = `para-${globalLineIdCounter}`;
             const paraSentences: any[] = [];
             for (const sText of extractSentences(cleanText)) {
@@ -1130,7 +1224,7 @@ export default function App() {
               paraSentences.push({ id: lineId, text: sText });
             }
             if (paraSentences.length > 0) {
-              contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
+              contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, richNode });
             }
           }
         } catch (err) { console.error("Error loading chapter", err); }
@@ -1347,7 +1441,6 @@ export default function App() {
             <PDFPage
               key={pageData.pageNumber}
               data={pageData}
-              highlightedLineIds={highlightedLineIds}
               onLineClick={handleLineClick}
               pageContainerStyle={styles.pageContainer}
             />
@@ -1395,21 +1488,49 @@ export default function App() {
                       );
                     }
                     if (item.type === 'paragraph') {
+                      const isBlockquote = item.elementType === 'blockquote';
+                      const isList = item.elementType === 'li';
+                      // EPUB paragraph — rich formatting, paragraph-level highlighting via CSS class
+                      if (item.richNode) {
+                        const firstId = item.sentences[0]?.id;
+                        return (
+                          <p
+                            key={item.id}
+                            onClick={() => firstId !== undefined && handleLineClick(firstId)}
+                            style={{
+                              margin: isBlockquote ? '0 0 0.9em' : '0 0 1.1em',
+                              padding: 0,
+                              paddingLeft: isList ? '1.3em' : isBlockquote ? '1em' : 0,
+                              borderLeft: isBlockquote ? `3px solid ${t.dropBorder}` : 'none',
+                              fontStyle: isBlockquote ? 'italic' as const : 'normal' as const,
+                              color: isBlockquote ? t.textMuted : 'inherit',
+                              lineHeight: 'inherit',
+                              cursor: 'pointer',
+                              borderRadius: '3px',
+                              transition: `background-color 0.2s, ${TT}`,
+                              position: 'relative' as const,
+                            }}
+                          >
+                            {/* Zero-size spans so scroll-to-sentence works for every sentence */}
+                            {item.sentences.map((s: any) => <span key={s.id} id={`line-${s.id}`} />)}
+                            {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' as const }}>•</span>}
+                            {item.richNode}
+                          </p>
+                        );
+                      }
+                      // Text / Markdown paragraph — per-sentence spans, highlight via CSS class
                       return (
                         <p key={item.id} style={{ margin: '0 0 1.1em', padding: 0, lineHeight: 'inherit' }}>
-                          {item.sentences.map((sentence: any) => {
-                            const isActive = highlightedLineIds.includes(sentence.id);
-                            return (
-                              <span
-                                key={sentence.id}
-                                id={`line-${sentence.id}`}
-                                onClick={() => handleLineClick(sentence.id)}
-                                style={{ ...styles.epubSentence, ...(isActive ? EPUB_HIGHLIGHT_STYLE : {}) }}
-                              >
-                                {sentence.md ? renderMd(sentence.md) : sentence.text}{' '}
-                              </span>
-                            );
-                          })}
+                          {item.sentences.map((sentence: any) => (
+                            <span
+                              key={sentence.id}
+                              id={`line-${sentence.id}`}
+                              onClick={() => handleLineClick(sentence.id)}
+                              style={styles.epubSentence}
+                            >
+                              {sentence.md ? renderMd(sentence.md) : sentence.text}{' '}
+                            </span>
+                          ))}
                         </p>
                       );
                     }
@@ -1446,6 +1567,15 @@ export default function App() {
 
       {/* Keyframes */}
       <style>{`
+        .epub-highlight-active {
+          background-color: rgba(250, 204, 21, 0.45) !important;
+          border-radius: 3px;
+        }
+        .pdf-highlight-active {
+          background-color: rgba(250, 204, 21, 0.45) !important;
+          box-shadow: 0 0 0 1px rgba(210, 170, 0, 0.4) !important;
+          z-index: 20 !important;
+        }
         @keyframes spin {
           to { transform: rotate(360deg); }
         }
@@ -1522,7 +1652,7 @@ export default function App() {
 
         {/* Theme toggle — at the end of the bar */}
         <button
-          onClick={() => setIsDarkMode(!isDarkMode)}
+          onClick={() => { const next = !isDarkMode; setIsDarkMode(next); localStorage.setItem('theme', next ? 'dark' : 'light'); }}
           style={styles.iconButton}
           title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
         >
@@ -1536,13 +1666,20 @@ export default function App() {
                 key={speed}
                 onClick={() => {
                   setPlaybackSpeed(speed);
-                  // Clear cache so upcoming sentences are re-generated at the
-                  // new speed (model bakes speed into audio, so stale buffers
-                  // at the old speed must be discarded).
+                  drainResolvers();
                   audioCache.current.clear();
                   pendingFetches.current.clear();
-                  audioResolvers.current.clear();
+                  // Stop current source so the new speed takes effect immediately
+                  if (currentSource.current) {
+                    try { currentSource.current.stop(); } catch(e) {}
+                    currentSource.current.disconnect();
+                    currentSource.current = null;
+                  }
+                  window.speechSynthesis.cancel();
+                  playbackSessionId.current += 1;
+                  isWaitingForAudio.current = false;
                   setIsSpeedMenuOpen(false);
+                  if (isPlaying) setRestartTrigger(p => p + 1);
                 }}
                 style={{
                   ...styles.statItem,

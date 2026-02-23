@@ -33,20 +33,22 @@ self.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Prom
 
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(STORE_NAME, 'readonly');
+    // Prevent hanging promises if the transaction aborts unexpectedly
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(new Error('IDB transaction aborted'));
+
     const store = transaction.objectStore(STORE_NAME);
     const getRequest = store.get(url);
 
     getRequest.onsuccess = () => {
       const cached = getRequest.result;
       if (cached) {
-        // console.log(`[Cache] Serving ${url} from IndexedDB`);
         resolve(new Response(cached.blob, {
           status: 200,
           statusText: 'OK',
           headers: { 'Content-Type': cached.contentType || '' },
         }));
       } else {
-        // console.log(`[Cache] Fetching ${url} from network`);
         const fetchPromise = originalFetch(url, init)
           .then(async (response) => {
             if (!response.ok) return response;
@@ -54,8 +56,8 @@ self.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Prom
             const contentType = response.headers.get('Content-Type') || '';
             const putDb = await openDatabase();
             const putTransaction = putDb.transaction(STORE_NAME, 'readwrite');
-            const putStore = putTransaction.objectStore(STORE_NAME);
-            putStore.put({ url, blob, contentType });
+            putTransaction.onerror = (err) => console.error('[Cache] IDB write failed', err);
+            putTransaction.objectStore(STORE_NAME).put({ url, blob, contentType });
             return response;
           })
           .catch(reject);

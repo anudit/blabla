@@ -229,6 +229,9 @@ export default function App() {
   // ── Derive theme tokens ──────────────────────────────────────────────
   const t = isDarkMode ? THEMES.dark : THEMES.light;
 
+  // Shared transition applied to every element that changes on theme switch
+  const TT = 'background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease';
+
   // ── Themed style objects (computed from t) ───────────────────────────
   const styles = {
     container: {
@@ -240,7 +243,7 @@ export default function App() {
       fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
       color: t.text,
       paddingTop: '1rem',
-      transition: 'background-color 0.25s, color 0.25s',
+      transition: TT,
     },
     bottomBar: {
       position: 'fixed' as const,
@@ -257,7 +260,7 @@ export default function App() {
       borderRadius: '999px',
       border: `1px solid ${t.barBorder}`,
       whiteSpace: 'nowrap' as const,
-      transition: 'background-color 0.25s, border-color 0.25s',
+      transition: TT,
     },
     statusBadgeMenu: {
       display: 'flex',
@@ -278,9 +281,10 @@ export default function App() {
       color: t.textMuted,
       padding: '0.5rem 0.25rem',
       borderBottom: `1px solid ${t.statBorder}`,
+      transition: TT,
     },
-    statLabel: { fontSize: '0.75rem', color: t.textMuted },
-    statValue: { fontSize: '0.8rem', fontWeight: '600' as const, color: t.text, fontFamily: 'monospace' },
+    statLabel: { fontSize: '0.75rem', color: t.textMuted, transition: TT },
+    statValue: { fontSize: '0.8rem', fontWeight: '600' as const, color: t.text, fontFamily: 'monospace', transition: TT },
     iconButton: {
       padding: '0.5rem',
       borderRadius: '0.375rem',
@@ -291,6 +295,7 @@ export default function App() {
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
+      transition: TT,
     },
     speedButton: {
       fontSize: '0.8rem',
@@ -302,6 +307,7 @@ export default function App() {
       border: 'none',
       minWidth: '2.5rem',
       cursor: 'pointer' as const,
+      transition: TT,
     },
     menuPopover: {
       position: 'absolute' as const,
@@ -317,6 +323,7 @@ export default function App() {
       gap: '0.5rem',
       border: `1px solid ${t.menuBorder}`,
       zIndex: 100,
+      transition: TT,
     },
     selectLabel: {
       fontSize: '0.75rem',
@@ -324,6 +331,7 @@ export default function App() {
       color: t.textMuted,
       marginTop: '0.5rem',
       marginBottom: '0.25rem',
+      transition: TT,
     },
     select: {
       width: '100%',
@@ -334,6 +342,7 @@ export default function App() {
       color: t.text,
       fontSize: '0.875rem',
       cursor: 'pointer' as const,
+      transition: TT,
     },
     testButton: {
       display: 'flex',
@@ -349,6 +358,7 @@ export default function App() {
       borderRadius: '0.375rem',
       cursor: 'pointer' as const,
       marginTop: '0.5rem',
+      transition: TT,
     },
     resetButton: {
       padding: '0.5rem',
@@ -360,6 +370,7 @@ export default function App() {
       cursor: 'pointer' as const,
       width: '100%',
       marginTop: '0.5rem',
+      transition: TT,
     },
     dropZone: {
       marginTop: '2rem',
@@ -410,11 +421,12 @@ export default function App() {
       backgroundColor: t.epubBg,
       borderRadius: '8px',
       color: t.text,
+      transition: TT,
     },
     epubSentence: {
       cursor: 'pointer' as const,
       padding: '2px 0',
-      transition: 'background-color 0.2s',
+      transition: `background-color 0.2s, ${TT}`,
       borderRadius: '4px',
     },
   };

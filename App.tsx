@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
 import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon } from 'lucide-react';
+import BookmarkHistory, { BookmarkEntry, getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
 
 // Set worker source
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
@@ -227,6 +228,12 @@ export default function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [eggPhase, setEggPhase] = useState<'in' | 'out' | null>(null);
   const eggTimerRef = useRef<any>(null);
+
+  // Bookmark / history state
+  const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>(() => getBookmarks());
+  const [currentFileId, setCurrentFileId] = useState<string | null>(null);
+  const [currentFileName, setCurrentFileName] = useState<string | null>(null);
+  const pendingResumeRef = useRef<number>(-1);
 
   // ── Derive theme tokens ──────────────────────────────────────────────
   const t = isDarkMode ? THEMES.dark : THEMES.light;
@@ -528,6 +535,41 @@ export default function App() {
     };
   }, [isPlaying, sentences.length, isModelReady, currentSentenceIndex]);
 
+  // Auto-resume: fires once sentences are loaded if a bookmark was found for this file
+  useEffect(() => {
+    if (sentences.length > 0 && pendingResumeRef.current > 0) {
+      const idx = Math.min(pendingResumeRef.current, sentences.length - 1);
+      pendingResumeRef.current = -1;
+      setCurrentSentenceIndex(idx);
+      setHighlightedLineIds(sentences[idx]?.lines || []);
+      setIsPlaying(true);
+      setTimeout(() => {
+        const lineId = sentences[idx]?.lines?.[0];
+        if (lineId !== undefined) {
+          const el = document.getElementById(`line-${lineId}`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 350);
+    }
+  }, [sentences]);
+
+  // Save progress to localStorage whenever the sentence index advances
+  useEffect(() => {
+    if (currentSentenceIndex > 0 && sentences.length > 0 && currentFileId && currentFileName && fileType && fileType !== 'text') {
+      const entry: BookmarkEntry = {
+        id: currentFileId,
+        fileName: currentFileName,
+        sentenceIndex: currentSentenceIndex,
+        totalSentences: sentences.length,
+        timestamp: Date.now(),
+        fileType: fileType as 'pdf' | 'epub',
+        preview: (sentences[currentSentenceIndex]?.text || '').slice(0, 80),
+      };
+      saveBookmark(entry);
+      setBookmarks(getBookmarks());
+    }
+  }, [currentSentenceIndex]);
+
   const triggerEasterEgg = () => {
     if (eggPhase !== null) return;
     setEggPhase('in');
@@ -804,6 +846,14 @@ export default function App() {
     setIsMenuOpen(false);
     setShowTextInput(false);
     setTextInputValue('');
+    setCurrentFileId(null);
+    setCurrentFileName(null);
+    pendingResumeRef.current = -1;
+  };
+
+  const handleDeleteBookmark = (id: string) => {
+    removeBookmark(id);
+    setBookmarks(getBookmarks());
   };
 
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
@@ -830,6 +880,13 @@ export default function App() {
     }
 
     if (file) {
+      const fileId = `${file.name}:${file.size}`;
+      setCurrentFileId(fileId);
+      setCurrentFileName(file.name);
+      // Check for existing bookmark — loader will set pendingResumeRef
+      const existing = getBookmarks().find(b => b.id === fileId);
+      if (existing) pendingResumeRef.current = existing.sentenceIndex;
+
       if (file.type === 'application/pdf') {
         const reader = new FileReader();
         reader.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer);
@@ -1058,6 +1115,7 @@ export default function App() {
     <div style={styles.container}>
 
       {sentences.length === 0 ? (
+        <>
         <div
           style={{ ...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {}) }}
           onClick={() => fileInputRef.current?.click()}
@@ -1117,6 +1175,12 @@ export default function App() {
             </div>
           )}
         </div>
+        <BookmarkHistory
+          bookmarks={bookmarks}
+          onDelete={handleDeleteBookmark}
+          isDarkMode={isDarkMode}
+        />
+        </>
       ) : (
         <div style={styles.viewer}>
           {fileType === 'pdf' && pages.map(pageData => (

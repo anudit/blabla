@@ -36,10 +36,14 @@ const server = serve({
     "/32.png": Bun.file("./32.png"),
     "/128.png": Bun.file("./128.png"),
     "/180.png": Bun.file("./180.png"),
-    "/og.png": Bun.file("./og.png"),
+    "/og.jpg": Bun.file("./og.jpg"),
 
 
-    // 4. Serve Index (Fallback for SPA)
+    // 4. SEO — robots.txt & sitemap (must be explicit routes; /* would swallow them)
+    "/robots.txt": Bun.file("./robots.txt"),
+    "/sitemap.xml": Bun.file("./sitemap.xml"),
+
+    // 5. Serve Index (Fallback for SPA)
     "/*": Bun.file("./index.html")
   },
   development: process.env.NODE_ENV !== "production" && {

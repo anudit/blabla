@@ -1,20 +1,32 @@
 {
-  "short_name": "Bla Bla",
-  "name": "Bla Bla",
+  "name": "BlaBla – AI PDF & EPUB Reader",
+  "short_name": "BlaBla",
+  "description": "Private, offline AI text-to-speech reader for PDF and EPUB files. Runs 100% in your browser.",
   "icons": [
     {
       "src": "/logo.png",
       "type": "image/png",
-      "sizes": "192x192"
+      "sizes": "192x192",
+      "purpose": "any maskable"
     },
     {
       "src": "/logo.png",
       "type": "image/png",
-      "sizes": "512x512"
+      "sizes": "512x512",
+      "purpose": "any maskable"
     }
   ],
-  "start_url": "https://blabla.anudit.dev",
+  "screenshots": [
+    {
+      "src": "/og.jpg",
+      "sizes": "1280x720",
+      "type": "image/jpeg",
+      "label": "BlaBla reading a PDF aloud with sentence highlighting"
+    }
+  ],
+  "categories": ["productivity", "utilities", "education"],
+  "start_url": "https://blabla.anudit.dev/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#0000ff"
+  "background_color": "#f5efe3",
+  "theme_color": "#2a2015"
 }

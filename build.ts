@@ -30,8 +30,10 @@ await cp("./16.png", "./dist/16.png");
 await cp("./32.png", "./dist/32.png");
 await cp("./128.png", "./dist/128.png");
 await cp("./180.png", "./dist/180.png");
-await cp("./og.png", "./dist/og.png");
+await cp("./og.jpg", "./dist/og.jpg");
 await cp("./sw.js", "./dist/sw.js");
+await cp("./sitemap.xml", "./dist/sitemap.xml");
+await cp("./robots.txt", "./dist/robots.txt");
 
 // Critical: Copy the PDF worker from node_modules to dist
 // This ensures pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs' works

@@ -10,7 +10,6 @@
 
         <!-- Primary Meta Tags -->
         <title>BlaBla – Private AI PDF & ePub Reader</title>
-        <meta name="title" content="BlaBla – Private AI PDF & ePub Reader" />
         <meta
             name="description"
             content="Read PDFs and ePubs with AI assistance right in your browser. 100% offline, fully local, private — your files never leave your device."
@@ -24,8 +23,8 @@
             property="og:description"
             content="Smart PDF and ePub reader powered by AI. Works completely offline, fully in-browser, zero data leaves your device."
         />
-        <meta property="og:image" content="https://blabla.anudit.dev/og.png" />
-        <meta property="og:image:alt" content="BlaBla reader" />
+        <meta property="og:image" content="https://blabla.anudit.dev/og.jpg" />
+        <meta property="og:image:alt" content="BlaBla reader showing a PDF being read aloud with sentence-level highlighting" />
         <meta property="og:image:width" content="1280" />
         <meta property="og:image:height" content="720" />
         <meta property="og:url" content="https://blabla.anudit.dev/" />
@@ -42,8 +41,8 @@
             name="twitter:description"
             content="Offline, local, private AI-powered PDF and ePub reader that runs entirely in your browser."
         />
-        <meta name="twitter:image" content="https://blabla.anudit.dev/og.png" />
-        <meta name="twitter:image:alt" content="BlaBla image." />
+        <meta name="twitter:image" content="https://blabla.anudit.dev/og.jpg" />
+        <meta name="twitter:image:alt" content="BlaBla reader showing a PDF being read aloud with sentence-level highlighting" />
 
         <!-- SEO & Crawlers -->
         <meta name="robots" content="index, follow" />
@@ -52,34 +51,70 @@
         <meta name="apple-mobile-web-app-title" content="BlaBla" />
         <meta
             name="theme-color"
-            content="#ffffff"
+            content="#f5efe3"
             media="(prefers-color-scheme: light)"
         />
         <meta
             name="theme-color"
-            content="#ffffff"
+            content="#1a1917"
             media="(prefers-color-scheme: dark)"
         />
 
-        <!-- Canonical (important if you have www vs non-www or subdomains later) -->
+        <!-- Canonical -->
         <link rel="canonical" href="https://blabla.anudit.dev/" />
 
-        <!-- Favicons & App Icons (you should generate all sizes) -->
+        <!-- Favicons & App Icons -->
         <link rel="icon" type="image/png" href="32.png" sizes="32x32" />
         <link rel="icon" type="image/png" href="16.png" sizes="16x16" />
         <link rel="apple-touch-icon" sizes="180x180" href="180.png" />
         <link rel="icon" type="image/png" href="logo.png" />
         <link rel="manifest" href="/manifest.json" />
 
-        <!-- Optional: very short name for homescreen -->
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
+        <!-- Structured Data -->
+        <script type="application/ld+json">
+        {
+          "@context": "https://schema.org",
+          "@type": "SoftwareApplication",
+          "name": "BlaBla",
+          "operatingSystem": "Web",
+          "applicationCategory": "UtilitiesApplication",
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          },
+          "description": "Private, offline AI-powered PDF and EPUB reader with text-to-speech. Runs 100% in your browser — no uploads, no account, your files never leave your device.",
+          "url": "https://blabla.anudit.dev/",
+          "screenshot": "https://blabla.anudit.dev/og.jpg",
+          "featureList": [
+            "PDF and EPUB support",
+            "Local AI text-to-speech",
+            "Sentence-level read-along highlighting",
+            "100% offline — no server, no uploads",
+            "Multiple AI voices",
+            "Dark and light reading modes"
+          ]
+        }
+        </script>
     </head>
     <body style="margin: 0">
-        <div id="root"></div>
+        <div id="root">
+            <h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap">BlaBla — Free Private AI PDF &amp; EPUB Reader with Text-to-Speech</h1>
+        </div>
 
-        <!-- CHANGE THIS LINE: point to your actual bundle -->
+        <noscript>
+            <div style="font-family:sans-serif;max-width:600px;margin:4rem auto;padding:1rem;text-align:center">
+                <h1>BlaBla — AI PDF &amp; EPUB Reader</h1>
+                <p>BlaBla is a free, private, offline AI-powered text-to-speech reader for PDF and EPUB files.
+                   It runs entirely in your browser — your files never leave your device.</p>
+                <p>Please enable JavaScript to use the app.</p>
+            </div>
+        </noscript>
+
         <script type="module" src="/bundle.js"></script>
     </body>
 </html>

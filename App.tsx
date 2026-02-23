@@ -1444,8 +1444,11 @@ export default function App() {
         </div>
       )}
 
-      {/* Easter egg keyframes */}
+      {/* Keyframes */}
       <style>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
         @keyframes eggBounceIn {
           0%   { transform: scale(0.15); opacity: 0; }
           55%  { transform: scale(1.18); opacity: 1; }
@@ -1505,9 +1508,11 @@ export default function App() {
             ...(sentences.length === 0 || !isModelReady ? staticStyles.buttonDisabled : {})
           }}
         >
-          {isPlaying
-            ? <Pause size={20} fill="white" />
-            : <Play size={20} fill="white" style={{ marginLeft: '2px' }} />
+          {playbackState === 'Buffering'
+            ? <Loader2 size={20} color="white" style={{ animation: 'spin 0.8s linear infinite' }} />
+            : isPlaying
+              ? <Pause size={20} fill="white" />
+              : <Play size={20} fill="white" style={{ marginLeft: '2px' }} />
           }
         </button>
 

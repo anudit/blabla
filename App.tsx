@@ -225,6 +225,8 @@ export default function App() {
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [eggPhase, setEggPhase] = useState<'in' | 'out' | null>(null);
+  const eggTimerRef = useRef<any>(null);
 
   // ── Derive theme tokens ──────────────────────────────────────────────
   const t = isDarkMode ? THEMES.dark : THEMES.light;
@@ -525,6 +527,19 @@ export default function App() {
       }
     };
   }, [isPlaying, sentences.length, isModelReady, currentSentenceIndex]);
+
+  const triggerEasterEgg = () => {
+    if (eggPhase !== null) return;
+    setEggPhase('in');
+    eggTimerRef.current = setTimeout(() => {
+      setEggPhase('out');
+      setTimeout(() => setEggPhase(null), 600);
+    }, 2400);
+  };
+
+  useEffect(() => {
+    return () => { if (eggTimerRef.current) clearTimeout(eggTimerRef.current); };
+  }, []);
 
   const triggerFallback = () => {
     if (usingFallback.current) return;
@@ -1150,9 +1165,51 @@ export default function App() {
         </div>
       )}
 
+      {/* Easter egg keyframes */}
+      <style>{`
+        @keyframes eggBounceIn {
+          0%   { transform: scale(0.15); opacity: 0; }
+          55%  { transform: scale(1.18); opacity: 1; }
+          75%  { transform: scale(0.93); }
+          90%  { transform: scale(1.05); }
+          100% { transform: scale(1);    opacity: 1; }
+        }
+        @keyframes eggFadeOut {
+          0%   { transform: scale(1);    opacity: 1; }
+          25%  { transform: scale(1.06); opacity: 1; }
+          100% { transform: scale(0.5);  opacity: 0; }
+        }
+      `}</style>
+
+      {/* Easter egg overlay */}
+      {eggPhase && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          pointerEvents: 'none',
+        }}>
+          <div style={{
+            width: '300px', height: '300px', borderRadius: '50%',
+            backgroundColor: 'white',
+            boxShadow: '0 24px 80px rgba(0,0,0,0.28), 0 0 0 1px rgba(0,0,0,0.04)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            animation: eggPhase === 'in'
+              ? 'eggBounceIn 0.55s cubic-bezier(0.34,1.56,0.64,1) forwards'
+              : 'eggFadeOut 0.6s ease-in forwards',
+          }}>
+            <img src="./logo.png" style={{ width: '250px', height: '250px' }} alt="" />
+          </div>
+        </div>
+      )}
+
       {/* Bottom Bar */}
       <div style={styles.bottomBar}>
-        <img src="./logo.png" style={{ width: '32px', height: '32px' }} alt="logo" />
+        <button
+          onClick={triggerEasterEgg}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}
+        >
+          <img src="./logo.png" style={{ width: '32px', height: '32px' }} alt="logo" />
+        </button>
 
         <button
           onClick={() => setIsSpeedMenuOpen(!isSpeedMenuOpen)}

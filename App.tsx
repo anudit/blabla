@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
 import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon } from 'lucide-react';
 import BookmarkHistory, { BookmarkEntry, getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
+import BookOutline, { OutlineEntry } from './components/BookOutline';
 
 // Set worker source
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
@@ -423,12 +424,11 @@ export default function App() {
     },
     epubContainer: {
       width: '100%',
-      padding: '0',
-      lineHeight: '1.6',
-      fontSize: '1.1rem',
+      padding: '0.25rem 0',
+      lineHeight: '1.8',
+      fontSize: '1.05rem',
       textAlign: 'left' as const,
       backgroundColor: t.epubBg,
-      borderRadius: '8px',
       color: t.text,
       transition: TT,
     },
@@ -514,7 +514,7 @@ export default function App() {
 
   useEffect(() => {
     const handleMediaKey = (e: KeyboardEvent) => {
-      if (e.key === 'MediaPlayPause') {
+      if (e.key === 'MediaPlayPause' || e.key === 'F8') {
         e.preventDefault();
         togglePlay();
       }
@@ -1104,6 +1104,28 @@ export default function App() {
     });
   };
 
+  // ── Outline (TOC) derived from epub/text headers ──────────────────────
+  const outline: OutlineEntry[] = useMemo(() =>
+    epubContent.filter(i => i.type === 'header').map(i => ({ id: i.id, text: i.text })),
+    [epubContent]
+  );
+
+  // Which header section is currently being read
+  const activeHeaderId = useMemo(() => {
+    if (currentSentenceIndex < 0 || !sentences[currentSentenceIndex]) return null;
+    const currentLines = new Set<number>(sentences[currentSentenceIndex].lines);
+    let lastId: string | null = null;
+    for (const item of epubContent) {
+      if (item.type === 'header') { lastId = item.id; }
+      else if (item.type === 'paragraph') {
+        for (const s of item.sentences) {
+          if (currentLines.has(s.id)) return lastId;
+        }
+      }
+    }
+    return null;
+  }, [currentSentenceIndex, epubContent, sentences]);
+
   const getStatusBadgeStyle = () => {
     if (ttsStatus === "Downloading...") return { ...styles.statusBadgeMenu, ...staticStyles.statusLoading };
     if (ttsStatus === "Model Ready")    return { ...styles.statusBadgeMenu, ...staticStyles.statusReady };
@@ -1194,37 +1216,66 @@ export default function App() {
           ))}
 
           {(fileType === 'epub' || fileType === 'text') && (
-            <div style={styles.epubContainer}>
-              {epubContent.map((item) => {
-                if (item.type === 'header') {
-                  return (
-                    <div key={item.id} style={{ fontSize: '1.5rem', fontWeight: 'bold', margin: '2rem 0 1rem 0', color: t.headerColor }}>
-                      {item.text}
-                    </div>
-                  );
-                }
-                if (item.type === 'paragraph') {
-                  return (
-                    <p key={item.id} style={{ margin: '0 0 1em 0', padding: 0 }}>
-                      {item.sentences.map((sentence: any) => {
-                        const isActive = highlightedLineIds.includes(sentence.id);
-                        return (
-                          <span
-                            key={sentence.id}
-                            id={`line-${sentence.id}`}
-                            onClick={() => handleLineClick(sentence.id)}
-                            style={{ ...styles.epubSentence, ...(isActive ? EPUB_HIGHLIGHT_STYLE : {}) }}
+            <>
+              <BookOutline entries={outline} activeId={activeHeaderId} isDarkMode={isDarkMode} />
+              <div style={styles.epubContainer}>
+                {(() => {
+                  let headersSeen = 0;
+                  return epubContent.map((item) => {
+                    if (item.type === 'header') {
+                      const isFirst = headersSeen === 0;
+                      headersSeen++;
+                      return (
+                        <React.Fragment key={item.id}>
+                          {!isFirst && (
+                            <hr style={{
+                              border: 'none',
+                              borderTop: `1px solid ${t.statBorder}`,
+                              margin: '3rem 0 2.5rem',
+                              opacity: 0.45,
+                            }} />
+                          )}
+                          <div
+                            id={item.id}
+                            style={{
+                              fontSize: '1.45rem',
+                              fontWeight: 700,
+                              margin: isFirst ? '0 0 1.4rem' : '0 0 1.4rem',
+                              color: t.headerColor,
+                              lineHeight: 1.25,
+                              letterSpacing: '-0.015em',
+                              scrollMarginTop: '1.5rem',
+                            }}
                           >
-                            {sentence.text}{' '}
-                          </span>
-                        );
-                      })}
-                    </p>
-                  );
-                }
-                return null;
-              })}
-            </div>
+                            {item.text}
+                          </div>
+                        </React.Fragment>
+                      );
+                    }
+                    if (item.type === 'paragraph') {
+                      return (
+                        <p key={item.id} style={{ margin: '0 0 1.1em', padding: 0, lineHeight: 'inherit' }}>
+                          {item.sentences.map((sentence: any) => {
+                            const isActive = highlightedLineIds.includes(sentence.id);
+                            return (
+                              <span
+                                key={sentence.id}
+                                id={`line-${sentence.id}`}
+                                onClick={() => handleLineClick(sentence.id)}
+                                style={{ ...styles.epubSentence, ...(isActive ? EPUB_HIGHLIGHT_STYLE : {}) }}
+                              >
+                                {sentence.text}{' '}
+                              </span>
+                            );
+                          })}
+                        </p>
+                      );
+                    }
+                    return null;
+                  });
+                })()}
+              </div>
+            </>
           )}
         </div>
       )}

@@ -606,21 +606,23 @@ export default function App() {
     const ctx = getAudioContext();
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    source.playbackRate.value = playbackSpeed;
+    // Speed is already baked into the audio by the TTS model; play at 1.0
+    // so pitch is not artificially shifted.
+    source.playbackRate.value = 1.0;
     source.connect(ctx.destination);
     source.start(0);
     setPlaybackState("Playing");
     source.onended = () => setPlaybackState("Ready");
   };
 
-  const generateAudioInWorker = (text: string, sentenceIndex: number, voice: string): Promise<AudioBuffer | null> => {
+  const generateAudioInWorker = (text: string, sentenceIndex: number, voice: string, speed: number): Promise<AudioBuffer | null> => {
     return new Promise((resolve) => {
       if (usingFallback.current || !workerRef.current) {
         resolve(null);
         return;
       }
       audioResolvers.current.set(sentenceIndex, resolve);
-      workerRef.current.postMessage({ type: 'generate', text, lineIndex: sentenceIndex, voice });
+      workerRef.current.postMessage({ type: 'generate', text, lineIndex: sentenceIndex, voice, speed });
       setTimeout(() => {
         if (audioResolvers.current.has(sentenceIndex)) {
           audioResolvers.current.delete(sentenceIndex);
@@ -647,7 +649,7 @@ export default function App() {
     isWaitingForAudio.current = false;
   };
 
-  const processSentenceAudio = async (index: number, sessionId: number, voice: string): Promise<AudioBuffer | null> => {
+  const processSentenceAudio = async (index: number, sessionId: number, voice: string, speed: number): Promise<AudioBuffer | null> => {
     if (usingFallback.current) return null;
     if (index >= sentences.length) return null;
     if (audioCache.current.has(index)) return audioCache.current.get(index);
@@ -658,7 +660,7 @@ export default function App() {
 
     pendingFetches.current.add(index);
     try {
-      const buffer = await generateAudioInWorker(text, index, voice);
+      const buffer = await generateAudioInWorker(text, index, voice, speed);
       if (!buffer) return null;
 
       if (sessionId === playbackSessionId.current) {
@@ -725,7 +727,7 @@ export default function App() {
 
     for (let i = 1; i <= 3; i++) {
       if (currentSentenceIndex + i < sentences.length && !audioCache.current.has(currentSentenceIndex + i)) {
-        processSentenceAudio(currentSentenceIndex + i, currentSession, selectedVoice);
+        processSentenceAudio(currentSentenceIndex + i, currentSession, selectedVoice, playbackSpeed);
       }
     }
 
@@ -733,7 +735,7 @@ export default function App() {
     if (!buffer) {
       setPlaybackState("Buffering");
       isWaitingForAudio.current = true;
-      buffer = await processSentenceAudio(currentSentenceIndex, currentSession, selectedVoice);
+      buffer = await processSentenceAudio(currentSentenceIndex, currentSession, selectedVoice, playbackSpeed);
       isWaitingForAudio.current = false;
     }
 
@@ -747,7 +749,9 @@ export default function App() {
     if (buffer) {
       const source = audioContext.current!.createBufferSource();
       source.buffer = buffer;
-      source.playbackRate.value = playbackSpeed;
+      // Speed is baked into the audio by the TTS model; play at 1.0 so the
+      // model's native tempo is preserved without raising pitch.
+      source.playbackRate.value = 1.0;
       source.connect(audioContext.current!.destination);
       source.onended = () => {
         currentSource.current = null;
@@ -823,7 +827,7 @@ export default function App() {
       setPlaybackState("Testing");
     } else {
       setPlaybackState("Generating");
-      workerRef.current?.postMessage({ type: 'generate', text, voice: selectedVoice });
+      workerRef.current?.postMessage({ type: 'generate', text, voice: selectedVoice, speed: playbackSpeed });
     }
   };
 
@@ -1365,7 +1369,16 @@ export default function App() {
             {[1.0, 1.25, 1.5, 2.0].map(speed => (
               <button
                 key={speed}
-                onClick={() => { setPlaybackSpeed(speed); setIsSpeedMenuOpen(false); }}
+                onClick={() => {
+                  setPlaybackSpeed(speed);
+                  // Clear cache so upcoming sentences are re-generated at the
+                  // new speed (model bakes speed into audio, so stale buffers
+                  // at the old speed must be discarded).
+                  audioCache.current.clear();
+                  pendingFetches.current.clear();
+                  audioResolvers.current.clear();
+                  setIsSpeedMenuOpen(false);
+                }}
                 style={{
                   ...styles.statItem,
                   width: '100%', cursor: 'pointer',

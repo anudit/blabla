@@ -94,7 +94,7 @@ function getSystemCapabilities() {
 
 type WorkerMessage =
   | { type: 'init' }
-  | { type: 'generate', text: string, lineIndex?: number, voice?: string };
+  | { type: 'generate', text: string, lineIndex?: number, voice?: string, speed?: number };
 
 const model_id = "onnx-community/Kokoro-82M-v1.0-ONNX";
 let tts: KokoroTTS | null = null;
@@ -131,12 +131,15 @@ self.addEventListener("message", async (e: MessageEvent<WorkerMessage>) => {
       self.postMessage({ status: 'ready', device, dtype });
     }
     else if (type === 'generate') {
-      const { text, lineIndex, voice } = e.data;
+      const { text, lineIndex, voice, speed } = e.data;
       if (!tts) throw new Error("TTS not initialized");
 
       const audio = await tts.generate(text, {
         voice: voice || "af_bella",
-        speed: 1.0,
+        // Use native model speed so pitch stays natural at all rates.
+        // Raising playbackRate in Web Audio shifts pitch up; passing speed
+        // here lets the model handle tempo while preserving pitch.
+        speed: speed ?? 1.0,
       });
 
       self.postMessage({

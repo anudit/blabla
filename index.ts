@@ -9,6 +9,12 @@ const server = serve({
         entrypoints: ["./frontend.tsx"],
         target: "browser",
         minify: process.env.NODE_ENV === "production",
+        alias: {
+          "react": "preact/compat",
+          "react-dom": "preact/compat",
+          "react/jsx-runtime": "preact/jsx-runtime",
+          "react-dom/client": "preact/compat/client",
+        },
       });
       return new Response(build.outputs[0], {
         headers: { 'Content-Type': 'application/javascript' }
@@ -21,6 +27,12 @@ const server = serve({
         entrypoints: ["./tts.worker.ts"],
         target: "browser",
         minify: process.env.NODE_ENV === "production",
+        alias: {
+          "react": "preact/compat",
+          "react-dom": "preact/compat",
+          "react/jsx-runtime": "preact/jsx-runtime",
+          "react-dom/client": "preact/compat/client",
+        },
       });
       return new Response(build.outputs[0], {
         headers: { 'Content-Type': 'application/javascript' }

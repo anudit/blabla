@@ -1,5 +1,5 @@
 {
-  "name": "bun-react-template",
+  "name": "blabla",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,12 +15,9 @@
     "kokoro-js": "^1.2.1",
     "lucide-react": "^0.575.0",
     "pdfjs-dist": "^5.4.624",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "preact": "^10.28.4"
   },
   "devDependencies": {
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
     "@types/bun": "latest"
   }
 }

@@ -6,12 +6,20 @@ console.log("🧹 Cleaning dist folder...");
 await rm("./dist", { recursive: true, force: true });
 
 console.log("📦 Building Frontend (bundle.js)...");
+const preactAlias = {
+  "react": "preact/compat",
+  "react-dom": "preact/compat",
+  "react/jsx-runtime": "preact/jsx-runtime",
+  "react-dom/client": "preact/compat/client",
+};
+
 await build({
   entrypoints: ["./frontend.tsx"],
   outdir: "./dist",
-  naming: "bundle.js", // Explicitly naming it bundle.js to match index.html
+  naming: "bundle.js",
   target: "browser",
   minify: true,
+  alias: preactAlias,
 });
 
 console.log("⚙️ Building TTS Worker...");
@@ -20,6 +28,7 @@ await build({
   outdir: "./dist",
   target: "browser",
   minify: true,
+  alias: preactAlias,
 });
 
 console.log("📂 Copying Static Assets...");

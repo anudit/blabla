@@ -1,14 +1,15 @@
 import React from 'react';
-import { Clock, Trash2, BookOpen, FileText } from 'lucide-react';
+import { Clock, Trash2, BookOpen, FileText, Globe } from 'lucide-react';
 
 export interface BookmarkEntry {
-  id: string;           // fileName + ':' + fileSize
-  fileName: string;
+  id: string;           // URL for web articles, fileName+':'+fileSize for local files
+  fileName: string;     // page title for URLs, filename for local files
   sentenceIndex: number;
   totalSentences: number;
   timestamp: number;
-  fileType: 'pdf' | 'epub';
+  fileType: 'pdf' | 'epub' | 'url';
   preview: string;      // text snippet at saved position (max 80 chars)
+  url?: string;         // original URL, present when fileType === 'url'
 }
 
 // ── LocalStorage helpers ───────────────────────────────────────────────
@@ -44,11 +45,14 @@ function timeAgo(ts: number): string {
 // ── Component ──────────────────────────────────────────────────────────
 interface Props {
   bookmarks: BookmarkEntry[];
+  onSelect: (entry: BookmarkEntry) => void;
   onDelete: (id: string) => void;
   isDarkMode: boolean;
 }
 
-export default function BookmarkHistory({ bookmarks, onDelete, isDarkMode }: Props) {
+const ICON = { epub: BookOpen, pdf: FileText, url: Globe } as const;
+
+export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkMode }: Props) {
   if (bookmarks.length === 0) return null;
 
   const t = isDarkMode ? {
@@ -79,6 +83,9 @@ export default function BookmarkHistory({ bookmarks, onDelete, isDarkMode }: Pro
     deleteColor:    '#c0b4a4',
   };
 
+  // Whether any non-url entry exists (to show the drop hint)
+  const hasLocalFiles = bookmarks.some(b => b.fileType !== 'url');
+
   return (
     <div style={{ width: '90%', maxWidth: '42rem', marginTop: '1.5rem', marginBottom: '2rem' }}>
 
@@ -96,11 +103,13 @@ export default function BookmarkHistory({ bookmarks, onDelete, isDarkMode }: Pro
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
         {bookmarks.map(entry => {
           const pct = Math.min(100, Math.round((entry.sentenceIndex / Math.max(entry.totalSentences, 1)) * 100));
-          const Icon = entry.fileType === 'epub' ? BookOpen : FileText;
+          const Icon = ICON[entry.fileType] ?? FileText;
+          const isUrl = entry.fileType === 'url';
 
           return (
             <div
               key={entry.id}
+              onClick={() => isUrl && onSelect(entry)}
               style={{
                 backgroundColor: t.itemBg,
                 border: `1px solid ${t.itemBorder}`,
@@ -111,6 +120,7 @@ export default function BookmarkHistory({ bookmarks, onDelete, isDarkMode }: Pro
                 alignItems: 'center',
                 transition: 'background-color 0.15s',
                 userSelect: 'none',
+                cursor: isUrl ? 'pointer' : 'default',
               }}
               onMouseEnter={e => (e.currentTarget.style.backgroundColor = t.itemBgHover)}
               onMouseLeave={e => (e.currentTarget.style.backgroundColor = t.itemBg)}
@@ -128,7 +138,7 @@ export default function BookmarkHistory({ bookmarks, onDelete, isDarkMode }: Pro
               {/* Main content */}
               <div style={{ flex: 1, minWidth: 0 }}>
 
-                {/* Top row: filename + timestamp */}
+                {/* Top row: title + timestamp */}
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.15rem' }}>
                   <span style={{
                     fontSize: '0.82rem', fontWeight: 600, color: t.text,
@@ -140,6 +150,17 @@ export default function BookmarkHistory({ bookmarks, onDelete, isDarkMode }: Pro
                     {timeAgo(entry.timestamp)}
                   </span>
                 </div>
+
+                {/* Domain for URL entries */}
+                {isUrl && entry.url && (
+                  <p style={{
+                    fontSize: '0.7rem', color: t.textMuted,
+                    margin: '0 0 0.2rem',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {(() => { try { return new URL(entry.url).hostname; } catch { return entry.url; } })()}
+                  </p>
+                )}
 
                 {/* Preview snippet */}
                 {entry.preview && (
@@ -197,12 +218,11 @@ export default function BookmarkHistory({ bookmarks, onDelete, isDarkMode }: Pro
         })}
       </div>
 
-      <p style={{
-        fontSize: '0.68rem', color: t.textMuted, marginTop: '0.6rem',
-        textAlign: 'center',
-      }}>
-        Drop the same file again to resume from where you left off
-      </p>
+      {hasLocalFiles && (
+        <p style={{ fontSize: '0.68rem', color: t.textMuted, marginTop: '0.6rem', textAlign: 'center' }}>
+          Drop the same file again to resume from where you left off
+        </p>
+      )}
     </div>
   );
 }

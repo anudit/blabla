@@ -236,7 +236,7 @@ function renderMd(text: string, linkColor: string = '#3b82f6'): React.ReactNode 
       // Link: [text](url) → styled anchor
       const lm = s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
       if (lm) {
-        parts.push(<a key={ki++} href={lm[2]} target="_blank" rel="noopener noreferrer" style={{ color: linkColor, textDecoration: 'underline', textUnderlineOffset: '2px', textDecorationColor: linkColor + '80' }}>{lm[1]}</a>);
+        parts.push(<a key={ki++} href={lm[2]} target="_blank" rel="noopener noreferrer" style={{ color: linkColor, textDecoration: 'none', textUnderlineOffset: '2px', textDecorationColor: linkColor + '80' }}>{lm[1]}</a>);
       } else {
         parts.push(s);
       }
@@ -670,7 +670,16 @@ export default function App() {
 
   useEffect(() => {
     const handleMediaKey = (e: KeyboardEvent) => {
+      // Physical media play/pause key (Mac Touch Bar, keyboard media keys)
       if (e.key === 'MediaPlayPause' || e.key === 'F8') {
+        e.preventDefault();
+        togglePlay();
+        return;
+      }
+      // Space bar: toggle play, but never when focus is inside an input/textarea
+      if (e.code === 'Space' && sentences.length > 0) {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
         e.preventDefault();
         togglePlay();
       }
@@ -691,6 +700,18 @@ export default function App() {
     };
   }, [isPlaying, sentences.length, isModelReady, currentSentenceIndex]);
 
+  // Keep the OS media session in sync so macOS/Windows media keys are forwarded
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+  }, [isPlaying]);
+
+  // Set media session metadata when a file is loaded
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !currentFileName) return;
+    navigator.mediaSession.metadata = new MediaMetadata({ title: currentFileName, artist: 'blabla reader' });
+  }, [currentFileName]);
+
   // Auto-resume: fires once sentences are loaded if a bookmark was found for this file
   useEffect(() => {
     if (sentences.length > 0 && pendingResumeRef.current > 0) {
@@ -704,15 +725,19 @@ export default function App() {
 
   // Save progress to localStorage whenever the sentence index advances
   useEffect(() => {
-    if (currentSentenceIndex > 0 && sentences.length > 0 && currentFileId && currentFileName && fileType && fileType !== 'text') {
+    if (currentSentenceIndex > 0 && sentences.length > 0 && currentFileId && currentFileName && fileType) {
+      const isUrl = currentFileId.startsWith('http://') || currentFileId.startsWith('https://');
+      // Skip plain text / local md/txt files (no stable ID to resume from)
+      if (fileType === 'text' && !isUrl) return;
       const entry: BookmarkEntry = {
         id: currentFileId,
         fileName: currentFileName,
         sentenceIndex: currentSentenceIndex,
         totalSentences: sentences.length,
         timestamp: Date.now(),
-        fileType: fileType as 'pdf' | 'epub',
+        fileType: isUrl ? 'url' : fileType as 'pdf' | 'epub',
         preview: (sentences[currentSentenceIndex]?.text || '').slice(0, 80),
+        ...(isUrl ? { url: currentFileId } : {}),
       };
       saveBookmark(entry);
       setBookmarks(getBookmarks());
@@ -1013,6 +1038,12 @@ export default function App() {
     setBookmarks(getBookmarks());
   };
 
+  const handleSelectBookmark = (entry: BookmarkEntry) => {
+    if (entry.fileType === 'url' && entry.url) {
+      handleUrlLoad(entry.url);
+    }
+  };
+
   const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newVoice = e.target.value;
     setSelectedVoice(newVoice);
@@ -1084,6 +1115,15 @@ export default function App() {
       if (!res.ok) throw new Error(`Could not fetch URL (${res.status})`);
       const markdown = await res.text();
       if (!markdown.trim()) throw new Error('No content returned for that URL');
+      // Extract page title from Jina "Title: …" header line, fall back to hostname
+      const titleLine = markdown.match(/^Title:\s*(.+)/m);
+      const pageTitle = titleLine ? titleLine[1].trim() : new URL(url).hostname;
+      // Set identity before loadMarkdown so the auto-save effect can pick it up
+      setCurrentFileId(url);
+      setCurrentFileName(pageTitle);
+      // Resume from saved position if this URL was read before
+      const existing = getBookmarks().find(b => b.id === url);
+      if (existing) pendingResumeRef.current = existing.sentenceIndex;
       setUrlInputValue('');
       loadMarkdown(markdown);
     } catch (err: any) {
@@ -1604,6 +1644,7 @@ export default function App() {
         </div>
         <BookmarkHistory
           bookmarks={bookmarks}
+          onSelect={handleSelectBookmark}
           onDelete={handleDeleteBookmark}
           isDarkMode={isDarkMode}
         />

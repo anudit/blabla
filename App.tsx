@@ -106,52 +106,105 @@ const THEMES = {
   },
 };
 
-// ── PDFPage (receives pageContainerStyle as prop for theming) ──────────
-const PDFPage = React.memo(({ data, onLineClick, pageContainerStyle }: any) => {
+// ── PDFPage (lazy canvas rendering via IntersectionObserver) ──────────
+const PDFPage = React.memo(({ data, pdfDoc, onLineClick, pageContainerStyle }: any) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<any>(null);
+  const pageRef = useRef<any>(null);
+  const isVisibleRef = useRef(false);
 
   useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !pdfDoc) return;
+
     const renderPage = async () => {
-      if (canvasRef.current && data) {
-        if (renderTaskRef.current) {
-          try { await renderTaskRef.current.cancel(); } catch (e) {}
-        }
-        const ctx = canvasRef.current.getContext('2d');
+      if (!canvasRef.current || !isVisibleRef.current) return;
+      // Cancel any in-flight render
+      if (renderTaskRef.current) {
+        try { renderTaskRef.current.cancel(); } catch (e) {}
+        renderTaskRef.current = null;
+      }
+      try {
+        const page = await pdfDoc.getPage(data.pageNumber);
+        pageRef.current = page;
+        if (!isVisibleRef.current) { page.cleanup(); pageRef.current = null; return; }
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        canvas.width = data.viewport.width;
+        canvas.height = data.viewport.height;
+        const ctx = canvas.getContext('2d');
         if (!ctx) return;
-        const renderTask = data.page.render({ canvasContext: ctx, viewport: data.viewport });
+        const renderTask = page.render({ canvasContext: ctx, viewport: data.viewport });
         renderTaskRef.current = renderTask;
-        try {
-          await renderTask.promise;
-        } catch (e: any) {
-          if (e.name !== 'RenderingCancelledException') console.error("Render error:", e);
-        }
+        await renderTask.promise;
+      } catch (e: any) {
+        if (e.name !== 'RenderingCancelledException') console.error("Render error:", e);
       }
     };
-    renderPage();
-    return () => { if (renderTaskRef.current) renderTaskRef.current.cancel(); };
-  }, [data]);
+
+    const cleanupPage = () => {
+      if (renderTaskRef.current) {
+        try { renderTaskRef.current.cancel(); } catch (e) {}
+        renderTaskRef.current = null;
+      }
+      if (pageRef.current) {
+        pageRef.current.cleanup();
+        pageRef.current = null;
+      }
+      // Free canvas bitmap memory
+      if (canvasRef.current) {
+        canvasRef.current.width = 0;
+        canvasRef.current.height = 0;
+      }
+    };
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry.isIntersecting && !isVisibleRef.current) {
+          isVisibleRef.current = true;
+          renderPage();
+        } else if (!entry.isIntersecting && isVisibleRef.current) {
+          isVisibleRef.current = false;
+          cleanupPage();
+        }
+      },
+      { rootMargin: '1200px 0px' }
+    );
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+      isVisibleRef.current = false;
+      cleanupPage();
+    };
+  }, [data, pdfDoc]);
+
+  // Aspect-ratio placeholder so scroll position is stable before canvas renders
+  const aspectRatio = data.viewport.height / data.viewport.width;
 
   return (
-    <div style={{ ...pageContainerStyle, maxWidth: data.viewport.width }}>
-      <canvas ref={canvasRef} width={data.viewport.width} height={data.viewport.height} style={staticStyles.canvas} />
-      <div style={staticStyles.overlay}>
-        {data.lines.map((line: any) => (
-          <div
-            key={line.id}
-            id={`line-${line.id}`}
-            onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
-            style={{
-              ...staticStyles.lineBase,
-              left: line.left, top: line.top, width: line.width, height: line.height,
-            }}
-          />
-        ))}
+    <div ref={containerRef} style={{ ...pageContainerStyle, maxWidth: data.viewport.width }}>
+      <div style={{ position: 'relative', width: '100%', paddingBottom: `${aspectRatio * 100}%` }}>
+        <canvas ref={canvasRef} style={{ ...staticStyles.canvas, position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }} />
+        <div style={{ ...staticStyles.overlay, position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}>
+          {data.lines.map((line: any) => (
+            <div
+              key={line.id}
+              id={`line-${line.id}`}
+              onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
+              style={{
+                ...staticStyles.lineBase,
+                left: line.left, top: line.top, width: line.width, height: line.height,
+              }}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );
-// Only re-render when the actual page data changes (page number is stable after load)
-}, (prev, next) => prev.data.pageNumber === next.data.pageNumber);
+}, (prev, next) => prev.data.pageNumber === next.data.pageNumber && prev.pdfDoc === next.pdfDoc);
 
 function findTitleInToc(toc: any[], href: string): string | null {
   for (const entry of toc) {
@@ -825,6 +878,9 @@ export default function App() {
       audioContext.current.close();
       audioContext.current = null;
     }
+    audioCache.current.clear();
+    pendingFetches.current.clear();
+    drainResolvers();
     setPlaybackState("Stopped");
     isWaitingForAudio.current = false;
   };
@@ -1013,6 +1069,7 @@ export default function App() {
   const resetReader = () => {
     setIsPlaying(false);
     stopAllAudio();
+    if (pdfDoc) { try { pdfDoc.destroy(); } catch(e) {} }
     setPdfDoc(null);
     setPages([]);
     setAllLines([]);
@@ -1389,7 +1446,6 @@ export default function App() {
             const cleanText = rawText.replace(/\s+/g, ' ').trim();
             if (!cleanText) continue;
 
-            const richNode = runsToReactNode(runs);
             const paraId = `para-${globalLineIdCounter}`;
             const paraSentences: any[] = [];
             for (const sText of extractSentences(cleanText)) {
@@ -1399,7 +1455,8 @@ export default function App() {
               paraSentences.push({ id: lineId, text: sText });
             }
             if (paraSentences.length > 0) {
-              contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, richNode });
+              // Store lightweight runs array instead of pre-built React nodes
+              contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs });
             }
           }
         } catch (err) { console.error("Error loading chapter", err); }
@@ -1419,14 +1476,18 @@ export default function App() {
       setPdfDoc(doc);
       const newPages = [];
       let globalLineList: any[] = [];
+      const scale = Math.min(window.devicePixelRatio || 1, 2);
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
-        const scale = 1.5;
         const viewport = page.getViewport({ scale });
         const textContent = await page.getTextContent();
         const lines = processTextContent(textContent, viewport, scale, globalLineList.length);
         globalLineList.push(...lines);
-        newPages.push({ page, viewport, lines, pageNumber: i });
+        // Store only metadata — page proxy fetched on-demand during render
+        newPages.push({ viewport, lines, pageNumber: i });
+        page.cleanup();
+        // Yield to main thread every 10 pages to let GC breathe
+        if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
       }
 
       const fullText = globalLineList.map(l => l.text).join(' ');
@@ -1655,6 +1716,7 @@ export default function App() {
             <PDFPage
               key={pageData.pageNumber}
               data={pageData}
+              pdfDoc={pdfDoc}
               onLineClick={handleLineClick}
               pageContainerStyle={styles.pageContainer}
             />
@@ -1726,7 +1788,7 @@ export default function App() {
                       const isBlockquote = item.elementType === 'blockquote';
                       const isList = item.elementType === 'li';
                       // EPUB paragraph — rich formatting, paragraph-level highlighting via CSS class
-                      if (item.richNode) {
+                      if (item.runs) {
                         const firstId = item.sentences[0]?.id;
                         return (
                           <p
@@ -1749,7 +1811,7 @@ export default function App() {
                             {/* Zero-size spans so scroll-to-sentence works for every sentence */}
                             {item.sentences.map((s: any) => <span key={s.id} id={`line-${s.id}`} />)}
                             {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' as const }}>•</span>}
-                            {item.richNode}
+                            {runsToReactNode(item.runs)}
                           </p>
                         );
                       }

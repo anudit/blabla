@@ -106,6 +106,37 @@ const THEMES = {
   },
 };
 
+// ── LazyBlock (hides off-screen EPUB/text content to free DOM memory) ─
+const LazyBlock = React.memo(({ children }: { children: React.ReactNode }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(true); // start visible for initial paint + resume scroll
+  const measuredH = useRef(0);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      ([e]) => {
+        if (e.isIntersecting) {
+          setVisible(true);
+        } else {
+          measuredH.current = el.getBoundingClientRect().height;
+          setVisible(false);
+        }
+      },
+      { rootMargin: '800px 0px' }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div ref={ref} style={visible ? undefined : { height: measuredH.current }}>
+      {visible ? children : null}
+    </div>
+  );
+});
+
 // ── PDFPage (lazy canvas rendering via IntersectionObserver) ──────────
 const PDFPage = React.memo(({ data, pdfDoc, onLineClick, pageContainerStyle }: any) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1461,6 +1492,8 @@ export default function App() {
           }
         } catch (err) { console.error("Error loading chapter", err); }
       }
+      // Free epub.js internals — zip archive, parsed DOMs, caches
+      try { book.destroy(); } catch(e) {}
       setSentences(newSentences);
       setEpubContent(contentData);
     } catch (e) {
@@ -1791,8 +1824,8 @@ export default function App() {
                       if (item.runs) {
                         const firstId = item.sentences[0]?.id;
                         return (
+                          <LazyBlock key={item.id}>
                           <p
-                            key={item.id}
                             onClick={() => firstId !== undefined && handleLineClick(firstId)}
                             style={{
                               margin: isBlockquote ? '0 0 0.9em' : '0 0 1.1em',
@@ -1813,11 +1846,13 @@ export default function App() {
                             {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' as const }}>•</span>}
                             {runsToReactNode(item.runs)}
                           </p>
+                          </LazyBlock>
                         );
                       }
                       // Text / Markdown paragraph — per-sentence spans, highlight via CSS class
                       return (
-                        <p key={item.id} style={{ margin: '0 0 1.1em', padding: 0, lineHeight: 'inherit' }}>
+                        <LazyBlock key={item.id}>
+                        <p style={{ margin: '0 0 1.1em', padding: 0, lineHeight: 'inherit' }}>
                           {item.sentences.map((sentence: any) => (
                             <span
                               key={sentence.id}
@@ -1829,11 +1864,13 @@ export default function App() {
                             </span>
                           ))}
                         </p>
+                        </LazyBlock>
                       );
                     }
                     if (item.type === 'code') {
                       return (
-                        <pre key={item.id} style={{
+                        <LazyBlock key={item.id}>
+                        <pre style={{
                           backgroundColor: isDarkMode ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.04)',
                           border: `1px solid ${t.statBorder}`,
                           borderRadius: '0.5rem',
@@ -1848,12 +1885,14 @@ export default function App() {
                         }}>
                           <code>{item.text}</code>
                         </pre>
+                        </LazyBlock>
                       );
                     }
                     if (item.type === 'table') {
                       const lc = isDarkMode ? '#60a5fa' : '#2563eb';
                       return (
-                        <div key={item.id} style={{ overflowX: 'auto', margin: '0 0 1.5em', borderRadius: '0.5rem', border: `1px solid ${t.statBorder}` }}>
+                        <LazyBlock key={item.id}>
+                        <div style={{ overflowX: 'auto', margin: '0 0 1.5em', borderRadius: '0.5rem', border: `1px solid ${t.statBorder}` }}>
                           <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.82rem', minWidth: '320px' }}>
                             {item.headers.length > 0 && (
                               <thead>
@@ -1879,11 +1918,13 @@ export default function App() {
                             </tbody>
                           </table>
                         </div>
+                        </LazyBlock>
                       );
                     }
                     if (item.type === 'image') {
                       return (
-                        <div key={item.id} style={{ textAlign: 'center', margin: '1.2em 0' }}>
+                        <LazyBlock key={item.id}>
+                        <div style={{ textAlign: 'center', margin: '1.2em 0' }}>
                           <img
                             src={item.src}
                             alt={item.alt}
@@ -1892,6 +1933,7 @@ export default function App() {
                           />
                           {item.alt && <p style={{ fontSize: '0.78rem', color: t.textMuted, margin: '0.4em 0 0', fontStyle: 'italic' }}>{item.alt}</p>}
                         </div>
+                        </LazyBlock>
                       );
                     }
                     if (item.type === 'hr') {

@@ -106,36 +106,18 @@ const THEMES = {
   },
 };
 
-// ── LazyBlock (hides off-screen EPUB/text content to free DOM memory) ─
-const LazyBlock = React.memo(({ children }: { children: React.ReactNode }) => {
-  const ref = useRef<HTMLDivElement>(null);
-  const [visible, setVisible] = useState(true); // start visible for initial paint + resume scroll
-  const measuredH = useRef(0);
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      ([e]) => {
-        if (e.isIntersecting) {
-          setVisible(true);
-        } else {
-          measuredH.current = el.getBoundingClientRect().height;
-          setVisible(false);
-        }
-      },
-      { rootMargin: '800px 0px' }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  return (
-    <div ref={ref} style={visible ? undefined : { height: measuredH.current }}>
-      {visible ? children : null}
-    </div>
-  );
-});
+// ── LazyBlock (skip rendering off-screen EPUB/text content) ───────────
+// Uses CSS content-visibility:auto so the browser skips layout/paint for
+// off-screen blocks while keeping the DOM intact.  This preserves:
+//   • Cmd+F / browser find (text stays in DOM)
+//   • getElementById for scroll-to-resume (line-* spans stay in DOM)
+const lazyBlockStyle: React.CSSProperties = {
+  contentVisibility: 'auto' as any,
+  containIntrinsicSize: 'auto 200px' as any,
+};
+const LazyBlock = React.memo(({ children }: { children: React.ReactNode }) => (
+  <div style={lazyBlockStyle}>{children}</div>
+));
 
 // ── PDFPage (lazy canvas rendering via IntersectionObserver) ──────────
 const PDFPage = React.memo(({ data, pdfDoc, onLineClick, pageContainerStyle }: any) => {

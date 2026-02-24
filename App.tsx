@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon } from 'lucide-react';
+import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon, Globe } from 'lucide-react';
 import BookmarkHistory, { BookmarkEntry, getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
 import BookOutline, { OutlineEntry } from './components/BookOutline';
 
@@ -165,18 +165,28 @@ function findTitleInToc(toc: any[], href: string): string | null {
 }
 
 function extractSentences(text: string): string[] {
+  // Protect markdown links, images, and inline code from being split at
+  // dots/! inside URLs or code (e.g. https://dev.to/... would otherwise
+  // be treated as a sentence boundary).
+  const saved: string[] = [];
+  const safe = text.replace(/!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\)|`[^`\n]+`/g, (m) => {
+    return `\x00${saved.push(m) - 1}\x00`;
+  });
+
   const sentences: string[] = [];
   const sentenceRegex = /[^.!?]+[.!?]+/g;
   let lastIndex = 0;
   let match;
-  while ((match = sentenceRegex.exec(text)) !== null) {
+  while ((match = sentenceRegex.exec(safe)) !== null) {
     const sText = match[0].trim().replace(/\s+/g, ' ');
     if (sText.length > 0) sentences.push(sText);
     lastIndex = match.index + match[0].length;
   }
-  const remaining = text.slice(lastIndex).trim().replace(/\s+/g, ' ');
+  const remaining = safe.slice(lastIndex).trim().replace(/\s+/g, ' ');
   if (remaining.length > 0) sentences.push(remaining);
-  return sentences;
+
+  // Restore the protected patterns
+  return sentences.map(s => s.replace(/\x00(\d+)\x00/g, (_, i) => saved[+i]));
 }
 
 // ── Markdown helpers (no deps, works offline) ─────────────────────────
@@ -184,6 +194,7 @@ function extractSentences(text: string): string[] {
 /** Strip inline markdown syntax for clean TTS text. */
 function stripMd(s: string): string {
   return s
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')   // remove images entirely
     .replace(/\*\*([^*]+)\*\*/g, '$1')
     .replace(/__([^_]+)__/g, '$1')
     .replace(/~~([^~]+)~~/g, '$1')
@@ -198,17 +209,22 @@ function isMarkdown(text: string): boolean {
   return /^#{1,6} \S/m.test(text);
 }
 
-// Matches **bold**, __bold__, ~~strike~~, *italic*, _italic_, `code`, [text](url)
-const INLINE_MD_RE = /\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/g;
+// Image must come before link pattern (both start with `[`)
+// Matches ![alt](src), **bold**, __bold__, ~~strike~~, *italic*, _italic_, `code`, [text](url)
+const INLINE_MD_RE = /!\[[^\]]*\]\([^)]+\)|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/g;
 
 /** Render inline markdown to React nodes for visual display. */
-function renderMd(text: string): React.ReactNode {
+function renderMd(text: string, linkColor: string = '#3b82f6'): React.ReactNode {
   const parts: React.ReactNode[] = [];
   let ki = 0, last = 0;
   for (const m of text.matchAll(new RegExp(INLINE_MD_RE.source, 'g'))) {
     if (m.index! > last) parts.push(text.slice(last, m.index));
     const s = m[0];
-    if (s.startsWith('**') || s.startsWith('__')) {
+    if (s.startsWith('![')) {
+      // Inline image — render small inline img
+      const imgM = s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
+      if (imgM) parts.push(<img key={ki++} src={imgM[2]} alt={imgM[1]} style={{ maxWidth: '100%', borderRadius: '4px', verticalAlign: 'middle', margin: '0 2px' }} />);
+    } else if (s.startsWith('**') || s.startsWith('__')) {
       parts.push(<strong key={ki++}>{s.slice(2, -2)}</strong>);
     } else if (s.startsWith('~~')) {
       parts.push(<s key={ki++}>{s.slice(2, -2)}</s>);
@@ -217,8 +233,13 @@ function renderMd(text: string): React.ReactNode {
     } else if (s.startsWith('`')) {
       parts.push(<code key={ki++} style={{ fontFamily: 'monospace', fontSize: '0.88em', padding: '0.1em 0.25em', backgroundColor: 'rgba(127,127,127,0.15)', borderRadius: '3px' }}>{s.slice(1, -1)}</code>);
     } else {
-      // Link: show text, drop href
-      parts.push((s.match(/\[([^\]]+)\]/) || ['', s])[1]);
+      // Link: [text](url) → styled anchor
+      const lm = s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (lm) {
+        parts.push(<a key={ki++} href={lm[2]} target="_blank" rel="noopener noreferrer" style={{ color: linkColor, textDecoration: 'underline', textUnderlineOffset: '2px', textDecorationColor: linkColor + '80' }}>{lm[1]}</a>);
+      } else {
+        parts.push(s);
+      }
     }
     last = m.index! + s.length;
   }
@@ -282,6 +303,9 @@ export default function App() {
   const [epubContent, setEpubContent] = useState<any[]>([]);
   const [showTextInput, setShowTextInput] = useState(false);
   const [textInputValue, setTextInputValue] = useState('');
+  const [urlInputValue, setUrlInputValue] = useState('');
+  const [isUrlLoading, setIsUrlLoading] = useState(false);
+  const [urlError, setUrlError] = useState('');
 
   const [ttsStatus, setTtsStatus] = useState("Init");
   const [isModelReady, setIsModelReady] = useState(false);
@@ -569,6 +593,27 @@ export default function App() {
       playCurrentSentence();
     }
   }, [isPlaying, currentSentenceIndex, restartTrigger]);
+
+  // ── Global Cmd+V paste → URL or text load on landing page ──────────────
+  useEffect(() => {
+    if (sentences.length > 0) return;
+    const handler = (e: ClipboardEvent) => {
+      // Ignore if user is typing inside an input/textarea
+      const tag = (document.activeElement as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const text = e.clipboardData?.getData('text') ?? '';
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      e.preventDefault();
+      if (/^https?:\/\/\S+$/.test(trimmed)) {
+        handleUrlLoad(trimmed);
+      } else {
+        loadText(trimmed);
+      }
+    };
+    window.addEventListener('paste', handler);
+    return () => window.removeEventListener('paste', handler);
+  }, [sentences.length]);
 
   // ── DOM-based highlight + smart scroll (bypasses React diffing entirely) ──
   useEffect(() => {
@@ -1018,9 +1063,33 @@ export default function App() {
         const reader = new FileReader();
         reader.onload = (ev) => loadMarkdown(ev.target?.result as string);
         reader.readAsText(file);
+      } else if (file.name.endsWith('.txt') || file.type === 'text/plain') {
+        const reader = new FileReader();
+        reader.onload = (ev) => loadText(ev.target?.result as string);
+        reader.readAsText(file);
       } else {
-        alert("Please drop a valid PDF, EPUB or Markdown file");
+        alert("Please drop a valid PDF, EPUB, Markdown, or TXT file");
       }
+    }
+  };
+
+  const handleUrlLoad = async (overrideUrl?: string) => {
+    const url = (overrideUrl || urlInputValue).trim();
+    if (!url) return;
+    try { new URL(url); } catch { setUrlError('Please enter a valid URL (include https://)'); return; }
+    setIsUrlLoading(true);
+    setUrlError('');
+    try {
+      const res = await fetch(`https://test.cors.workers.dev/?https://markdown.new/${url}?method=auto&retain_images`);
+      if (!res.ok) throw new Error(`Could not fetch URL (${res.status})`);
+      const markdown = await res.text();
+      if (!markdown.trim()) throw new Error('No content returned for that URL');
+      setUrlInputValue('');
+      loadMarkdown(markdown);
+    } catch (err: any) {
+      setUrlError(err.message || 'Failed to load URL');
+    } finally {
+      setIsUrlLoading(false);
     }
   };
 
@@ -1028,9 +1097,54 @@ export default function App() {
     const newSentences: any[] = [];
     const contentData: any[] = [];
     let idCounter = 0;
+
+    // ── Strip AI reader header ──────────────────────────────────────
+    // api prepends "Title: ...\nURL Source: ...\nMarkdown Content:\n"
+    let content = raw;
+    const jinaMarker = '\nMarkdown Content:\n';
+    const jinaIdx = raw.indexOf(jinaMarker);
+    if (jinaIdx !== -1) content = raw.slice(jinaIdx + jinaMarker.length).trimStart();
+
+    // ── Parse YAML frontmatter (--- ... ---) ─────────────────────────────
+    let frontmatter: { title?: string; description?: string; image?: string } | null = null;
+    const fmMatch = content.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n/);
+    if (fmMatch) {
+      frontmatter = {};
+      for (const ln of fmMatch[1].split('\n')) {
+        const m = ln.match(/^(\w+):\s*(.+)$/);
+        if (m) (frontmatter as any)[m[1].toLowerCase()] = m[2].trim();
+      }
+      content = content.slice(fmMatch[0].length).trimStart();
+    }
+    if (frontmatter && (frontmatter.title || frontmatter.description || frontmatter.image)) {
+      contentData.push({ type: 'frontmatter', id: `fm-${idCounter++}`, ...frontmatter });
+    }
+
     let inFence = false;
     let fenceLines: string[] = [];
     let paraLines: string[] = [];
+    let tableLines: string[] = [];
+
+    const parseTableRow = (line: string): string[] => {
+      const cells = line.split('|').map(c => c.trim());
+      // Strip empty edge cells caused by leading/trailing `|`
+      if (cells[0] === '') cells.shift();
+      if (cells[cells.length - 1] === '') cells.pop();
+      return cells;
+    };
+
+    const flushTable = () => {
+      if (!tableLines.length) return;
+      const parsed = tableLines.map(parseTableRow);
+      // Separator rows are all dashes/colons — skip them
+      const dataRows = parsed.filter(row => !row.every(c => /^[-:\s]+$/.test(c)));
+      if (dataRows.length) {
+        const headers = dataRows[0];
+        const rows = dataRows.slice(1);
+        contentData.push({ type: 'table', id: `table-${idCounter++}`, headers, rows });
+      }
+      tableLines = [];
+    };
 
     const flushPara = () => {
       if (!paraLines.length) return;
@@ -1052,7 +1166,7 @@ export default function App() {
       }
     };
 
-    for (const line of raw.split('\n')) {
+    for (const line of content.split('\n')) {
       // Fenced code block open/close
       if (/^(`{3,}|~{3,})/.test(line)) {
         if (!inFence) { flushPara(); inFence = true; fenceLines = []; }
@@ -1076,14 +1190,31 @@ export default function App() {
         continue;
       }
 
-      // Blank line → end of paragraph block
-      if (!line.trim()) { flushPara(); continue; }
+      // Blank line → end of paragraph and table blocks
+      if (!line.trim()) { flushPara(); flushTable(); continue; }
+
+      // Table row: any line containing `|`
+      if (line.includes('|')) {
+        flushPara();
+        tableLines.push(line);
+        continue;
+      }
+      // Leaving table context mid-block
+      if (tableLines.length) flushTable();
+
+      // Standalone image line: ![alt](src)
+      const imgM = line.match(/^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/);
+      if (imgM) {
+        flushPara();
+        contentData.push({ type: 'image', id: `img-${idCounter++}`, src: imgM[2], alt: imgM[1] });
+        continue;
+      }
 
       // List item — strip marker, ensure ends with sentence-ending punct
       const li = line.match(/^\s*(?:[-*+]|\d+[.)]) (.*)/);
       if (li) {
-        const t = li[1].trim();
-        paraLines.push(/[.!?:;]$/.test(t) ? t : t + '.');
+        const t = li[1].trim().replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
+        if (t) paraLines.push(/[.!?:;]$/.test(t) ? t : t + '.');
         continue;
       }
 
@@ -1094,8 +1225,9 @@ export default function App() {
       paraLines.push(line);
     }
 
-    // Flush any unclosed fence or trailing paragraph
+    // Flush any unclosed fence, trailing table, or trailing paragraph
     if (inFence) contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n') });
+    flushTable();
     flushPara();
 
     if (!newSentences.length) return;
@@ -1142,8 +1274,11 @@ export default function App() {
     e.stopPropagation();
     try {
       const text = await navigator.clipboard.readText();
-      if (text.trim()) {
-        loadText(text);
+      const trimmed = text.trim();
+      if (/^https?:\/\/\S+$/.test(trimmed)) {
+        handleUrlLoad(trimmed);
+      } else if (trimmed) {
+        loadText(trimmed);
       } else {
         setShowTextInput(true);
       }
@@ -1379,7 +1514,7 @@ export default function App() {
         >
           <Upload size={32} color={t.textMuted} style={{ marginBottom: '1rem' }} />
           <p style={{ fontSize: '1.1rem', fontWeight: 600, color: t.text, marginBottom: '0.5rem' }}>
-            Drop PDF, EPUB or Markdown here
+            Drop PDF, EPUB, Markdown or TXT here
           </p>
           <p style={{ fontSize: '0.85rem', color: t.textMuted }}>
             or tap to browse files
@@ -1388,10 +1523,48 @@ export default function App() {
             type="file"
             ref={fileInputRef}
             onChange={handleFileDrop}
-            accept="application/pdf,.epub,.md,.markdown"
+            accept="application/pdf,.epub,.md,.markdown,.txt,text/plain"
             style={{ display: 'none' }}
           />
           <div style={{ width: '100%', borderTop: `1px solid ${t.dropBorder}`, margin: '1rem 0' }} />
+          {/* URL loader */}
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', marginBottom: '0.75rem' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', width: '100%' }}>
+              <div style={{ position: 'relative', flex: 1 }}>
+                <Globe size={15} color={t.textMuted} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                <input
+                  type="url"
+                  value={urlInputValue}
+                  onChange={(e) => { setUrlInputValue(e.target.value); if (urlError) setUrlError(''); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleUrlLoad(); }}
+                  placeholder="Paste a URL to read as an article…"
+                  style={{
+                    width: '100%', padding: '0.5rem 0.6rem 0.5rem 2rem',
+                    fontSize: '0.8rem', color: t.text, backgroundColor: t.inputBg,
+                    border: `1px solid ${urlError ? '#ef4444' : t.inputBorder}`,
+                    borderRadius: '0.375rem', boxSizing: 'border-box' as const, outline: 'none',
+                  }}
+                />
+              </div>
+              <button
+                onClick={() => handleUrlLoad()}
+                disabled={isUrlLoading || !urlInputValue.trim()}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.35rem',
+                  padding: '0.5rem 0.85rem', fontSize: '0.8rem', fontWeight: 600,
+                  backgroundColor: isUrlLoading || !urlInputValue.trim() ? t.testBtnBg : '#2563eb',
+                  color: isUrlLoading || !urlInputValue.trim() ? t.textMuted : 'white',
+                  border: `1px solid ${t.testBtnBorder}`, borderRadius: '0.375rem',
+                  cursor: isUrlLoading || !urlInputValue.trim() ? 'default' : 'pointer',
+                  whiteSpace: 'nowrap' as const, flexShrink: 0,
+                }}
+              >
+                {isUrlLoading ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Fetching…</> : 'Load URL'}
+              </button>
+            </div>
+            {urlError && <p style={{ margin: '0.35rem 0 0', fontSize: '0.75rem', color: '#ef4444', textAlign: 'left' }}>{urlError}</p>}
+          </div>
+          <div style={{ width: '100%', borderTop: `1px solid ${t.dropBorder}`, margin: '0 0 0.75rem' }} />
           <button
             onClick={handleClipboardPaste}
             style={{
@@ -1454,6 +1627,27 @@ export default function App() {
                   let headersSeen = 0;
                   const H_SIZE: Record<number, string> = { 1: '1.45rem', 2: '1.25rem', 3: '1.1rem', 4: '1rem', 5: '0.95rem', 6: '0.9rem' };
                   return epubContent.map((item) => {
+                    if (item.type === 'frontmatter') {
+                      return (
+                        <div key={item.id} style={{
+                          margin: '0 0 2rem',
+                          borderRadius: '0.75rem',
+                          overflow: 'hidden',
+                          border: `1px solid ${t.statBorder}`,
+                          backgroundColor: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+                        }}>
+                          {item.image && (
+                            <img src={item.image} alt={item.title || ''} loading="lazy" style={{
+                              width: '100%', maxHeight: '220px', objectFit: 'cover', display: 'block',
+                            }} />
+                          )}
+                          <div style={{ padding: '1rem 1.1rem' }}>
+                            {item.title && <p style={{ margin: '0 0 0.3rem', fontSize: '1.3rem', fontWeight: 700, color: t.headerColor, lineHeight: 1.25 }}>{item.title}</p>}
+                            {item.description && <p style={{ margin: 0, fontSize: '0.875rem', color: t.textMuted, lineHeight: 1.5 }}>{item.description}</p>}
+                          </div>
+                        </div>
+                      );
+                    }
                     if (item.type === 'header') {
                       const isFirst = headersSeen === 0;
                       headersSeen++;
@@ -1528,7 +1722,7 @@ export default function App() {
                               onClick={() => handleLineClick(sentence.id)}
                               style={styles.epubSentence}
                             >
-                              {sentence.md ? renderMd(sentence.md) : sentence.text}{' '}
+                              {sentence.md ? renderMd(sentence.md, isDarkMode ? '#60a5fa' : '#2563eb') : sentence.text}{' '}
                             </span>
                           ))}
                         </p>
@@ -1551,6 +1745,50 @@ export default function App() {
                         }}>
                           <code>{item.text}</code>
                         </pre>
+                      );
+                    }
+                    if (item.type === 'table') {
+                      const lc = isDarkMode ? '#60a5fa' : '#2563eb';
+                      return (
+                        <div key={item.id} style={{ overflowX: 'auto', margin: '0 0 1.5em', borderRadius: '0.5rem', border: `1px solid ${t.statBorder}` }}>
+                          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.82rem', minWidth: '320px' }}>
+                            {item.headers.length > 0 && (
+                              <thead>
+                                <tr style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)' }}>
+                                  {item.headers.map((h: string, i: number) => (
+                                    <th key={i} style={{ padding: '0.5rem 0.75rem', textAlign: 'left', fontWeight: 600, color: t.text, borderBottom: `1px solid ${t.statBorder}`, whiteSpace: 'nowrap' }}>
+                                      {renderMd(h, lc)}
+                                    </th>
+                                  ))}
+                                </tr>
+                              </thead>
+                            )}
+                            <tbody>
+                              {item.rows.map((row: string[], ri: number) => (
+                                <tr key={ri} style={{ backgroundColor: ri % 2 !== 0 ? (isDarkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)') : 'transparent' }}>
+                                  {row.map((cell: string, ci: number) => (
+                                    <td key={ci} style={{ padding: '0.4rem 0.75rem', color: t.text, borderBottom: ri < item.rows.length - 1 ? `1px solid ${t.statBorder}` : 'none', verticalAlign: 'top' }}>
+                                      {renderMd(cell.replace(/\\(.)/g, '$1'), lc)}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      );
+                    }
+                    if (item.type === 'image') {
+                      return (
+                        <div key={item.id} style={{ textAlign: 'center', margin: '1.2em 0' }}>
+                          <img
+                            src={item.src}
+                            alt={item.alt}
+                            loading="lazy"
+                            style={{ maxWidth: '100%', borderRadius: '0.5rem', display: 'inline-block' }}
+                          />
+                          {item.alt && <p style={{ fontSize: '0.78rem', color: t.textMuted, margin: '0.4em 0 0', fontStyle: 'italic' }}>{item.alt}</p>}
+                        </div>
                       );
                     }
                     if (item.type === 'hr') {

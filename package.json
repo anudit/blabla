@@ -7,15 +7,16 @@
     "dev": "bun --hot index.ts",
     "build": "bun run build.ts",
     "serve": "bunx live-server ./dist",
-    "start": "NODE_ENV=production bun index.ts"
+    "start": "NODE_ENV=production bun index.ts",
+    "outdated": "bunx npm-check-updates --interactive"
   },
   "dependencies": {
     "epubjs": "^0.3.93",
     "kokoro-js": "^1.2.1",
-    "lucide-react": "^0.563.0",
-    "pdfjs-dist": "^5.4.530",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3"
+    "lucide-react": "^0.575.0",
+    "pdfjs-dist": "^5.4.624",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   },
   "devDependencies": {
     "@types/react": "^19",

@@ -1041,7 +1041,7 @@ export default function App() {
         const page = await doc.getPage(i);
         const viewport = page.getViewport({ scale });
         const textContent = await page.getTextContent();
-        const lines = processTextContent(textContent, viewport, scale, globalLineList.length);
+        const lines = processTextContent(textContent, viewport, scale, globalLineList.length, pdfjsLib);
         globalLineList.push(...lines);
         newPages.push({ viewport, lines, pageNumber: i });
         page.cleanup();
@@ -1075,7 +1075,7 @@ export default function App() {
     } catch (e) { console.error(e); }
   };
 
-  const processTextContent = (textContent: any, viewport: any, scale: number, startIndex: number) => {
+  const processTextContent = async (textContent: any, viewport: any, scale: number, startIndex: number, pdfjsLib: any) => {
     const items = textContent.items.map((item: any) => {
       const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
       const fontHeight = Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3]));

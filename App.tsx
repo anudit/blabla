@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon, Globe } from 'lucide-react';
+import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon, Globe, Target } from 'lucide-react';
 import BookmarkHistory, { BookmarkEntry, getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
 import BookOutline, { OutlineEntry } from './components/BookOutline';
 
@@ -2097,6 +2097,36 @@ export default function App() {
             <img src="./logo.png" style={{ width: '250px', height: '250px' }} alt="" />
           </div>
         </div>
+      )}
+
+      {/* Scroll-to-current button — bottom-right, visible only when paused */}
+      {sentences.length > 0 && !isPlaying && currentSentenceIndex >= 0 && (
+        <button
+          onClick={() => {
+            const unit = sentences[currentSentenceIndex];
+            if (!unit) return;
+            const el = document.getElementById(`line-${unit.lines[0]}`);
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }}
+          title="Scroll to current position"
+          style={{
+            position: 'fixed', bottom: '1rem', right: '1rem', zIndex: 200,
+            display: 'flex', alignItems: 'center', gap: '0.35rem',
+            padding: '0.38rem 0.7rem',
+            backgroundColor: '#2a2015',
+            color: '#c0b4a4',
+            border: '1px solid #1a1510',
+            borderRadius: '999px',
+            cursor: 'pointer',
+            fontSize: '0.72rem',
+            fontWeight: 700,
+            letterSpacing: '0.03em',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.25)',
+            transition: 'opacity 0.15s',
+          }}
+        >
+          <Target size={13} />
+        </button>
       )}
 
       {/* Bottom Bar */}

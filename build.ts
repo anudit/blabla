@@ -13,14 +13,17 @@ const preactAlias = {
   "react-dom/client": "preact/compat/client",
 };
 
-await build({
+const result = await build({
   entrypoints: ["./frontend.tsx"],
   outdir: "./dist",
   naming: "bundle.js",
   target: "browser",
   minify: true,
+  sourcemap: "linked",
+  metafile: true,
   alias: preactAlias,
 });
+await Bun.write("./dist/meta.json", JSON.stringify(result.metafile));
 
 console.log("⚙️ Building TTS Worker...");
 await build({

@@ -1,377 +1,23 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
-import { Play, Pause, Upload, Loader2, FileText, Beaker, AlertCircle, Activity, Menu, BookOpen, ChevronDown, Clipboard, Sun, Moon, Globe, Target } from 'lucide-react';
-import BookmarkHistory, { BookmarkEntry, getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
-import BookOutline, { OutlineEntry } from './components/BookOutline';
+import { Target } from 'lucide-react';
+import { THEMES, TT } from './theme';
+import {
+  findTitleInToc, extractWords, calculateWordTimings,
+  extractSentences, stripMd, isMarkdown, extractRuns,
+} from './utils';
+import { getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
+import type { BookmarkEntry } from './components/BookmarkHistory';
+import type { OutlineEntry } from './components/BookOutline';
+import LandingCard from './components/LandingCard';
+import ContentViewer from './components/ContentViewer';
+import BottomBar from './components/BottomBar';
 
-// Set worker source
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
 
-const VOICES = [
-  { value: 'af_bella', label: 'Bella (Eng F)' },
-  { value: 'af_heart', label: 'Heart (Eng F)' },
-  { value: 'am_fenrir', label: 'Fenrir (Eng M)' },
-  { value: 'am_puck', label: 'Puck (Eng M)' },
-];
-
-
-// ── Static styles (layout / structure, no theming) ─────────────────────
-const staticStyles = {
-  canvas: { display: 'block', width: '100%', height: 'auto' } as React.CSSProperties,
-  overlay: {
-    position: 'absolute' as const, top: 0, left: 0, right: 0, bottom: 0,
-    zIndex: 10, pointerEvents: 'none' as const,
-  },
-  lineBase: {
-    position: 'absolute' as const, cursor: 'pointer', borderRadius: '2px',
-    backgroundColor: 'transparent', transition: 'background-color 0.2s ease',
-    pointerEvents: 'auto' as const,
-  },
-  buttonDisabled: { opacity: 0.5, cursor: 'not-allowed' as const, filter: 'grayscale(1)' },
-  playButton: {
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    width: '42px', height: '42px', borderRadius: '50%',
-    backgroundColor: '#2563eb', color: 'white', border: 'none', cursor: 'pointer' as const,
-    boxShadow: '0 2px 4px rgba(37,99,235,0.3)', transition: 'transform 0.1s',
-    flexShrink: 0,
-  },
-  statusLoading: { color: '#2563eb', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe' },
-  statusReady:   { color: '#059669', backgroundColor: '#d1fae5', border: '1px solid #6ee7b7' },
-  statusFallback:{ color: '#d97706', backgroundColor: '#fef3c7', border: '1px solid #fde68a' },
-};
-
-// ── Theme tokens ───────────────────────────────────────────────────────
-//   light → muted warm-paper tones
-//   dark  → muted dark tones
-//   bar always uses the opposite side
-const THEMES = {
-  light: {
-    // Content area
-    bg:            '#f5efe3',
-    text:          '#3a3028',
-    textMuted:     '#7a6e60',
-    dropBg:        '#faf6ef',
-    dropBorder:    '#c4b8a0',
-    epubBg:        '#f5efe3',
-    headerColor:   '#2c2218',
-    menuBg:        '#f0ebe0',
-    menuBorder:    '#d0c4b0',
-    selectBg:      '#faf6ef',
-    selectBorder:  '#c4b8a0',
-    inputBg:       '#faf6ef',
-    inputBorder:   '#c4b8a0',
-    statBorder:    '#e0d8c8',
-    resetBtnBg:    '#e8e0d0',
-    testBtnBg:     '#e8f0ff',
-    testBtnColor:  '#2563eb',
-    testBtnBorder: '#bfdbfe',
-    pageShadow:    '0 2px 8px rgba(100,80,60,0.12)',
-    speedHighlight:'#d8e8f4',
-    // Bottom bar (opposite = dark)
-    barBg:         '#2a2015',
-    barBorder:     '#1a1510',
-    barIconColor:  '#b8ac9c',
-    barSpeedBg:    '#3a3020',
-    barSpeedColor: '#e8ddd0',
-  },
-  dark: {
-    // Content area
-    bg:            '#1a1917',
-    text:          '#c8bfb0',
-    textMuted:     '#8a8070',
-    dropBg:        '#242018',
-    dropBorder:    '#4a4235',
-    epubBg:        '#1a1917',
-    headerColor:   '#e8ddd0',
-    menuBg:        '#242018',
-    menuBorder:    '#3a3428',
-    selectBg:      '#2a2520',
-    selectBorder:  '#4a4235',
-    inputBg:       '#2a2520',
-    inputBorder:   '#4a4235',
-    statBorder:    '#2e2a22',
-    resetBtnBg:    '#3a3428',
-    testBtnBg:     '#1e2d45',
-    testBtnColor:  '#93c5fd',
-    testBtnBorder: '#1d4ed8',
-    pageShadow:    '0 2px 8px rgba(0,0,0,0.5)',
-    speedHighlight:'#2a3a50',
-    // Bottom bar (opposite = light cream)
-    barBg:         '#ede8df',
-    barBorder:     '#d0c8b8',
-    barIconColor:  '#5a4f44',
-    barSpeedBg:    '#ddd8cf',
-    barSpeedColor: '#2a2015',
-  },
-};
-
-// ── LazyBlock (skip rendering off-screen EPUB/text content) ───────────
-// Uses CSS content-visibility:auto so the browser skips layout/paint for
-// off-screen blocks while keeping the DOM intact.  This preserves:
-//   • Cmd+F / browser find (text stays in DOM)
-//   • getElementById for scroll-to-resume (line-* spans stay in DOM)
-const lazyBlockStyle: React.CSSProperties = {
-  contentVisibility: 'auto' as any,
-  containIntrinsicSize: 'auto 200px' as any,
-};
-const LazyBlock = React.memo(({ children }: { children: React.ReactNode }) => (
-  <div style={lazyBlockStyle}>{children}</div>
-));
-
-// ── PDFPage (lazy canvas rendering via IntersectionObserver) ──────────
-const PDFPage = React.memo(({ data, pdfDoc, onLineClick, pageContainerStyle }: any) => {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const renderTaskRef = useRef<any>(null);
-  const pageRef = useRef<any>(null);
-  const isVisibleRef = useRef(false);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container || !pdfDoc) return;
-
-    const renderPage = async () => {
-      if (!canvasRef.current || !isVisibleRef.current) return;
-      // Cancel any in-flight render
-      if (renderTaskRef.current) {
-        try { renderTaskRef.current.cancel(); } catch (e) {}
-        renderTaskRef.current = null;
-      }
-      try {
-        const page = await pdfDoc.getPage(data.pageNumber);
-        pageRef.current = page;
-        if (!isVisibleRef.current) { page.cleanup(); pageRef.current = null; return; }
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        canvas.width = data.viewport.width;
-        canvas.height = data.viewport.height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-        const renderTask = page.render({ canvasContext: ctx, viewport: data.viewport });
-        renderTaskRef.current = renderTask;
-        await renderTask.promise;
-      } catch (e: any) {
-        if (e.name !== 'RenderingCancelledException') console.error("Render error:", e);
-      }
-    };
-
-    const cleanupPage = () => {
-      if (renderTaskRef.current) {
-        try { renderTaskRef.current.cancel(); } catch (e) {}
-        renderTaskRef.current = null;
-      }
-      if (pageRef.current) {
-        pageRef.current.cleanup();
-        pageRef.current = null;
-      }
-      // Free canvas bitmap memory
-      if (canvasRef.current) {
-        canvasRef.current.width = 0;
-        canvasRef.current.height = 0;
-      }
-    };
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (entry.isIntersecting && !isVisibleRef.current) {
-          isVisibleRef.current = true;
-          renderPage();
-        } else if (!entry.isIntersecting && isVisibleRef.current) {
-          isVisibleRef.current = false;
-          cleanupPage();
-        }
-      },
-      { rootMargin: '1200px 0px' }
-    );
-    observer.observe(container);
-
-    return () => {
-      observer.disconnect();
-      isVisibleRef.current = false;
-      cleanupPage();
-    };
-  }, [data, pdfDoc]);
-
-  // Aspect-ratio placeholder so scroll position is stable before canvas renders
-  const aspectRatio = data.viewport.height / data.viewport.width;
-
-  return (
-    <div ref={containerRef} style={{ ...pageContainerStyle, maxWidth: data.viewport.width }}>
-      <div style={{ position: 'relative', width: '100%', paddingBottom: `${aspectRatio * 100}%` }}>
-        <canvas ref={canvasRef} style={{ ...staticStyles.canvas, position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }} />
-        <div style={{ ...staticStyles.overlay, position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}>
-          {data.lines.map((line: any) => (
-            <div
-              key={line.id}
-              id={`line-${line.id}`}
-              onClick={(e) => { e.stopPropagation(); onLineClick(line.id); }}
-              style={{
-                ...staticStyles.lineBase,
-                left: line.left, top: line.top, width: line.width, height: line.height,
-              }}
-            />
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}, (prev, next) => prev.data.pageNumber === next.data.pageNumber && prev.pdfDoc === next.pdfDoc);
-
-function findTitleInToc(toc: any[], href: string): string | null {
-  for (const entry of toc) {
-    if (href.includes(entry.href)) return entry.label;
-    if (entry.subitems) {
-      const sub = findTitleInToc(entry.subitems, href);
-      if (sub) return sub;
-    }
-  }
-  return null;
-}
-
-function extractWords(text: string): string[] {
-  return text.trim().split(/\s+/).filter(Boolean);
-}
-
-function calculateWordTimings(text: string, duration: number): { start: number; end: number; index: number }[] {
-  const words = extractWords(text);
-  if (words.length === 0 || duration <= 0) return [];
-  const totalChars = text.length;
-  const timings: { start: number; end: number; index: number }[] = [];
-  let charPos = 0;
-  words.forEach((word, i) => {
-    const startChar = charPos;
-    charPos += word.length;
-    if (i < words.length - 1) charPos += 1; // space
-    timings.push({ start: (startChar / totalChars) * duration, end: (charPos / totalChars) * duration, index: i });
-  });
-  return timings;
-}
-
-function extractSentences(text: string): string[] {
-  // Protect markdown links, images, and inline code from being split at
-  // dots/! inside URLs or code (e.g. https://dev.to/... would otherwise
-  // be treated as a sentence boundary).
-  const saved: string[] = [];
-  const safe = text.replace(/!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\)|`[^`\n]+`/g, (m) => {
-    return `\x00${saved.push(m) - 1}\x00`;
-  });
-
-  const sentences: string[] = [];
-  const sentenceRegex = /[^.!?]+[.!?]+/g;
-  let lastIndex = 0;
-  let match;
-  while ((match = sentenceRegex.exec(safe)) !== null) {
-    const sText = match[0].trim().replace(/\s+/g, ' ');
-    if (sText.length > 0) sentences.push(sText);
-    lastIndex = match.index + match[0].length;
-  }
-  const remaining = safe.slice(lastIndex).trim().replace(/\s+/g, ' ');
-  if (remaining.length > 0) sentences.push(remaining);
-
-  // Restore the protected patterns
-  return sentences.map(s => s.replace(/\x00(\d+)\x00/g, (_, i) => saved[+i]));
-}
-
-// ── Markdown helpers (no deps, works offline) ─────────────────────────
-
-/** Strip inline markdown syntax for clean TTS text. */
-function stripMd(s: string): string {
-  return s
-    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')   // remove images entirely
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/__([^_]+)__/g, '$1')
-    .replace(/~~([^~]+)~~/g, '$1')
-    .replace(/\*([^*]+)\*/g, '$1')
-    .replace(/_([^_]+)_/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-}
-
-/** True if the text looks like markdown (has at least one ATX heading). */
-function isMarkdown(text: string): boolean {
-  return /^#{1,6} \S/m.test(text);
-}
-
-// Image must come before link pattern (both start with `[`)
-// Matches ![alt](src), **bold**, __bold__, ~~strike~~, *italic*, _italic_, `code`, [text](url)
-const INLINE_MD_RE = /!\[[^\]]*\]\([^)]+\)|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/g;
-
-/** Render inline markdown to React nodes for visual display. */
-function renderMd(text: string, linkColor: string = '#3b82f6'): React.ReactNode {
-  const parts: React.ReactNode[] = [];
-  let ki = 0, last = 0;
-  for (const m of text.matchAll(new RegExp(INLINE_MD_RE.source, 'g'))) {
-    if (m.index! > last) parts.push(text.slice(last, m.index));
-    const s = m[0];
-    if (s.startsWith('![')) {
-      // Inline image — render small inline img
-      const imgM = s.match(/^!\[([^\]]*)\]\(([^)]+)\)$/);
-      if (imgM) parts.push(<img key={ki++} src={imgM[2]} alt={imgM[1]} style={{ maxWidth: '100%', borderRadius: '4px', verticalAlign: 'middle', margin: '0 2px' }} />);
-    } else if (s.startsWith('**') || s.startsWith('__')) {
-      parts.push(<strong key={ki++}>{s.slice(2, -2)}</strong>);
-    } else if (s.startsWith('~~')) {
-      parts.push(<s key={ki++}>{s.slice(2, -2)}</s>);
-    } else if (s.startsWith('*') || s.startsWith('_')) {
-      parts.push(<em key={ki++}>{s.slice(1, -1)}</em>);
-    } else if (s.startsWith('`')) {
-      parts.push(<code key={ki++} style={{ fontFamily: 'monospace', fontSize: '0.88em', padding: '0.1em 0.25em', backgroundColor: 'rgba(127,127,127,0.15)', borderRadius: '3px' }}>{s.slice(1, -1)}</code>);
-    } else {
-      // Link: [text](url) → styled anchor
-      const lm = s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      if (lm) {
-        parts.push(<a key={ki++} href={lm[2]} target="_blank" rel="noopener noreferrer" style={{ color: linkColor, textDecoration: 'none', textUnderlineOffset: '2px', textDecorationColor: linkColor + '80' }}>{lm[1]}</a>);
-      } else {
-        parts.push(s);
-      }
-    }
-    last = m.index! + s.length;
-  }
-  if (last < text.length) parts.push(text.slice(last));
-  return parts.length > 0 ? <>{parts}</> : text;
-}
-
-// ── EPUB inline-formatting helpers ────────────────────────────────────
-type TextRun = { text: string; em: boolean; strong: boolean; br?: boolean };
-
-/** Walk a DOM element and collect text runs with italic/bold context. */
-function extractRuns(el: Element): TextRun[] {
-  const runs: TextRun[] = [];
-  function walk(node: Node, em: boolean, strong: boolean) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const t = node.textContent ?? '';
-      if (t) runs.push({ text: t, em, strong });
-    } else if (node.nodeType === Node.ELEMENT_NODE) {
-      const tag = (node as Element).tagName.toLowerCase();
-      if (tag === 'script' || tag === 'style') return;
-      if (tag === 'br') { runs.push({ text: '', em, strong, br: true }); return; }
-      const nextEm     = em     || tag === 'em' || tag === 'i';
-      const nextStrong = strong || tag === 'strong' || tag === 'b';
-      Array.from(node.childNodes).forEach(c => walk(c, nextEm, nextStrong));
-    }
-  }
-  Array.from(el.childNodes).forEach(c => walk(c, false, false));
-  return runs;
-}
-
-/** Convert runs to a React node, preserving em/strong/br formatting. */
-function runsToReactNode(runs: TextRun[]): React.ReactNode {
-  const parts: React.ReactNode[] = [];
-  let ki = 0;
-  for (const run of runs) {
-    if (run.br) { parts.push(<br key={ki++} />); continue; }
-    const text = run.text;
-    if (!text) continue;
-    if (run.em && run.strong) parts.push(<strong key={ki++}><em>{text}</em></strong>);
-    else if (run.em)           parts.push(<em key={ki++}>{text}</em>);
-    else if (run.strong)       parts.push(<strong key={ki++}>{text}</strong>);
-    else                       parts.push(text);
-  }
-  return parts.length ? <>{parts}</> : null;
-}
-
 export default function App() {
+  // ── State ──────────────────────────────────────────────────────────────
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
   const [allLines, setAllLines] = useState<any[]>([]);
@@ -379,11 +25,7 @@ export default function App() {
   const [currentSentenceIndex, setCurrentSentenceIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
-
-  // Theme — persisted in localStorage
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
-
-  // File type state
   const [fileType, setFileType] = useState<'pdf' | 'epub' | 'text' | null>(null);
   const [epubContent, setEpubContent] = useState<any[]>([]);
   const [showTextInput, setShowTextInput] = useState(false);
@@ -391,21 +33,23 @@ export default function App() {
   const [urlInputValue, setUrlInputValue] = useState('');
   const [isUrlLoading, setIsUrlLoading] = useState(false);
   const [urlError, setUrlError] = useState('');
-
   const [ttsStatus, setTtsStatus] = useState("Init");
   const [isModelReady, setIsModelReady] = useState(false);
   const [playbackState, setPlaybackState] = useState("Idle");
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
-  const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
   const [selectedVoice, setSelectedVoice] = useState('af_bella');
-  // Incremented to force-restart playback after speed/voice changes
   const [restartTrigger, setRestartTrigger] = useState(0);
-  // Font size for epub/text/md content (rem units), persisted
   const [fontSize, setFontSize] = useState(() => {
     const s = parseFloat(localStorage.getItem('fontSize') || '');
     return isNaN(s) ? 1.05 : s;
   });
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [eggPhase, setEggPhase] = useState<'in' | 'out' | null>(null);
+  const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>(() => getBookmarks());
+  const [currentFileId, setCurrentFileId] = useState<string | null>(null);
+  const [currentFileName, setCurrentFileName] = useState<string | null>(null);
 
+  // ── Refs ───────────────────────────────────────────────────────────────
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -414,226 +58,18 @@ export default function App() {
   const playbackSessionId = useRef(0);
   const usingFallback = useRef(false);
   const nativeTimeout = useRef<any>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const wordRafRef = useRef<number | null>(null);
   const wordTimingsRef = useRef<{ start: number; end: number; index: number }[]>([]);
   const audioStartRef = useRef(0);
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [eggPhase, setEggPhase] = useState<'in' | 'out' | null>(null);
   const eggTimerRef = useRef<any>(null);
-
-  // Bookmark / history state
-  const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>(() => getBookmarks());
-  const [currentFileId, setCurrentFileId] = useState<string | null>(null);
-  const [currentFileName, setCurrentFileName] = useState<string | null>(null);
   const pendingResumeRef = useRef<number>(-1);
 
-  // ── Derive theme tokens ──────────────────────────────────────────────
+  // ── Derived ────────────────────────────────────────────────────────────
   const t = isDarkMode ? THEMES.dark : THEMES.light;
 
-  // Shared transition applied to every element that changes on theme switch
-  const TT = 'background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease';
-
-  // ── Themed style objects (computed from t) ───────────────────────────
-  const styles = {
-    container: {
-      minHeight: '100vh',
-      display: 'flex',
-      flexDirection: 'column' as const,
-      alignItems: 'center',
-      backgroundColor: t.bg,
-      fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
-      color: t.text,
-      paddingTop: '1rem',
-      transition: TT,
-    },
-    bottomBar: {
-      position: 'fixed' as const,
-      bottom: '1.5rem',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      backgroundColor: t.barBg,
-      padding: '0.4rem 0.75rem',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.4rem',
-      boxShadow: '0 4px 20px rgba(0,0,0,0.28)',
-      zIndex: 50,
-      borderRadius: '999px',
-      border: `1px solid ${t.barBorder}`,
-      whiteSpace: 'nowrap' as const,
-      transition: TT,
-    },
-    statusBadgeMenu: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '0.5rem',
-      fontSize: '0.75rem',
-      padding: '0.5rem',
-      borderRadius: '0.375rem',
-      fontWeight: '600' as const,
-      marginBottom: '0.5rem',
-    },
-    statItem: {
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      fontSize: '0.8rem',
-      color: t.textMuted,
-      padding: '0.5rem 0.25rem',
-      borderBottom: `1px solid ${t.statBorder}`,
-      transition: TT,
-    },
-    statLabel: { fontSize: '0.75rem', color: t.textMuted, transition: TT },
-    statValue: { fontSize: '0.8rem', fontWeight: '600' as const, color: t.text, fontFamily: 'monospace', transition: TT },
-    iconButton: {
-      padding: '0.5rem',
-      borderRadius: '0.375rem',
-      border: 'none',
-      cursor: 'pointer' as const,
-      backgroundColor: 'transparent',
-      color: t.barIconColor,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      transition: TT,
-    },
-    speedButton: {
-      fontSize: '0.8rem',
-      fontWeight: '700' as const,
-      color: t.barSpeedColor,
-      backgroundColor: t.barSpeedBg,
-      padding: '0.25rem 0.5rem',
-      borderRadius: '0.25rem',
-      border: 'none',
-      minWidth: '2.5rem',
-      cursor: 'pointer' as const,
-      transition: TT,
-    },
-    menuPopover: {
-      position: 'absolute' as const,
-      bottom: 'calc(100% + 10px)',
-      right: '1rem',
-      width: '260px',
-      backgroundColor: t.menuBg,
-      padding: '1rem',
-      borderRadius: '0.75rem',
-      boxShadow: '0 10px 25px -5px rgba(0,0,0,0.18), 0 8px 10px -6px rgba(0,0,0,0.12)',
-      display: 'flex',
-      flexDirection: 'column' as const,
-      gap: '0.5rem',
-      border: `1px solid ${t.menuBorder}`,
-      zIndex: 100,
-      transition: TT,
-    },
-    selectLabel: {
-      fontSize: '0.75rem',
-      fontWeight: '600' as const,
-      color: t.textMuted,
-      marginTop: '0.5rem',
-      marginBottom: '0.25rem',
-      transition: TT,
-    },
-    select: {
-      width: '100%',
-      padding: '0.5rem',
-      borderRadius: '0.375rem',
-      border: `1px solid ${t.selectBorder}`,
-      backgroundColor: t.selectBg,
-      color: t.text,
-      fontSize: '0.875rem',
-      cursor: 'pointer' as const,
-      transition: TT,
-    },
-    testButton: {
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '0.5rem',
-      padding: '0.5rem',
-      fontSize: '0.875rem',
-      fontWeight: '600' as const,
-      backgroundColor: t.testBtnBg,
-      color: t.testBtnColor,
-      border: `1px solid ${t.testBtnBorder}`,
-      borderRadius: '0.375rem',
-      cursor: 'pointer' as const,
-      marginTop: '0.5rem',
-      transition: TT,
-    },
-    resetButton: {
-      padding: '0.5rem',
-      fontSize: '0.875rem',
-      backgroundColor: t.resetBtnBg,
-      color: '#ef4444',
-      border: 'none',
-      borderRadius: '0.375rem',
-      cursor: 'pointer' as const,
-      width: '100%',
-      marginTop: '0.5rem',
-      transition: TT,
-    },
-    dropZone: {
-      marginTop: '2rem',
-      width: '90%',
-      maxWidth: '42rem',
-      minHeight: '200px',
-      border: `3px dashed ${t.dropBorder}`,
-      borderRadius: '1rem',
-      display: 'flex',
-      flexDirection: 'column' as const,
-      alignItems: 'center',
-      justifyContent: 'center',
-      cursor: 'pointer' as const,
-      backgroundColor: t.dropBg,
-      transition: 'all 0.3s ease',
-      padding: '1rem',
-      textAlign: 'center' as const,
-    },
-    dropZoneHover: {
-      border: '3px dashed #6b9fd4',
-      backgroundColor: isDarkMode ? '#1e2d3d' : '#eef4fb',
-      transform: 'scale(1.01)',
-    },
-    viewer: {
-      display: 'flex',
-      flexDirection: 'column' as const,
-      alignItems: 'center',
-      width: '100%',
-      maxWidth: '48rem',
-      padding: '1rem',
-      paddingBottom: '6rem',
-      boxSizing: 'border-box' as const,
-    },
-    pageContainer: {
-      position: 'relative' as const,
-      marginBottom: '1rem',
-      boxShadow: t.pageShadow,
-      backgroundColor: '#fff', // PDF canvas always renders on white
-      width: '100%',
-      height: 'auto',
-    },
-    epubContainer: {
-      width: '100%',
-      padding: '0.25rem 0',
-      lineHeight: '1.8',
-      fontSize: `${fontSize}rem`,
-      textAlign: 'left' as const,
-      backgroundColor: t.epubBg,
-      color: t.text,
-      transition: TT,
-    },
-    epubSentence: {
-      cursor: 'pointer' as const,
-      padding: '2px 0',
-      transition: `background-color 0.2s, ${TT}`,
-      borderRadius: '4px',
-    },
-  };
-
+  // ── Effects ────────────────────────────────────────────────────────────
   useEffect(() => {
     console.log("[App] Mounting...");
     const ctx = getAudioContext();
@@ -687,11 +123,10 @@ export default function App() {
     }
   }, [isPlaying, currentSentenceIndex, restartTrigger]);
 
-  // ── Global Cmd+V paste → URL or text load on landing page ──────────────
+  // Global Cmd+V paste → URL or text load on landing page
   useEffect(() => {
     if (sentences.length > 0) return;
     const handler = (e: ClipboardEvent) => {
-      // Ignore if user is typing inside an input/textarea
       const tag = (document.activeElement as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       const text = e.clipboardData?.getData('text') ?? '';
@@ -708,16 +143,14 @@ export default function App() {
     return () => window.removeEventListener('paste', handler);
   }, [sentences.length]);
 
-  // ── DOM-based highlight + smart scroll (bypasses React diffing entirely) ──
+  // DOM-based highlight + smart scroll (bypasses React diffing entirely)
   useEffect(() => {
-    // Always clear previous highlights first
     document.querySelectorAll('.epub-highlight-active').forEach(el => el.classList.remove('epub-highlight-active'));
     document.querySelectorAll('.pdf-highlight-active').forEach(el => el.classList.remove('pdf-highlight-active'));
 
     const unit = sentences[currentSentenceIndex];
     if (currentSentenceIndex < 0 || !unit) return;
 
-    // Apply new highlights via class, not React state
     unit.lines.forEach((id: number) => {
       const el = document.getElementById(`line-${id}`);
       if (!el) return;
@@ -729,7 +162,6 @@ export default function App() {
       }
     });
 
-    // Smart scroll: only scroll if the line is outside the visible area
     const firstId = unit.lines[0];
     const target = document.getElementById(`line-${firstId}`);
     if (!target) return;
@@ -762,13 +194,11 @@ export default function App() {
 
   useEffect(() => {
     const handleMediaKey = (e: KeyboardEvent) => {
-      // Physical media play/pause key (Mac Touch Bar, keyboard media keys)
       if (e.key === 'MediaPlayPause' || e.key === 'F8') {
         e.preventDefault();
         togglePlay();
         return;
       }
-      // Space bar: toggle play, but never when focus is inside an input/textarea
       if (e.code === 'Space' && sentences.length > 0) {
         const tag = (e.target as HTMLElement)?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -792,13 +222,11 @@ export default function App() {
     };
   }, [isPlaying, sentences.length, isModelReady, currentSentenceIndex]);
 
-  // Keep the OS media session in sync so macOS/Windows media keys are forwarded
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
     navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
   }, [isPlaying]);
 
-  // Set media session metadata when a file is loaded
   useEffect(() => {
     if (!('mediaSession' in navigator) || !currentFileName) return;
     navigator.mediaSession.metadata = new MediaMetadata({ title: currentFileName, artist: 'blabla reader' });
@@ -811,7 +239,6 @@ export default function App() {
       pendingResumeRef.current = -1;
       setCurrentSentenceIndex(idx);
       setIsPlaying(true);
-      // Scroll is handled by the DOM highlight effect when currentSentenceIndex changes
     }
   }, [sentences]);
 
@@ -819,7 +246,6 @@ export default function App() {
   useEffect(() => {
     if (currentSentenceIndex > 0 && sentences.length > 0 && currentFileId && currentFileName && fileType) {
       const isUrl = currentFileId.startsWith('http://') || currentFileId.startsWith('https://');
-      // Skip plain text / local md/txt files (no stable ID to resume from)
       if (fileType === 'text' && !isUrl) return;
       const entry: BookmarkEntry = {
         id: currentFileId,
@@ -836,26 +262,11 @@ export default function App() {
     }
   }, [currentSentenceIndex]);
 
-  const triggerEasterEgg = () => {
-    if (eggPhase !== null) return;
-    setEggPhase('in');
-    eggTimerRef.current = setTimeout(() => {
-      setEggPhase('out');
-      setTimeout(() => setEggPhase(null), 600);
-    }, 2400);
-  };
-
   useEffect(() => {
     return () => { if (eggTimerRef.current) clearTimeout(eggTimerRef.current); };
   }, []);
 
-  const triggerFallback = () => {
-    if (usingFallback.current) return;
-    usingFallback.current = true;
-    setTtsStatus("System Voice");
-    setIsModelReady(true);
-  };
-
+  // ── Audio helpers ──────────────────────────────────────────────────────
   const getAudioContext = () => {
     if (!audioContext.current || audioContext.current.state === 'closed') {
       audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({
@@ -872,8 +283,6 @@ export default function App() {
     const ctx = getAudioContext();
     const source = ctx.createBufferSource();
     source.buffer = buffer;
-    // Speed is already baked into the audio by the TTS model; play at 1.0
-    // so pitch is not artificially shifted.
     source.playbackRate.value = 1.0;
     source.connect(ctx.destination);
     source.start(0);
@@ -898,7 +307,6 @@ export default function App() {
     });
   };
 
-  /** Resolve all pending audio promises with null so no caller hangs, then clear. */
   const drainResolvers = () => {
     audioResolvers.current.forEach(resolve => resolve(null));
     audioResolvers.current.clear();
@@ -939,7 +347,6 @@ export default function App() {
     try {
       const buffer = await generateAudioInWorker(text, index, voice, speed);
       if (!buffer) return null;
-
       if (sessionId === playbackSessionId.current) {
         audioCache.current.set(index, buffer);
       }
@@ -1018,8 +425,6 @@ export default function App() {
     if (buffer) {
       const source = audioContext.current!.createBufferSource();
       source.buffer = buffer;
-      // Speed is baked into the audio by the TTS model; play at 1.0 so the
-      // model's native tempo is preserved without raising pitch.
       source.playbackRate.value = 1.0;
       source.connect(audioContext.current!.destination);
 
@@ -1036,12 +441,11 @@ export default function App() {
       currentSource.current = source;
       setPlaybackState("Playing");
 
-      // Word timing — calculated once from char proportions against audio duration
       wordTimingsRef.current = calculateWordTimings(text, buffer.duration);
       audioStartRef.current = audioContext.current!.currentTime;
       source.start(0);
 
-      // rAF loop: direct DOM update at 60 fps, no React re-renders
+      // rAF loop: direct DOM updates at 60 fps, no React re-renders
       const lineId = unit.lines[0];
       const animateWords = () => {
         if (currentSource.current !== source) return;
@@ -1065,12 +469,29 @@ export default function App() {
   const advanceSentence = () => {
     setCurrentSentenceIndex(prev => {
       const next = prev + 1;
-      // Sliding-window memory manager: keep only prev-1..next+3 in cache
+      // Sliding-window cache: keep only prev-1..next+3
       for (const key of Array.from(audioCache.current.keys())) {
         if (key < next - 1 || key > next + 3) audioCache.current.delete(key);
       }
       return next;
     });
+  };
+
+  // ── Handlers ───────────────────────────────────────────────────────────
+  const triggerEasterEgg = () => {
+    if (eggPhase !== null) return;
+    setEggPhase('in');
+    eggTimerRef.current = setTimeout(() => {
+      setEggPhase('out');
+      setTimeout(() => setEggPhase(null), 600);
+    }, 2400);
+  };
+
+  const triggerFallback = () => {
+    if (usingFallback.current) return;
+    usingFallback.current = true;
+    setTtsStatus("System Voice");
+    setIsModelReady(true);
   };
 
   const handleLineClick = (lineId: number) => {
@@ -1175,7 +596,6 @@ export default function App() {
     drainResolvers();
     audioCache.current.clear();
     pendingFetches.current.clear();
-    // Stop whatever is currently playing
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e) {}
       currentSource.current.disconnect();
@@ -1184,13 +604,39 @@ export default function App() {
     window.speechSynthesis.cancel();
     playbackSessionId.current += 1;
     isWaitingForAudio.current = false;
-    // Re-trigger playback effect — by this point setSelectedVoice is batched
-    // into the same render, so playCurrentSentence will use the new voice
     if (isPlaying) setRestartTrigger(p => p + 1);
   };
 
-  const handleFileDrop = async (e: React.DragEvent | React.ChangeEvent) => {
-    e.preventDefault();
+  const handleSpeedChange = (speed: number) => {
+    setPlaybackSpeed(speed);
+    drainResolvers();
+    audioCache.current.clear();
+    pendingFetches.current.clear();
+    if (currentSource.current) {
+      try { currentSource.current.stop(); } catch(e) {}
+      currentSource.current.disconnect();
+      currentSource.current = null;
+    }
+    window.speechSynthesis.cancel();
+    playbackSessionId.current += 1;
+    isWaitingForAudio.current = false;
+    if (isPlaying) setRestartTrigger(p => p + 1);
+  };
+
+  const handleToggleTheme = () => {
+    const next = !isDarkMode;
+    setIsDarkMode(next);
+    localStorage.setItem('theme', next ? 'dark' : 'light');
+  };
+
+  const handleFontSizeChange = (delta: number) => {
+    const next = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + delta)).toFixed(2));
+    setFontSize(next);
+    localStorage.setItem('fontSize', String(next));
+  };
+
+  const handleFileDrop = async (e: React.DragEvent<HTMLDivElement> | React.ChangeEvent<HTMLInputElement>) => {
+    if ('preventDefault' in e) e.preventDefault();
     setIsDragOver(false);
     let file: File | undefined;
     if ('dataTransfer' in e) {
@@ -1203,7 +649,6 @@ export default function App() {
       const fileId = `${file.name}:${file.size}`;
       setCurrentFileId(fileId);
       setCurrentFileName(file.name);
-      // Check for existing bookmark — loader will set pendingResumeRef
       const existing = getBookmarks().find(b => b.id === fileId);
       if (existing) pendingResumeRef.current = existing.sentenceIndex;
 
@@ -1240,13 +685,10 @@ export default function App() {
       if (!res.ok) throw new Error(`Could not fetch URL (${res.status})`);
       const markdown = await res.text();
       if (!markdown.trim()) throw new Error('No content returned for that URL');
-      // Extract page title from Jina "Title: …" header line, fall back to hostname
       const titleLine = markdown.match(/^Title:\s*(.+)/m);
       const pageTitle = titleLine ? titleLine[1].trim() : new URL(url).hostname;
-      // Set identity before loadMarkdown so the auto-save effect can pick it up
       setCurrentFileId(url);
       setCurrentFileName(pageTitle);
-      // Resume from saved position if this URL was read before
       const existing = getBookmarks().find(b => b.id === url);
       if (existing) pendingResumeRef.current = existing.sentenceIndex;
       setUrlInputValue('');
@@ -1258,19 +700,36 @@ export default function App() {
     }
   };
 
+  const handleClipboardPaste = async (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    try {
+      const text = await navigator.clipboard.readText();
+      const trimmed = text.trim();
+      if (/^https?:\/\/\S+$/.test(trimmed)) {
+        handleUrlLoad(trimmed);
+      } else if (trimmed) {
+        loadText(trimmed);
+      } else {
+        setShowTextInput(true);
+      }
+    } catch {
+      setShowTextInput(true);
+    }
+  };
+
+  // ── Loaders ────────────────────────────────────────────────────────────
   const loadMarkdown = (raw: string) => {
     const newSentences: any[] = [];
     const contentData: any[] = [];
     let idCounter = 0;
 
-    // ── Strip AI reader header ──────────────────────────────────────
-    // api prepends "Title: ...\nURL Source: ...\nMarkdown Content:\n"
+    // Strip AI reader header
     let content = raw;
     const jinaMarker = '\nMarkdown Content:\n';
     const jinaIdx = raw.indexOf(jinaMarker);
     if (jinaIdx !== -1) content = raw.slice(jinaIdx + jinaMarker.length).trimStart();
 
-    // ── Parse YAML frontmatter (--- ... ---) ─────────────────────────────
+    // Parse YAML frontmatter (--- ... ---)
     let frontmatter: { title?: string; description?: string; image?: string } | null = null;
     const fmMatch = content.match(/^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*\r?\n/);
     if (fmMatch) {
@@ -1292,7 +751,6 @@ export default function App() {
 
     const parseTableRow = (line: string): string[] => {
       const cells = line.split('|').map(c => c.trim());
-      // Strip empty edge cells caused by leading/trailing `|`
       if (cells[0] === '') cells.shift();
       if (cells[cells.length - 1] === '') cells.pop();
       return cells;
@@ -1301,7 +759,6 @@ export default function App() {
     const flushTable = () => {
       if (!tableLines.length) return;
       const parsed = tableLines.map(parseTableRow);
-      // Separator rows are all dashes/colons — skip them
       const dataRows = parsed.filter(row => !row.every(c => /^[-:\s]+$/.test(c)));
       if (dataRows.length) {
         const headers = dataRows[0];
@@ -1323,7 +780,6 @@ export default function App() {
         if (!clean.trim()) continue;
         const lineId = idCounter++;
         newSentences.push({ text: clean, lines: [lineId] });
-        // Store original markdown text only when it differs (has inline syntax)
         paraSentences.push({ id: lineId, text: clean, words: extractWords(clean), ...(clean !== s ? { md: s } : {}) });
       }
       if (paraSentences.length > 0) {
@@ -1332,7 +788,6 @@ export default function App() {
     };
 
     for (const line of content.split('\n')) {
-      // Fenced code block open/close
       if (/^(`{3,}|~{3,})/.test(line)) {
         if (!inFence) { flushPara(); inFence = true; fenceLines = []; }
         else { inFence = false; contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n') }); }
@@ -1340,7 +795,6 @@ export default function App() {
       }
       if (inFence) { fenceLines.push(line); continue; }
 
-      // ATX heading: # … ######
       const hm = line.match(/^(#{1,6})\s+(.+)$/);
       if (hm) {
         flushPara();
@@ -1348,26 +802,21 @@ export default function App() {
         continue;
       }
 
-      // Thematic break (---, ***, ___)
       if (/^\s{0,3}([-*_]\s*){3,}$/.test(line) && !/\w/.test(line)) {
         flushPara();
         contentData.push({ type: 'hr', id: `hr-${idCounter++}` });
         continue;
       }
 
-      // Blank line → end of paragraph and table blocks
       if (!line.trim()) { flushPara(); flushTable(); continue; }
 
-      // Table row: any line containing `|`
       if (line.includes('|')) {
         flushPara();
         tableLines.push(line);
         continue;
       }
-      // Leaving table context mid-block
       if (tableLines.length) flushTable();
 
-      // Standalone image line: ![alt](src)
       const imgM = line.match(/^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/);
       if (imgM) {
         flushPara();
@@ -1375,7 +824,6 @@ export default function App() {
         continue;
       }
 
-      // List item — strip marker, ensure ends with sentence-ending punct
       const li = line.match(/^\s*(?:[-*+]|\d+[.)]) (.*)/);
       if (li) {
         const t = li[1].trim().replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
@@ -1383,14 +831,12 @@ export default function App() {
         continue;
       }
 
-      // Blockquote
       const bq = line.match(/^>\s*(.*)/);
       if (bq) { paraLines.push(bq[1]); continue; }
 
       paraLines.push(line);
     }
 
-    // Flush any unclosed fence, trailing table, or trailing paragraph
     if (inFence) contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n') });
     flushTable();
     flushPara();
@@ -1435,23 +881,6 @@ export default function App() {
     setTextInputValue('');
   };
 
-  const handleClipboardPaste = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    try {
-      const text = await navigator.clipboard.readText();
-      const trimmed = text.trim();
-      if (/^https?:\/\/\S+$/.test(trimmed)) {
-        handleUrlLoad(trimmed);
-      } else if (trimmed) {
-        loadText(trimmed);
-      } else {
-        setShowTextInput(true);
-      }
-    } catch {
-      setShowTextInput(true);
-    }
-  };
-
   const loadEPUB = async (data: ArrayBuffer) => {
     try {
       setFileType('epub');
@@ -1463,10 +892,7 @@ export default function App() {
       let globalLineIdCounter = 0;
       const items = (spine as any).items || [];
       const navigation = await book.loaded.navigation;
-      // Normalise whitespace (incl. non-breaking spaces) for reliable dedup comparisons
       const normHead = (s: string) => s.replace(/[\u00a0\s]+/g, ' ').trim();
-      // Tracks the last header text we actually pushed, so we never emit consecutive dupes
-      // regardless of which spine item or element produced the title.
       let lastAddedHeaderText: string | null = null;
 
       for (const item of items) {
@@ -1497,12 +923,8 @@ export default function App() {
           for (const el of elementsToProcess) {
             const tag = el.tagName.toLowerCase();
 
-            // Sub-headings within a chapter
             if (/^h[1-6]$/.test(tag)) {
               const headText = normHead(el.textContent || '');
-              // Skip if empty OR if it is the same as the last header we added
-              // (covers: same as chapterTitle, same as a previously-added sub-heading,
-              //  or just a duplicate spine item pointing at the same chapter heading)
               if (!headText || headText === lastAddedHeaderText) continue;
               lastAddedHeaderText = headText;
               contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: headText, level: parseInt(tag[1]) });
@@ -1523,13 +945,11 @@ export default function App() {
               paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
             }
             if (paraSentences.length > 0) {
-              // Store lightweight runs array instead of pre-built React nodes
               contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs });
             }
           }
         } catch (err) { console.error("Error loading chapter", err); }
       }
-      // Free epub.js internals — zip archive, parsed DOMs, caches
       try { book.destroy(); } catch(e) {}
       setSentences(newSentences);
       setEpubContent(contentData);
@@ -1547,16 +967,15 @@ export default function App() {
       const newPages = [];
       let globalLineList: any[] = [];
       const scale = Math.min(window.devicePixelRatio || 1, 2);
+
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
         const viewport = page.getViewport({ scale });
         const textContent = await page.getTextContent();
         const lines = processTextContent(textContent, viewport, scale, globalLineList.length);
         globalLineList.push(...lines);
-        // Store only metadata — page proxy fetched on-demand during render
         newPages.push({ viewport, lines, pageNumber: i });
         page.cleanup();
-        // Yield to main thread every 10 pages to let GC breathe
         if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
       }
 
@@ -1608,11 +1027,9 @@ export default function App() {
     items.forEach((item: any) => {
       if (!currentLine) {
         currentLine = { items: [item], y: item.y, height: item.height };
-      }
-      else if (Math.abs(item.y - currentLine.y) < currentLine.height * 0.5) {
+      } else if (Math.abs(item.y - currentLine.y) < currentLine.height * 0.5) {
         currentLine.items.push(item);
-      }
-      else {
+      } else {
         lines.push(currentLine);
         currentLine = { items: [item], y: item.y, height: item.height };
       }
@@ -1642,13 +1059,12 @@ export default function App() {
     });
   };
 
-  // ── Outline (TOC) derived from epub/text headers ──────────────────────
+  // ── Memos ──────────────────────────────────────────────────────────────
   const outline: OutlineEntry[] = useMemo(() =>
     epubContent.filter(i => i.type === 'header').map(i => ({ id: i.id, text: i.text, level: i.level })),
     [epubContent]
   );
 
-  // Which header section is currently being read
   const activeHeaderId = useMemo(() => {
     if (currentSentenceIndex < 0 || !sentences[currentSentenceIndex]) return null;
     const currentLines = new Set<number>(sentences[currentSentenceIndex].lines);
@@ -1664,387 +1080,59 @@ export default function App() {
     return null;
   }, [currentSentenceIndex, epubContent, sentences]);
 
-  const getStatusBadgeStyle = () => {
-    if (ttsStatus === "Downloading...") return { ...styles.statusBadgeMenu, ...staticStyles.statusLoading };
-    if (ttsStatus === "Model Ready")    return { ...styles.statusBadgeMenu, ...staticStyles.statusReady };
-    if (ttsStatus === "System Voice")   return { ...styles.statusBadgeMenu, ...staticStyles.statusFallback };
-    return { ...styles.statusBadgeMenu, ...staticStyles.statusLoading };
-  };
-
+  // ── Render ─────────────────────────────────────────────────────────────
   return (
-    <div style={styles.container}>
+    <div style={{
+      minHeight: '100vh',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      backgroundColor: t.bg,
+      fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif',
+      color: t.text,
+      paddingTop: '1rem',
+      transition: TT,
+    }}>
 
       {sentences.length === 0 ? (
-        <>
-        {/* ── Landing card ────────────────────────────────────────────── */}
-        <div style={{
-          width: '90%', maxWidth: '38rem', marginTop: '3.5rem',
-          borderRadius: '1.25rem',
-          border: `1px solid ${isDragOver ? '#6b9fd4' : t.dropBorder}`,
-          backgroundColor: isDragOver ? (isDarkMode ? '#1a2a3a' : '#eef4fb') : t.dropBg,
-          boxShadow: isDragOver
-            ? `0 0 0 3px ${isDarkMode ? 'rgba(107,159,212,0.12)' : 'rgba(107,159,212,0.1)'}, 0 2px 8px rgba(0,0,0,0.08)`
-            : isDarkMode ? '0 2px 8px rgba(0,0,0,0.28)' : '0 1px 4px rgba(100,80,60,0.08)',
-          transition: 'border-color 0.2s, box-shadow 0.2s, background-color 0.2s',
-          overflow: 'hidden',
-        }}>
-
-          {/* File drop zone — clicking opens file picker */}
-          <div
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
-            onDragLeave={() => setIsDragOver(false)}
-            onDrop={handleFileDrop}
-            style={{ padding: '2.25rem 2rem 2rem', textAlign: 'center' as const, cursor: 'pointer' }}
-          >
-            <div style={{
-              width: '42px', height: '42px', borderRadius: '0.75rem', margin: '0 auto 1.1rem',
-              backgroundColor: isDarkMode ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.05)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
-              <Upload size={18} color={t.textMuted} />
-            </div>
-            <p style={{ fontSize: '0.95rem', fontWeight: 500, color: t.text, margin: '0 0 0.3rem', letterSpacing: '-0.01em' }}>
-              Drop a file to start reading
-            </p>
-            <p style={{ fontSize: '0.75rem', color: t.textMuted, margin: 0, letterSpacing: '0.02em' }}>
-              PDF · EPUB · Markdown · TXT
-            </p>
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileDrop}
-              accept="application/pdf,.epub,.md,.markdown,.txt,text/plain"
-              style={{ display: 'none' }}
-            />
-          </div>
-
-          {/* Hairline divider */}
-          <div style={{ height: '1px', backgroundColor: t.dropBorder, opacity: 0.6 }} />
-
-          {/* URL + clipboard actions */}
-          <div onClick={(e) => e.stopPropagation()} style={{ padding: '1.25rem 1.5rem 1.5rem' }}>
-
-            {/* URL row */}
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
-              <div style={{ position: 'relative', flex: 1 }}>
-                <Globe size={13} color={t.textMuted} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
-                <input
-                  type="url"
-                  value={urlInputValue}
-                  onChange={(e) => { setUrlInputValue(e.target.value); if (urlError) setUrlError(''); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleUrlLoad(); }}
-                  placeholder="Paste a URL to read as an article…"
-                  style={{
-                    width: '100%', padding: '0.5rem 0.65rem 0.5rem 2rem',
-                    fontSize: '0.8rem', color: t.text,
-                    backgroundColor: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)',
-                    border: `1px solid ${urlError ? '#ef4444' : t.inputBorder}`,
-                    borderRadius: '0.625rem', boxSizing: 'border-box' as const, outline: 'none',
-                    transition: 'border-color 0.15s',
-                  }}
-                />
-              </div>
-              <button
-                onClick={() => handleUrlLoad()}
-                disabled={isUrlLoading || !urlInputValue.trim()}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.3rem',
-                  padding: '0.5rem 0.9rem', fontSize: '0.8rem', fontWeight: 600,
-                  backgroundColor: isUrlLoading || !urlInputValue.trim() ? 'transparent' : '#2563eb',
-                  color: isUrlLoading || !urlInputValue.trim() ? t.textMuted : 'white',
-                  border: `1px solid ${isUrlLoading || !urlInputValue.trim() ? t.inputBorder : '#2563eb'}`,
-                  borderRadius: '0.625rem',
-                  cursor: isUrlLoading || !urlInputValue.trim() ? 'default' : 'pointer',
-                  whiteSpace: 'nowrap' as const, flexShrink: 0, transition: 'all 0.15s',
-                }}
-              >
-                {isUrlLoading
-                  ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Fetching…</>
-                  : 'Load URL'}
-              </button>
-            </div>
-            {urlError && <p style={{ margin: '-0.35rem 0 0.65rem', fontSize: '0.72rem', color: '#ef4444' }}>{urlError}</p>}
-
-            {/* Clipboard button */}
-            <button
-              onClick={handleClipboardPaste}
-              style={{
-                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
-                padding: '0.5rem', fontSize: '0.8rem', fontWeight: 500,
-                backgroundColor: 'transparent', color: t.textMuted,
-                border: `1px solid ${t.inputBorder}`,
-                borderRadius: '0.625rem', cursor: 'pointer', transition: 'color 0.15s, border-color 0.15s',
-              }}
-            >
-              <Clipboard size={13} /> Paste from Clipboard
-            </button>
-
-            {showTextInput && (
-              <div style={{ marginTop: '0.85rem' }}>
-                <textarea
-                  value={textInputValue}
-                  onChange={(e) => setTextInputValue(e.target.value)}
-                  placeholder="Paste your text here..."
-                  style={{
-                    width: '100%', minHeight: '90px', padding: '0.6rem 0.75rem',
-                    borderRadius: '0.625rem', border: `1px solid ${t.inputBorder}`,
-                    fontSize: '0.85rem', color: t.text, backgroundColor: 'transparent',
-                    boxSizing: 'border-box' as const, resize: 'vertical' as const, outline: 'none',
-                  }}
-                />
-                <button
-                  onClick={(e) => { e.stopPropagation(); if (textInputValue.trim()) loadText(textInputValue); }}
-                  style={{
-                    marginTop: '0.5rem', width: '100%', padding: '0.6rem',
-                    fontSize: '0.85rem', fontWeight: 600, backgroundColor: '#2563eb',
-                    color: 'white', border: 'none', borderRadius: '0.625rem', cursor: 'pointer',
-                  }}
-                >
-                  Start Reading
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <BookmarkHistory
-          bookmarks={bookmarks}
-          onSelect={handleSelectBookmark}
-          onDelete={handleDeleteBookmark}
+        <LandingCard
           isDarkMode={isDarkMode}
+          t={t}
+          isDragOver={isDragOver}
+          setIsDragOver={setIsDragOver}
+          onFileDrop={handleFileDrop}
+          urlInputValue={urlInputValue}
+          setUrlInputValue={setUrlInputValue}
+          urlError={urlError}
+          setUrlError={setUrlError}
+          isUrlLoading={isUrlLoading}
+          onUrlLoad={handleUrlLoad}
+          onClipboardPaste={handleClipboardPaste}
+          showTextInput={showTextInput}
+          setShowTextInput={setShowTextInput}
+          textInputValue={textInputValue}
+          setTextInputValue={setTextInputValue}
+          onLoadText={loadText}
+          bookmarks={bookmarks}
+          onSelectBookmark={handleSelectBookmark}
+          onDeleteBookmark={handleDeleteBookmark}
         />
-        </>
       ) : (
-        <div style={styles.viewer}>
-          {fileType === 'pdf' && pages.map(pageData => (
-            <PDFPage
-              key={pageData.pageNumber}
-              data={pageData}
-              pdfDoc={pdfDoc}
-              onLineClick={handleLineClick}
-              pageContainerStyle={styles.pageContainer}
-            />
-          ))}
-
-          {(fileType === 'epub' || fileType === 'text') && (
-            <>
-              <BookOutline entries={outline} activeId={activeHeaderId} isDarkMode={isDarkMode} />
-              <div style={styles.epubContainer}>
-                {(() => {
-                  let headersSeen = 0;
-                  const H_SIZE: Record<number, string> = { 1: '1.45rem', 2: '1.25rem', 3: '1.1rem', 4: '1rem', 5: '0.95rem', 6: '0.9rem' };
-                  return epubContent.map((item) => {
-                    if (item.type === 'frontmatter') {
-                      return (
-                        <div key={item.id} style={{
-                          margin: '0 0 2rem',
-                          borderRadius: '0.75rem',
-                          overflow: 'hidden',
-                          border: `1px solid ${t.statBorder}`,
-                          backgroundColor: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
-                        }}>
-                          {item.image && (
-                            <img src={item.image} alt={item.title || ''} loading="lazy" style={{
-                              width: '100%', maxHeight: '220px', objectFit: 'cover', display: 'block',
-                            }} />
-                          )}
-                          <div style={{ padding: '1rem 1.1rem' }}>
-                            {item.title && <p style={{ margin: '0 0 0.3rem', fontSize: '1.3rem', fontWeight: 700, color: t.headerColor, lineHeight: 1.25 }}>{item.title}</p>}
-                            {item.description && <p style={{ margin: 0, fontSize: '0.875rem', color: t.textMuted, lineHeight: 1.5 }}>{item.description}</p>}
-                          </div>
-                        </div>
-                      );
-                    }
-                    if (item.type === 'header') {
-                      const isFirst = headersSeen === 0;
-                      headersSeen++;
-                      const lvl: number = item.level ?? 1;
-                      // Show a section divider only before top-level headings (or EPUB chapters which have no level)
-                      const showDivider = !isFirst && lvl <= 1;
-                      return (
-                        <React.Fragment key={item.id}>
-                          {showDivider && (
-                            <hr style={{
-                              border: 'none',
-                              borderTop: `1px solid ${t.statBorder}`,
-                              margin: '3rem 0 2.5rem',
-                              opacity: 0.45,
-                            }} />
-                          )}
-                          <div
-                            id={item.id}
-                            style={{
-                              fontSize: H_SIZE[lvl] ?? '1.45rem',
-                              fontWeight: lvl <= 2 ? 700 : 600,
-                              margin: isFirst ? `0 0 ${lvl === 1 ? '1.4rem' : '1rem'}` : `${lvl === 1 ? '2rem' : '1.4rem'} 0 ${lvl === 1 ? '1.4rem' : '0.6rem'}`,
-                              color: t.headerColor,
-                              lineHeight: 1.25,
-                              letterSpacing: lvl === 1 ? '-0.015em' : 'normal',
-                              scrollMarginTop: '1.5rem',
-                            }}
-                          >
-                            {item.text}
-                          </div>
-                        </React.Fragment>
-                      );
-                    }
-                    if (item.type === 'paragraph') {
-                      const isBlockquote = item.elementType === 'blockquote';
-                      const isList = item.elementType === 'li';
-                      // EPUB paragraph — per-sentence word spans (preserves blockquote/list styling)
-                      if (item.runs) {
-                        return (
-                          <LazyBlock key={item.id}>
-                          <p
-                            style={{
-                              margin: isBlockquote ? '0 0 0.9em' : '0 0 1.1em',
-                              padding: 0,
-                              paddingLeft: isList ? '1.3em' : isBlockquote ? '1em' : 0,
-                              borderLeft: isBlockquote ? `3px solid ${t.dropBorder}` : 'none',
-                              fontStyle: isBlockquote ? 'italic' as const : 'normal' as const,
-                              color: isBlockquote ? t.textMuted : 'inherit',
-                              lineHeight: 'inherit',
-                              position: 'relative' as const,
-                            }}
-                          >
-                            {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' as const }}>•</span>}
-                            {item.sentences.map((sentence: any) => (
-                              <span
-                                key={sentence.id}
-                                id={`line-${sentence.id}`}
-                                onClick={() => handleLineClick(sentence.id)}
-                                style={styles.epubSentence}
-                              >
-                                {sentence.words
-                                  ? sentence.words.map((word: string, wi: number) => (
-                                      <span
-                                        key={wi}
-                                        id={`word-${sentence.id}-${wi}`}
-                                        style={{ transition: 'background-color 0.08s ease' }}
-                                      >
-                                        {word}{wi < sentence.words.length - 1 ? ' ' : ''}
-                                      </span>
-                                    ))
-                                  : sentence.text
-                                }{' '}
-                              </span>
-                            ))}
-                          </p>
-                          </LazyBlock>
-                        );
-                      }
-                      // Text / Markdown paragraph — word-level spans inside sentence spans
-                      return (
-                        <LazyBlock key={item.id}>
-                        <p style={{ margin: '0 0 1.1em', padding: 0, lineHeight: 'inherit' }}>
-                          {item.sentences.map((sentence: any) => (
-                            <span
-                              key={sentence.id}
-                              id={`line-${sentence.id}`}
-                              onClick={() => handleLineClick(sentence.id)}
-                              style={styles.epubSentence}
-                            >
-                              {sentence.words
-                                ? sentence.words.map((word: string, wi: number) => (
-                                    <span
-                                      key={wi}
-                                      id={`word-${sentence.id}-${wi}`}
-                                      style={{ transition: 'background-color 0.08s ease' }}
-                                    >
-                                      {word}{wi < sentence.words.length - 1 ? ' ' : ''}
-                                    </span>
-                                  ))
-                                : (sentence.md ? renderMd(sentence.md, isDarkMode ? '#60a5fa' : '#2563eb') : sentence.text)
-                              }{' '}
-                            </span>
-                          ))}
-                        </p>
-                        </LazyBlock>
-                      );
-                    }
-                    if (item.type === 'code') {
-                      return (
-                        <LazyBlock key={item.id}>
-                        <pre style={{
-                          backgroundColor: isDarkMode ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.04)',
-                          border: `1px solid ${t.statBorder}`,
-                          borderRadius: '0.5rem',
-                          padding: '0.75rem 1rem',
-                          overflowX: 'auto',
-                          fontSize: '0.82rem',
-                          fontFamily: 'monospace',
-                          lineHeight: 1.6,
-                          margin: '0 0 1.1em',
-                          color: t.text,
-                          whiteSpace: 'pre',
-                        }}>
-                          <code>{item.text}</code>
-                        </pre>
-                        </LazyBlock>
-                      );
-                    }
-                    if (item.type === 'table') {
-                      const lc = isDarkMode ? '#60a5fa' : '#2563eb';
-                      return (
-                        <LazyBlock key={item.id}>
-                        <div style={{ overflowX: 'auto', margin: '0 0 1.5em', borderRadius: '0.5rem', border: `1px solid ${t.statBorder}` }}>
-                          <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.82rem', minWidth: '320px' }}>
-                            {item.headers.length > 0 && (
-                              <thead>
-                                <tr style={{ backgroundColor: isDarkMode ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)' }}>
-                                  {item.headers.map((h: string, i: number) => (
-                                    <th key={i} style={{ padding: '0.5rem 0.75rem', textAlign: 'left', fontWeight: 600, color: t.text, borderBottom: `1px solid ${t.statBorder}`, whiteSpace: 'nowrap' }}>
-                                      {renderMd(h, lc)}
-                                    </th>
-                                  ))}
-                                </tr>
-                              </thead>
-                            )}
-                            <tbody>
-                              {item.rows.map((row: string[], ri: number) => (
-                                <tr key={ri} style={{ backgroundColor: ri % 2 !== 0 ? (isDarkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)') : 'transparent' }}>
-                                  {row.map((cell: string, ci: number) => (
-                                    <td key={ci} style={{ padding: '0.4rem 0.75rem', color: t.text, borderBottom: ri < item.rows.length - 1 ? `1px solid ${t.statBorder}` : 'none', verticalAlign: 'top' }}>
-                                      {renderMd(cell.replace(/\\(.)/g, '$1'), lc)}
-                                    </td>
-                                  ))}
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                        </LazyBlock>
-                      );
-                    }
-                    if (item.type === 'image') {
-                      return (
-                        <LazyBlock key={item.id}>
-                        <div style={{ textAlign: 'center', margin: '1.2em 0' }}>
-                          <img
-                            src={item.src}
-                            alt={item.alt}
-                            loading="lazy"
-                            style={{ maxWidth: '100%', borderRadius: '0.5rem', display: 'inline-block' }}
-                          />
-                          {item.alt && <p style={{ fontSize: '0.78rem', color: t.textMuted, margin: '0.4em 0 0', fontStyle: 'italic' }}>{item.alt}</p>}
-                        </div>
-                        </LazyBlock>
-                      );
-                    }
-                    if (item.type === 'hr') {
-                      return <hr key={item.id} style={{ border: 'none', borderTop: `1px solid ${t.statBorder}`, margin: '1.5rem 0', opacity: 0.5 }} />;
-                    }
-                    return null;
-                  });
-                })()}
-              </div>
-            </>
-          )}
-        </div>
+        <ContentViewer
+          fileType={fileType!}
+          pages={pages}
+          pdfDoc={pdfDoc}
+          epubContent={epubContent}
+          outline={outline}
+          activeHeaderId={activeHeaderId}
+          isDarkMode={isDarkMode}
+          t={t}
+          fontSize={fontSize}
+          onLineClick={handleLineClick}
+        />
       )}
 
-      {/* Keyframes */}
+      {/* Global CSS — highlight classes and keyframes */}
       <style>{`
         .epub-highlight-active {
           background-color: rgba(250, 204, 21, 0.45) !important;
@@ -2099,7 +1187,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Scroll-to-current button — bottom-right, visible only when paused */}
+      {/* Scroll-to-current button — visible only when paused */}
       {sentences.length > 0 && !isPlaying && currentSentenceIndex >= 0 && (
         <button
           onClick={() => {
@@ -2129,230 +1217,31 @@ export default function App() {
         </button>
       )}
 
-      {/* Bottom Bar */}
-      <div style={styles.bottomBar}>
-        <button
-          onClick={triggerEasterEgg}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}
-        >
-          <img src="./logo.png" style={{ width: '32px', height: '32px' }} alt="logo" />
-        </button>
-
-        <button
-          onClick={() => setIsSpeedMenuOpen(!isSpeedMenuOpen)}
-          style={styles.speedButton}
-        >
-          {playbackSpeed}x
-        </button>
-
-        <button
-          onClick={togglePlay}
-          disabled={sentences.length === 0 || !isModelReady}
-          style={{
-            ...staticStyles.playButton,
-            ...(sentences.length === 0 || !isModelReady ? staticStyles.buttonDisabled : {})
-          }}
-        >
-          {playbackState === 'Buffering'
-            ? <Loader2 size={20} color="white" style={{ animation: 'spin 0.8s linear infinite' }} />
-            : isPlaying
-              ? <Pause size={20} fill="white" />
-              : <Play size={20} fill="white" style={{ marginLeft: '2px' }} />
-          }
-        </button>
-
-        <button onClick={() => setIsMenuOpen(!isMenuOpen)} style={styles.iconButton}>
-          <Menu size={24} />
-        </button>
-
-        {/* Theme toggle — at the end of the bar */}
-        <button
-          onClick={() => { const next = !isDarkMode; setIsDarkMode(next); localStorage.setItem('theme', next ? 'dark' : 'light'); }}
-          style={styles.iconButton}
-          title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}
-        >
-          {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
-        </button>
-
-        {/* ── Speed picker ──────────────────────────────────────── */}
-        {isSpeedMenuOpen && (
-          <div style={{
-            position: 'absolute', bottom: 'calc(100% + 10px)', left: '2rem',
-            width: '90px', overflow: 'hidden',
-            backgroundColor: t.menuBg,
-            borderRadius: '0.875rem',
-            border: `1px solid ${t.menuBorder}`,
-            boxShadow: isDarkMode
-              ? '0 8px 24px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)'
-              : '0 8px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)',
-          }}>
-            {[1.0, 1.25, 1.5, 2.0].map((speed, idx) => {
-              const active = playbackSpeed === speed;
-              const isLast = idx === 3;
-              return (
-                <div key={speed}>
-                  <button
-                    onClick={() => {
-                      setPlaybackSpeed(speed);
-                      drainResolvers();
-                      audioCache.current.clear();
-                      pendingFetches.current.clear();
-                      if (currentSource.current) {
-                        try { currentSource.current.stop(); } catch(e) {}
-                        currentSource.current.disconnect();
-                        currentSource.current = null;
-                      }
-                      window.speechSynthesis.cancel();
-                      playbackSessionId.current += 1;
-                      isWaitingForAudio.current = false;
-                      setIsSpeedMenuOpen(false);
-                      if (isPlaying) setRestartTrigger(p => p + 1);
-                    }}
-                    style={{
-                      width: '100%', padding: '0.6rem 0.9rem',
-                      background: 'none', border: 'none', cursor: 'pointer',
-                      fontSize: '0.85rem', fontWeight: active ? 600 : 400,
-                      color: active ? '#2563eb' : t.text,
-                      textAlign: 'left' as const,
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      transition: 'color 0.1s',
-                    }}
-                  >
-                    {speed}×
-                    {active && <span style={{ fontSize: '0.7rem', color: '#2563eb' }}>✓</span>}
-                  </button>
-                  {!isLast && <div style={{ height: '1px', backgroundColor: t.menuBorder, marginLeft: '0.9rem', opacity: 0.6 }} />}
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* ── Settings menu ─────────────────────────────────────── */}
-        {isMenuOpen && (() => {
-          const popoverStyle: React.CSSProperties = {
-            position: 'absolute', bottom: 'calc(100% + 10px)', right: '0',
-            width: '248px', overflow: 'hidden',
-            backgroundColor: t.menuBg,
-            borderRadius: '0.875rem',
-            border: `1px solid ${t.menuBorder}`,
-            boxShadow: isDarkMode
-              ? '0 8px 24px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)'
-              : '0 8px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)',
-          };
-          const row: React.CSSProperties = { padding: '0.55rem 1rem', display: 'flex', alignItems: 'center' };
-          const divider = <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />;
-          const lbl: React.CSSProperties = { fontSize: '0.75rem', color: t.textMuted, minWidth: '62px' };
-          const val: React.CSSProperties = { fontSize: '0.75rem', fontWeight: 600, color: t.text, fontFamily: 'monospace' };
-          const statusDot = isModelReady && !usingFallback.current ? '#22c55e' : usingFallback.current ? '#f59e0b' : '#3b82f6';
-
-          return (
-            <div style={popoverStyle}>
-
-              {/* Status */}
-              <div style={{ ...row, gap: '0.5rem' }}>
-                <div style={{ width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, backgroundColor: statusDot }} />
-                <span style={{ fontSize: '0.75rem', color: t.textMuted, flex: 1 }}>{ttsStatus}</span>
-              </div>
-
-              {divider}
-
-              {/* Voice selector */}
-              <div style={{ ...row, gap: '0.6rem' }}>
-                <span style={lbl}>Voice</span>
-                <select
-                  value={selectedVoice}
-                  onChange={handleVoiceChange}
-                  disabled={usingFallback.current || !isModelReady}
-                  style={{
-                    flex: 1, padding: '0.3rem 0.4rem',
-                    borderRadius: '0.4rem', border: `1px solid ${t.selectBorder}`,
-                    backgroundColor: t.selectBg, color: t.text,
-                    fontSize: '0.75rem', cursor: 'pointer', outline: 'none',
-                    ...(usingFallback.current || !isModelReady ? staticStyles.buttonDisabled : {}),
-                  }}
-                >
-                  {VOICES.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
-                </select>
-              </div>
-
-              {divider}
-
-              {/* State */}
-              <div style={{ ...row, justifyContent: 'space-between' }}>
-                <span style={lbl}>State</span>
-                <span style={val}>{playbackState}</span>
-              </div>
-              {/* Progress */}
-              <div style={{ ...row, justifyContent: 'space-between', paddingTop: '0.3rem', paddingBottom: '0.55rem' }}>
-                <span style={lbl}>Progress</span>
-                <span style={val}>
-                  {currentSentenceIndex >= 0 ? `${Math.round((currentSentenceIndex / sentences.length) * 100)}%` : '0%'}
-                </span>
-              </div>
-
-              {divider}
-
-              {/* Font size stepper */}
-              <div style={{ ...row, justifyContent: 'space-between', gap: '0.5rem' }}>
-                <span style={lbl}>Font size</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-                  {([['−', -0.05], ['+', 0.05]] as [string, number][]).map(([label, delta]) => (
-                    <button
-                      key={label}
-                      onClick={() => {
-                        const next = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + delta)).toFixed(2));
-                        setFontSize(next);
-                        localStorage.setItem('fontSize', String(next));
-                      }}
-                      style={{
-                        width: '24px', height: '24px', borderRadius: '0.375rem',
-                        border: `1px solid ${t.menuBorder}`, background: 'none',
-                        cursor: 'pointer', color: t.text, fontSize: '1rem', lineHeight: 1,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        flexShrink: 0,
-                      }}
-                    >{label}</button>
-                  ))}
-                  <span style={{ ...val, minWidth: '34px', textAlign: 'center' as const }}>{fontSize.toFixed(2)}x</span>
-                </div>
-              </div>
-
-              {divider}
-
-              {/* Actions */}
-              <div style={{ padding: '0.6rem 1rem', display: 'flex', flexDirection: 'column' as const, gap: '0.4rem' }}>
-                <button
-                  onClick={handleTestAudio}
-                  disabled={!isModelReady}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
-                    padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500,
-                    backgroundColor: 'transparent',
-                    color: !isModelReady ? t.textMuted : t.text,
-                    border: `1px solid ${t.menuBorder}`,
-                    borderRadius: '0.5rem',
-                    cursor: !isModelReady ? 'not-allowed' : 'pointer',
-                    opacity: !isModelReady ? 0.5 : 1,
-                  }}
-                >
-                  <Beaker size={13} /> Test Voice
-                </button>
-                <button
-                  onClick={resetReader}
-                  style={{
-                    padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500,
-                    backgroundColor: 'transparent', color: '#ef4444',
-                    border: '1px solid rgba(239,68,68,0.25)',
-                    borderRadius: '0.5rem', cursor: 'pointer',
-                  }}
-                >Reset Document</button>
-              </div>
-
-            </div>
-          );
-        })()}
-      </div>
+      <BottomBar
+        t={t}
+        isDarkMode={isDarkMode}
+        onToggleTheme={handleToggleTheme}
+        isPlaying={isPlaying}
+        isModelReady={isModelReady}
+        playbackState={playbackState}
+        playbackSpeed={playbackSpeed}
+        hasSentences={sentences.length > 0}
+        onTogglePlay={togglePlay}
+        onSpeedChange={handleSpeedChange}
+        isMenuOpen={isMenuOpen}
+        onToggleMenu={() => setIsMenuOpen(v => !v)}
+        ttsStatus={ttsStatus}
+        usingFallback={usingFallback.current}
+        selectedVoice={selectedVoice}
+        onVoiceChange={handleVoiceChange}
+        currentSentenceIndex={currentSentenceIndex}
+        sentencesLength={sentences.length}
+        fontSize={fontSize}
+        onFontSizeChange={handleFontSizeChange}
+        onTestAudio={handleTestAudio}
+        onReset={resetReader}
+        onLogoClick={triggerEasterEgg}
+      />
     </div>
   );
 }

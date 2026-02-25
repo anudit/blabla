@@ -8,6 +8,7 @@
     "build": "bun run build.ts",
     "serve": "bunx live-server ./dist",
     "start": "NODE_ENV=production bun index.ts",
+    "stats": "bun run build && bunx esbuild-visualizer --metadata ./dist/meta.json --filename ./dist/stats.html --open",
     "outdated": "bunx npm-check-updates --interactive"
   },
   "dependencies": {

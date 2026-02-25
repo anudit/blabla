@@ -4,7 +4,7 @@ const APP_SHELL = [
   '/',
   '/index.html',
   '/bundle.js',
-  '/logo.png',
+  '/180.png',
   '/tts.worker.js',
   '/pdf.worker.mjs',
   '/manifest.json'

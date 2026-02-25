@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
+// import * as pdfjsLib from 'pdfjs-dist';
 import ePub from 'epubjs';
 import { Target } from 'lucide-react';
 import { THEMES, TT } from './theme';
@@ -14,7 +14,7 @@ import LandingCard from './components/LandingCard';
 import ContentViewer from './components/ContentViewer';
 import BottomBar from './components/BottomBar';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
+// pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
 
 export default function App() {
   // ── State ──────────────────────────────────────────────────────────────
@@ -962,6 +962,11 @@ export default function App() {
   const loadPDF = async (data: ArrayBuffer) => {
     setFileType('pdf');
     try {
+      // 1. Dynamically import PDF.js
+      const pdfjsLib = await import('pdfjs-dist');
+     // 2. Set the worker source dynamically
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
+
       const doc = await pdfjsLib.getDocument(data).promise;
       setPdfDoc(doc);
       const newPages = [];
@@ -1182,7 +1187,7 @@ export default function App() {
               ? 'eggBounceIn 0.55s cubic-bezier(0.34,1.56,0.64,1) forwards'
               : 'eggFadeOut 0.6s ease-in forwards',
           }}>
-            <img src="./logo.png" style={{ width: '250px', height: '250px' }} alt="" />
+            <img src="./180.png" style={{ width: '250px', height: '250px' }} alt="" />
           </div>
         </div>
       )}

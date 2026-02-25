@@ -43,7 +43,7 @@ const server = serve({
     "/pdf.worker.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.mjs"),
     "/manifest.json": Bun.file("./manifest.json"),
     "/sw.js": Bun.file("./sw.js"),
-    "/logo.png": Bun.file("./logo.png"),
+    // "/logo.png": Bun.file("./logo.png"),
     "/16.png": Bun.file("./16.png"),
     "/32.png": Bun.file("./32.png"),
     "/128.png": Bun.file("./128.png"),

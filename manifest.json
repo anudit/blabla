@@ -4,13 +4,13 @@
   "description": "Private, offline AI text-to-speech reader for PDF and EPUB files. Runs 100% in your browser.",
   "icons": [
     {
-      "src": "/logo.png",
+      "src": "/180.png",
       "type": "image/png",
       "sizes": "192x192",
       "purpose": "any maskable"
     },
     {
-      "src": "/logo.png",
+      "src": "/180.png",
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any maskable"

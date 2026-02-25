@@ -112,7 +112,7 @@ export default function BottomBar({
         onClick={onLogoClick}
         style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}
       >
-        <img src="./logo.png" style={{ width: '32px', height: '32px' }} alt="logo" />
+        <img src="./180.png" style={{ width: '32px', height: '32px' }} alt="logo" />
       </button>
 
       {/* Speed button */}

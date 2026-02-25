@@ -16,10 +16,13 @@ const preactAlias = {
 const result = await build({
   entrypoints: ["./frontend.tsx"],
   outdir: "./dist",
-  naming: "bundle.js",
+  naming: {
+      entry: "bundle.js",
+      chunk: "[name]-[hash].js"
+  },
+  splitting: true,
   target: "browser",
   minify: true,
-  sourcemap: "linked",
   metafile: true,
   alias: preactAlias,
 });
@@ -37,7 +40,7 @@ await build({
 console.log("📂 Copying Static Assets...");
 await cp("./index.html", "./dist/index.html");
 await cp("./manifest.json", "./dist/manifest.json");
-await cp("./logo.png", "./dist/logo.png");
+// await cp("./logo.png", "./dist/logo.png");
 await cp("./16.png", "./dist/16.png");
 await cp("./32.png", "./dist/32.png");
 await cp("./128.png", "./dist/128.png");

@@ -400,6 +400,11 @@ export default function App() {
   const [selectedVoice, setSelectedVoice] = useState('af_bella');
   // Incremented to force-restart playback after speed/voice changes
   const [restartTrigger, setRestartTrigger] = useState(0);
+  // Font size for epub/text/md content (rem units), persisted
+  const [fontSize, setFontSize] = useState(() => {
+    const s = parseFloat(localStorage.getItem('fontSize') || '');
+    return isNaN(s) ? 1.05 : s;
+  });
 
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
@@ -615,7 +620,7 @@ export default function App() {
       width: '100%',
       padding: '0.25rem 0',
       lineHeight: '1.8',
-      fontSize: '1.05rem',
+      fontSize: `${fontSize}rem`,
       textAlign: 'left' as const,
       backgroundColor: t.epubBg,
       color: t.text,
@@ -1671,33 +1676,59 @@ export default function App() {
 
       {sentences.length === 0 ? (
         <>
-        <div
-          style={{ ...styles.dropZone, ...(isDragOver ? styles.dropZoneHover : {}) }}
-          onClick={() => fileInputRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
-          onDragLeave={() => setIsDragOver(false)}
-          onDrop={handleFileDrop}
-        >
-          <Upload size={32} color={t.textMuted} style={{ marginBottom: '1rem' }} />
-          <p style={{ fontSize: '1.1rem', fontWeight: 600, color: t.text, marginBottom: '0.5rem' }}>
-            Drop PDF, EPUB, Markdown or TXT here
-          </p>
-          <p style={{ fontSize: '0.85rem', color: t.textMuted }}>
-            or tap to browse files
-          </p>
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileDrop}
-            accept="application/pdf,.epub,.md,.markdown,.txt,text/plain"
-            style={{ display: 'none' }}
-          />
-          <div style={{ width: '100%', borderTop: `1px solid ${t.dropBorder}`, margin: '1rem 0' }} />
-          {/* URL loader */}
-          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', marginBottom: '0.75rem' }}>
-            <div style={{ display: 'flex', gap: '0.5rem', width: '100%' }}>
+        {/* ── Landing card ────────────────────────────────────────────── */}
+        <div style={{
+          width: '90%', maxWidth: '38rem', marginTop: '3.5rem',
+          borderRadius: '1.25rem',
+          border: `1px solid ${isDragOver ? '#6b9fd4' : t.dropBorder}`,
+          backgroundColor: isDragOver ? (isDarkMode ? '#1a2a3a' : '#eef4fb') : t.dropBg,
+          boxShadow: isDragOver
+            ? `0 0 0 3px ${isDarkMode ? 'rgba(107,159,212,0.12)' : 'rgba(107,159,212,0.1)'}, 0 2px 8px rgba(0,0,0,0.08)`
+            : isDarkMode ? '0 2px 8px rgba(0,0,0,0.28)' : '0 1px 4px rgba(100,80,60,0.08)',
+          transition: 'border-color 0.2s, box-shadow 0.2s, background-color 0.2s',
+          overflow: 'hidden',
+        }}>
+
+          {/* File drop zone — clicking opens file picker */}
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={handleFileDrop}
+            style={{ padding: '2.25rem 2rem 2rem', textAlign: 'center' as const, cursor: 'pointer' }}
+          >
+            <div style={{
+              width: '42px', height: '42px', borderRadius: '0.75rem', margin: '0 auto 1.1rem',
+              backgroundColor: isDarkMode ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.05)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Upload size={18} color={t.textMuted} />
+            </div>
+            <p style={{ fontSize: '0.95rem', fontWeight: 500, color: t.text, margin: '0 0 0.3rem', letterSpacing: '-0.01em' }}>
+              Drop a file to start reading
+            </p>
+            <p style={{ fontSize: '0.75rem', color: t.textMuted, margin: 0, letterSpacing: '0.02em' }}>
+              PDF · EPUB · Markdown · TXT
+            </p>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileDrop}
+              accept="application/pdf,.epub,.md,.markdown,.txt,text/plain"
+              style={{ display: 'none' }}
+            />
+          </div>
+
+          {/* Hairline divider */}
+          <div style={{ height: '1px', backgroundColor: t.dropBorder, opacity: 0.6 }} />
+
+          {/* URL + clipboard actions */}
+          <div onClick={(e) => e.stopPropagation()} style={{ padding: '1.25rem 1.5rem 1.5rem' }}>
+
+            {/* URL row */}
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
               <div style={{ position: 'relative', flex: 1 }}>
-                <Globe size={15} color={t.textMuted} style={{ position: 'absolute', left: '0.6rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+                <Globe size={13} color={t.textMuted} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
                 <input
                   type="url"
                   value={urlInputValue}
@@ -1705,10 +1736,12 @@ export default function App() {
                   onKeyDown={(e) => { if (e.key === 'Enter') handleUrlLoad(); }}
                   placeholder="Paste a URL to read as an article…"
                   style={{
-                    width: '100%', padding: '0.5rem 0.6rem 0.5rem 2rem',
-                    fontSize: '0.8rem', color: t.text, backgroundColor: t.inputBg,
+                    width: '100%', padding: '0.5rem 0.65rem 0.5rem 2rem',
+                    fontSize: '0.8rem', color: t.text,
+                    backgroundColor: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)',
                     border: `1px solid ${urlError ? '#ef4444' : t.inputBorder}`,
-                    borderRadius: '0.375rem', boxSizing: 'border-box' as const, outline: 'none',
+                    borderRadius: '0.625rem', boxSizing: 'border-box' as const, outline: 'none',
+                    transition: 'border-color 0.15s',
                   }}
                 />
               </div>
@@ -1716,58 +1749,65 @@ export default function App() {
                 onClick={() => handleUrlLoad()}
                 disabled={isUrlLoading || !urlInputValue.trim()}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: '0.35rem',
-                  padding: '0.5rem 0.85rem', fontSize: '0.8rem', fontWeight: 600,
-                  backgroundColor: isUrlLoading || !urlInputValue.trim() ? t.testBtnBg : '#2563eb',
+                  display: 'flex', alignItems: 'center', gap: '0.3rem',
+                  padding: '0.5rem 0.9rem', fontSize: '0.8rem', fontWeight: 600,
+                  backgroundColor: isUrlLoading || !urlInputValue.trim() ? 'transparent' : '#2563eb',
                   color: isUrlLoading || !urlInputValue.trim() ? t.textMuted : 'white',
-                  border: `1px solid ${t.testBtnBorder}`, borderRadius: '0.375rem',
+                  border: `1px solid ${isUrlLoading || !urlInputValue.trim() ? t.inputBorder : '#2563eb'}`,
+                  borderRadius: '0.625rem',
                   cursor: isUrlLoading || !urlInputValue.trim() ? 'default' : 'pointer',
-                  whiteSpace: 'nowrap' as const, flexShrink: 0,
+                  whiteSpace: 'nowrap' as const, flexShrink: 0, transition: 'all 0.15s',
                 }}
               >
-                {isUrlLoading ? <><Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Fetching…</> : 'Load URL'}
+                {isUrlLoading
+                  ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Fetching…</>
+                  : 'Load URL'}
               </button>
             </div>
-            {urlError && <p style={{ margin: '0.35rem 0 0', fontSize: '0.75rem', color: '#ef4444', textAlign: 'left' }}>{urlError}</p>}
+            {urlError && <p style={{ margin: '-0.35rem 0 0.65rem', fontSize: '0.72rem', color: '#ef4444' }}>{urlError}</p>}
+
+            {/* Clipboard button */}
+            <button
+              onClick={handleClipboardPaste}
+              style={{
+                width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+                padding: '0.5rem', fontSize: '0.8rem', fontWeight: 500,
+                backgroundColor: 'transparent', color: t.textMuted,
+                border: `1px solid ${t.inputBorder}`,
+                borderRadius: '0.625rem', cursor: 'pointer', transition: 'color 0.15s, border-color 0.15s',
+              }}
+            >
+              <Clipboard size={13} /> Paste from Clipboard
+            </button>
+
+            {showTextInput && (
+              <div style={{ marginTop: '0.85rem' }}>
+                <textarea
+                  value={textInputValue}
+                  onChange={(e) => setTextInputValue(e.target.value)}
+                  placeholder="Paste your text here..."
+                  style={{
+                    width: '100%', minHeight: '90px', padding: '0.6rem 0.75rem',
+                    borderRadius: '0.625rem', border: `1px solid ${t.inputBorder}`,
+                    fontSize: '0.85rem', color: t.text, backgroundColor: 'transparent',
+                    boxSizing: 'border-box' as const, resize: 'vertical' as const, outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={(e) => { e.stopPropagation(); if (textInputValue.trim()) loadText(textInputValue); }}
+                  style={{
+                    marginTop: '0.5rem', width: '100%', padding: '0.6rem',
+                    fontSize: '0.85rem', fontWeight: 600, backgroundColor: '#2563eb',
+                    color: 'white', border: 'none', borderRadius: '0.625rem', cursor: 'pointer',
+                  }}
+                >
+                  Start Reading
+                </button>
+              </div>
+            )}
           </div>
-          <div style={{ width: '100%', borderTop: `1px solid ${t.dropBorder}`, margin: '0 0 0.75rem' }} />
-          <button
-            onClick={handleClipboardPaste}
-            style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
-              padding: '0.5rem 1rem', fontSize: '0.875rem', fontWeight: 600,
-              backgroundColor: t.testBtnBg, color: t.testBtnColor, border: `1px solid ${t.testBtnBorder}`,
-              borderRadius: '0.375rem', cursor: 'pointer',
-            }}
-          >
-            <Clipboard size={16} /> Paste from Clipboard
-          </button>
-          {showTextInput && (
-            <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', marginTop: '1rem' }}>
-              <textarea
-                value={textInputValue}
-                onChange={(e) => setTextInputValue(e.target.value)}
-                placeholder="Paste your text here..."
-                style={{
-                  width: '100%', minHeight: '100px', padding: '0.5rem',
-                  borderRadius: '0.375rem', border: `1px solid ${t.inputBorder}`,
-                  fontSize: '0.875rem', color: t.text, backgroundColor: t.inputBg,
-                  boxSizing: 'border-box' as const, resize: 'vertical',
-                }}
-              />
-              <button
-                onClick={(e) => { e.stopPropagation(); if (textInputValue.trim()) loadText(textInputValue); }}
-                style={{
-                  marginTop: '0.5rem', width: '100%', padding: '0.5rem',
-                  fontSize: '0.875rem', fontWeight: 600, backgroundColor: '#2563eb',
-                  color: 'white', border: 'none', borderRadius: '0.375rem', cursor: 'pointer',
-                }}
-              >
-                Start Reading
-              </button>
-            </div>
-          )}
         </div>
+
         <BookmarkHistory
           bookmarks={bookmarks}
           onSelect={handleSelectBookmark}
@@ -2104,86 +2144,184 @@ export default function App() {
           {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
         </button>
 
+        {/* ── Speed picker ──────────────────────────────────────── */}
         {isSpeedMenuOpen && (
-          <div style={{ ...styles.menuPopover, width: '100px', right: '0', bottom: 'calc(100% + 10px)' }}>
-            {[1.0, 1.25, 1.5, 2.0].map(speed => (
-              <button
-                key={speed}
-                onClick={() => {
-                  setPlaybackSpeed(speed);
-                  drainResolvers();
-                  audioCache.current.clear();
-                  pendingFetches.current.clear();
-                  // Stop current source so the new speed takes effect immediately
-                  if (currentSource.current) {
-                    try { currentSource.current.stop(); } catch(e) {}
-                    currentSource.current.disconnect();
-                    currentSource.current = null;
-                  }
-                  window.speechSynthesis.cancel();
-                  playbackSessionId.current += 1;
-                  isWaitingForAudio.current = false;
-                  setIsSpeedMenuOpen(false);
-                  if (isPlaying) setRestartTrigger(p => p + 1);
-                }}
-                style={{
-                  ...styles.statItem,
-                  width: '100%', cursor: 'pointer',
-                  backgroundColor: playbackSpeed === speed ? t.speedHighlight : 'transparent',
-                  border: 'none',
-                  color: t.text,
-                }}
-              >
-                {speed}x
-              </button>
-            ))}
+          <div style={{
+            position: 'absolute', bottom: 'calc(100% + 10px)', left: '2rem',
+            width: '90px', overflow: 'hidden',
+            backgroundColor: t.menuBg,
+            borderRadius: '0.875rem',
+            border: `1px solid ${t.menuBorder}`,
+            boxShadow: isDarkMode
+              ? '0 8px 24px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)'
+              : '0 8px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)',
+          }}>
+            {[1.0, 1.25, 1.5, 2.0].map((speed, idx) => {
+              const active = playbackSpeed === speed;
+              const isLast = idx === 3;
+              return (
+                <div key={speed}>
+                  <button
+                    onClick={() => {
+                      setPlaybackSpeed(speed);
+                      drainResolvers();
+                      audioCache.current.clear();
+                      pendingFetches.current.clear();
+                      if (currentSource.current) {
+                        try { currentSource.current.stop(); } catch(e) {}
+                        currentSource.current.disconnect();
+                        currentSource.current = null;
+                      }
+                      window.speechSynthesis.cancel();
+                      playbackSessionId.current += 1;
+                      isWaitingForAudio.current = false;
+                      setIsSpeedMenuOpen(false);
+                      if (isPlaying) setRestartTrigger(p => p + 1);
+                    }}
+                    style={{
+                      width: '100%', padding: '0.6rem 0.9rem',
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      fontSize: '0.85rem', fontWeight: active ? 600 : 400,
+                      color: active ? '#2563eb' : t.text,
+                      textAlign: 'left' as const,
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      transition: 'color 0.1s',
+                    }}
+                  >
+                    {speed}×
+                    {active && <span style={{ fontSize: '0.7rem', color: '#2563eb' }}>✓</span>}
+                  </button>
+                  {!isLast && <div style={{ height: '1px', backgroundColor: t.menuBorder, marginLeft: '0.9rem', opacity: 0.6 }} />}
+                </div>
+              );
+            })}
           </div>
         )}
 
-        {isMenuOpen && (
-          <div style={styles.menuPopover}>
-            <div style={getStatusBadgeStyle()}>
-              {ttsStatus === "Loading..."   && <Loader2 size={14} className="animate-spin" />}
-              {ttsStatus === "Model Ready"  && <Activity size={14} />}
-              {ttsStatus === "System Voice" && <AlertCircle size={14} />}
-              {ttsStatus}
-            </div>
+        {/* ── Settings menu ─────────────────────────────────────── */}
+        {isMenuOpen && (() => {
+          const popoverStyle: React.CSSProperties = {
+            position: 'absolute', bottom: 'calc(100% + 10px)', right: '0',
+            width: '248px', overflow: 'hidden',
+            backgroundColor: t.menuBg,
+            borderRadius: '0.875rem',
+            border: `1px solid ${t.menuBorder}`,
+            boxShadow: isDarkMode
+              ? '0 8px 24px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)'
+              : '0 8px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)',
+          };
+          const row: React.CSSProperties = { padding: '0.55rem 1rem', display: 'flex', alignItems: 'center' };
+          const divider = <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />;
+          const lbl: React.CSSProperties = { fontSize: '0.75rem', color: t.textMuted, minWidth: '62px' };
+          const val: React.CSSProperties = { fontSize: '0.75rem', fontWeight: 600, color: t.text, fontFamily: 'monospace' };
+          const statusDot = isModelReady && !usingFallback.current ? '#22c55e' : usingFallback.current ? '#f59e0b' : '#3b82f6';
 
-            <label style={styles.selectLabel}>Select Voice</label>
-            <div style={{ position: 'relative' }}>
-              <select
-                value={selectedVoice}
-                onChange={handleVoiceChange}
-                disabled={usingFallback.current || !isModelReady}
-                style={{ ...styles.select, ...(usingFallback.current || !isModelReady ? staticStyles.buttonDisabled : {}) }}
-              >
-                {VOICES.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
-              </select>
-            </div>
+          return (
+            <div style={popoverStyle}>
 
-            <div style={{ marginTop: '0.5rem' }}>
-              <div style={styles.statItem}>
-                <span style={styles.statLabel}>State</span>
-                <span style={styles.statValue}>{playbackState}</span>
+              {/* Status */}
+              <div style={{ ...row, gap: '0.5rem' }}>
+                <div style={{ width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, backgroundColor: statusDot }} />
+                <span style={{ fontSize: '0.75rem', color: t.textMuted, flex: 1 }}>{ttsStatus}</span>
               </div>
-              <div style={styles.statItem}>
-                <span style={styles.statLabel}>Progress</span>
-                <span style={styles.statValue}>
+
+              {divider}
+
+              {/* Voice selector */}
+              <div style={{ ...row, gap: '0.6rem' }}>
+                <span style={lbl}>Voice</span>
+                <select
+                  value={selectedVoice}
+                  onChange={handleVoiceChange}
+                  disabled={usingFallback.current || !isModelReady}
+                  style={{
+                    flex: 1, padding: '0.3rem 0.4rem',
+                    borderRadius: '0.4rem', border: `1px solid ${t.selectBorder}`,
+                    backgroundColor: t.selectBg, color: t.text,
+                    fontSize: '0.75rem', cursor: 'pointer', outline: 'none',
+                    ...(usingFallback.current || !isModelReady ? staticStyles.buttonDisabled : {}),
+                  }}
+                >
+                  {VOICES.map(v => <option key={v.value} value={v.value}>{v.label}</option>)}
+                </select>
+              </div>
+
+              {divider}
+
+              {/* State */}
+              <div style={{ ...row, justifyContent: 'space-between' }}>
+                <span style={lbl}>State</span>
+                <span style={val}>{playbackState}</span>
+              </div>
+              {/* Progress */}
+              <div style={{ ...row, justifyContent: 'space-between', paddingTop: '0.3rem', paddingBottom: '0.55rem' }}>
+                <span style={lbl}>Progress</span>
+                <span style={val}>
                   {currentSentenceIndex >= 0 ? `${Math.round((currentSentenceIndex / sentences.length) * 100)}%` : '0%'}
                 </span>
               </div>
-            </div>
 
-            <button
-              onClick={handleTestAudio}
-              style={{ ...styles.testButton, ...(!isModelReady ? staticStyles.buttonDisabled : {}) }}
-              disabled={!isModelReady}
-            >
-              <Beaker size={14} /> Test Voice
-            </button>
-            <button onClick={resetReader} style={styles.resetButton}>Reset Document</button>
-          </div>
-        )}
+              {divider}
+
+              {/* Font size stepper */}
+              <div style={{ ...row, justifyContent: 'space-between', gap: '0.5rem' }}>
+                <span style={lbl}>Font size</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  {([['−', -0.05], ['+', 0.05]] as [string, number][]).map(([label, delta]) => (
+                    <button
+                      key={label}
+                      onClick={() => {
+                        const next = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + delta)).toFixed(2));
+                        setFontSize(next);
+                        localStorage.setItem('fontSize', String(next));
+                      }}
+                      style={{
+                        width: '24px', height: '24px', borderRadius: '0.375rem',
+                        border: `1px solid ${t.menuBorder}`, background: 'none',
+                        cursor: 'pointer', color: t.text, fontSize: '1rem', lineHeight: 1,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        flexShrink: 0,
+                      }}
+                    >{label}</button>
+                  ))}
+                  <span style={{ ...val, minWidth: '34px', textAlign: 'center' as const }}>{fontSize.toFixed(2)}x</span>
+                </div>
+              </div>
+
+              {divider}
+
+              {/* Actions */}
+              <div style={{ padding: '0.6rem 1rem', display: 'flex', flexDirection: 'column' as const, gap: '0.4rem' }}>
+                <button
+                  onClick={handleTestAudio}
+                  disabled={!isModelReady}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+                    padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500,
+                    backgroundColor: 'transparent',
+                    color: !isModelReady ? t.textMuted : t.text,
+                    border: `1px solid ${t.menuBorder}`,
+                    borderRadius: '0.5rem',
+                    cursor: !isModelReady ? 'not-allowed' : 'pointer',
+                    opacity: !isModelReady ? 0.5 : 1,
+                  }}
+                >
+                  <Beaker size={13} /> Test Voice
+                </button>
+                <button
+                  onClick={resetReader}
+                  style={{
+                    padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500,
+                    backgroundColor: 'transparent', color: '#ef4444',
+                    border: '1px solid rgba(239,68,68,0.25)',
+                    borderRadius: '0.5rem', cursor: 'pointer',
+                  }}
+                >Reset Document</button>
+              </div>
+
+            </div>
+          );
+        })()}
       </div>
     </div>
   );

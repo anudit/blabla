@@ -2,14 +2,14 @@ import React from 'react';
 import { Clock, Trash2, BookOpen, FileText, Globe } from 'lucide-react';
 
 export interface BookmarkEntry {
-  id: string;           // URL for web articles, fileName+':'+fileSize for local files
-  fileName: string;     // page title for URLs, filename for local files
+  id: string;
+  fileName: string;
   sentenceIndex: number;
   totalSentences: number;
   timestamp: number;
   fileType: 'pdf' | 'epub' | 'url';
-  preview: string;      // text snippet at saved position (max 80 chars)
-  url?: string;         // original URL, present when fileType === 'url'
+  preview: string;
+  url?: string;
 }
 
 // ── LocalStorage helpers ───────────────────────────────────────────────
@@ -55,171 +55,159 @@ const ICON = { epub: BookOpen, pdf: FileText, url: Globe } as const;
 export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkMode }: Props) {
   if (bookmarks.length === 0) return null;
 
-  const t = isDarkMode ? {
-    sectionText:    '#8a8070',
-    itemBg:         '#242018',
-    itemBgHover:    '#2e2a22',
-    itemBorder:     '#3a3428',
-    text:           '#c8bfb0',
-    textMuted:      '#8a8070',
-    iconBg:         '#3a3428',
-    progressBg:     '#3a3428',
-    progressFill:   '#e8b800',
-    tagBg:          '#3a3020',
-    tagColor:       '#8a8070',
-    deleteColor:    '#6a6058',
+  const c = isDarkMode ? {
+    label:        '#6a6058',
+    containerBg:  '#242018',
+    containerBorder: '#3a3428',
+    divider:      '#302c24',
+    text:         '#c8bfb0',
+    textMuted:    '#7a6e60',
+    textFaint:    '#5a5248',
+    iconColor:    '#6a6058',
+    progressBg:   '#3a3428',
+    progressFill: '#d4a000',
+    tagBg:        '#302c24',
+    tagColor:     '#6a6058',
+    deleteFaint:  '#4a4238',
+    hoverBg:      '#2c2820',
   } : {
-    sectionText:    '#7a6e60',
-    itemBg:         '#fff9f2',
-    itemBgHover:    '#f5efe3',
-    itemBorder:     '#e0d8c8',
-    text:           '#3a3028',
-    textMuted:      '#7a6e60',
-    iconBg:         '#ede8df',
-    progressBg:     '#e0d8c8',
-    progressFill:   '#d4a000',
-    tagBg:          '#ede8df',
-    tagColor:       '#7a6e60',
-    deleteColor:    '#c0b4a4',
+    label:        '#9a8e80',
+    containerBg:  '#faf6ef',
+    containerBorder: '#e0d8c8',
+    divider:      '#ede8df',
+    text:         '#3a3028',
+    textMuted:    '#7a6e60',
+    textFaint:    '#b0a898',
+    iconColor:    '#b0a898',
+    progressBg:   '#e8e0d0',
+    progressFill: '#c89800',
+    tagBg:        '#ede8df',
+    tagColor:     '#9a8e80',
+    deleteFaint:  '#c8bfb0',
+    hoverBg:      '#f5efe3',
   };
 
-  // Whether any non-url entry exists (to show the drop hint)
   const hasLocalFiles = bookmarks.some(b => b.fileType !== 'url');
 
   return (
-    <div style={{ width: '90%', maxWidth: '42rem', marginTop: '1.5rem', marginBottom: '2rem' }}>
+    <div style={{ width: '90%', maxWidth: '38rem', marginTop: '1.25rem', marginBottom: '3rem' }}>
 
       {/* Section label */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.6rem' }}>
-        <Clock size={13} color={t.sectionText} />
-        <span style={{
-          fontSize: '0.7rem', fontWeight: 700, color: t.sectionText,
-          letterSpacing: '0.07em', textTransform: 'uppercase',
-        }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginBottom: '0.5rem', paddingLeft: '0.1rem' }}>
+        <Clock size={11} color={c.label} />
+        <span style={{ fontSize: '0.68rem', fontWeight: 600, color: c.label, letterSpacing: '0.06em', textTransform: 'uppercase' as const }}>
           Continue Reading
         </span>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-        {bookmarks.map(entry => {
+      {/* Grouped list container */}
+      <div style={{
+        borderRadius: '1rem',
+        border: `1px solid ${c.containerBorder}`,
+        backgroundColor: c.containerBg,
+        overflow: 'hidden',
+      }}>
+        {bookmarks.map((entry, idx) => {
           const pct = Math.min(100, Math.round((entry.sentenceIndex / Math.max(entry.totalSentences, 1)) * 100));
           const Icon = ICON[entry.fileType] ?? FileText;
           const isUrl = entry.fileType === 'url';
+          const isLast = idx === bookmarks.length - 1;
 
           return (
-            <div
-              key={entry.id}
-              onClick={() => isUrl && onSelect(entry)}
-              style={{
-                backgroundColor: t.itemBg,
-                border: `1px solid ${t.itemBorder}`,
-                borderRadius: '0.75rem',
-                padding: '0.7rem 0.85rem',
-                display: 'flex',
-                gap: '0.7rem',
-                alignItems: 'center',
-                transition: 'background-color 0.15s',
-                userSelect: 'none',
-                cursor: isUrl ? 'pointer' : 'default',
-              }}
-              onMouseEnter={e => (e.currentTarget.style.backgroundColor = t.itemBgHover)}
-              onMouseLeave={e => (e.currentTarget.style.backgroundColor = t.itemBg)}
-            >
-              {/* File type icon */}
-              <div style={{
-                flexShrink: 0,
-                width: '34px', height: '34px', borderRadius: '0.5rem',
-                backgroundColor: t.iconBg,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <Icon size={16} color={t.textMuted} />
-              </div>
-
-              {/* Main content */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-
-                {/* Top row: title + timestamp */}
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.15rem' }}>
-                  <span style={{
-                    fontSize: '0.82rem', fontWeight: 600, color: t.text,
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
-                  }}>
-                    {entry.fileName}
-                  </span>
-                  <span style={{ fontSize: '0.68rem', color: t.textMuted, flexShrink: 0 }}>
-                    {timeAgo(entry.timestamp)}
-                  </span>
-                </div>
-
-                {/* Domain for URL entries */}
-                {isUrl && entry.url && (
-                  <p style={{
-                    fontSize: '0.7rem', color: t.textMuted,
-                    margin: '0 0 0.2rem',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>
-                    {(() => { try { return new URL(entry.url).hostname; } catch { return entry.url; } })()}
-                  </p>
-                )}
-
-                {/* Preview snippet */}
-                {entry.preview && (
-                  <p style={{
-                    fontSize: '0.75rem', color: t.textMuted, fontStyle: 'italic',
-                    margin: '0 0 0.35rem',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>
-                    "{entry.preview}{entry.preview.length >= 80 ? '…' : ''}"
-                  </p>
-                )}
-
-                {/* Progress bar row */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <div style={{
-                    flex: 1, height: '3px', borderRadius: '999px',
-                    backgroundColor: t.progressBg, overflow: 'hidden',
-                  }}>
-                    <div style={{
-                      height: '100%', width: `${pct}%`,
-                      backgroundColor: t.progressFill,
-                      borderRadius: '999px',
-                    }} />
-                  </div>
-                  <span style={{ fontSize: '0.68rem', color: t.textMuted, flexShrink: 0 }}>
-                    {pct}%
-                  </span>
-                  <span style={{
-                    fontSize: '0.6rem', fontWeight: 700,
-                    color: t.tagColor, backgroundColor: t.tagBg,
-                    padding: '0.1rem 0.35rem', borderRadius: '999px',
-                    textTransform: 'uppercase', letterSpacing: '0.04em', flexShrink: 0,
-                  }}>
-                    {entry.fileType}
-                  </span>
-                </div>
-              </div>
-
-              {/* Delete button */}
-              <button
-                onClick={e => { e.stopPropagation(); onDelete(entry.id); }}
-                title="Remove from history"
+            <div key={entry.id}>
+              <div
+                onClick={() => isUrl && onSelect(entry)}
                 style={{
-                  flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer',
-                  color: t.deleteColor, padding: '0.3rem', borderRadius: '0.375rem',
-                  display: 'flex', alignItems: 'center', transition: 'color 0.15s',
+                  padding: '0.85rem 1rem',
+                  display: 'flex', gap: '0.75rem', alignItems: 'center',
+                  cursor: isUrl ? 'pointer' : 'default',
+                  backgroundColor: 'transparent',
+                  transition: 'background-color 0.12s',
+                  userSelect: 'none' as const,
                 }}
-                onMouseEnter={e => (e.currentTarget.style.color = '#ef4444')}
-                onMouseLeave={e => (e.currentTarget.style.color = t.deleteColor)}
+                onMouseEnter={e => { if (isUrl) (e.currentTarget as HTMLDivElement).style.backgroundColor = c.hoverBg; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.backgroundColor = 'transparent'; }}
               >
-                <Trash2 size={14} />
-              </button>
+                {/* Icon */}
+                <Icon size={15} color={c.iconColor} style={{ flexShrink: 0, marginTop: '1px' }} />
+
+                {/* Content */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  {/* Title row */}
+                  <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.5rem', marginBottom: '0.2rem' }}>
+                    <span style={{
+                      fontSize: '0.82rem', fontWeight: 500, color: c.text,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
+                    }}>
+                      {entry.fileName}
+                    </span>
+                    <span style={{ fontSize: '0.66rem', color: c.textFaint, flexShrink: 0 }}>
+                      {timeAgo(entry.timestamp)}
+                    </span>
+                  </div>
+
+                  {/* Domain for URLs */}
+                  {isUrl && entry.url && (
+                    <p style={{
+                      fontSize: '0.69rem', color: c.textMuted, margin: '0 0 0.18rem',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {(() => { try { return new URL(entry.url).hostname; } catch { return entry.url; } })()}
+                    </p>
+                  )}
+
+                  {/* Preview */}
+                  {entry.preview && (
+                    <p style={{
+                      fontSize: '0.72rem', color: c.textMuted, fontStyle: 'italic',
+                      margin: '0 0 0.3rem',
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      "{entry.preview}{entry.preview.length >= 80 ? '…' : ''}"
+                    </p>
+                  )}
+
+                  {/* Progress row */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                    <div style={{ flex: 1, height: '2px', borderRadius: '999px', backgroundColor: c.progressBg, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, backgroundColor: c.progressFill, borderRadius: '999px' }} />
+                    </div>
+                    <span style={{ fontSize: '0.65rem', color: c.textFaint, flexShrink: 0 }}>{pct}%</span>
+                    <span style={{
+                      fontSize: '0.58rem', fontWeight: 600, color: c.tagColor, backgroundColor: c.tagBg,
+                      padding: '0.08rem 0.3rem', borderRadius: '999px',
+                      textTransform: 'uppercase' as const, letterSpacing: '0.05em', flexShrink: 0,
+                    }}>
+                      {entry.fileType}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Delete */}
+                <button
+                  onClick={e => { e.stopPropagation(); onDelete(entry.id); }}
+                  title="Remove"
+                  style={{
+                    flexShrink: 0, background: 'none', border: 'none', cursor: 'pointer',
+                    color: c.deleteFaint, padding: '0.25rem', borderRadius: '0.375rem',
+                    display: 'flex', alignItems: 'center', transition: 'color 0.12s',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.color = '#ef4444')}
+                  onMouseLeave={e => (e.currentTarget.style.color = c.deleteFaint)}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+
+              {/* Hairline divider between items */}
+              {!isLast && <div style={{ height: '1px', backgroundColor: c.divider, marginLeft: '2.5rem' }} />}
             </div>
           );
         })}
       </div>
 
       {hasLocalFiles && (
-        <p style={{ fontSize: '0.68rem', color: t.textMuted, marginTop: '0.6rem', textAlign: 'center' }}>
+        <p style={{ fontSize: '0.66rem', color: c.label, marginTop: '0.5rem', textAlign: 'center' as const }}>
           Drop the same file again to resume from where you left off
         </p>
       )}

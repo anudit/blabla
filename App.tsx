@@ -230,6 +230,25 @@ function findTitleInToc(toc: any[], href: string): string | null {
   return null;
 }
 
+function extractWords(text: string): string[] {
+  return text.trim().split(/\s+/).filter(Boolean);
+}
+
+function calculateWordTimings(text: string, duration: number): { start: number; end: number; index: number }[] {
+  const words = extractWords(text);
+  if (words.length === 0 || duration <= 0) return [];
+  const totalChars = text.length;
+  const timings: { start: number; end: number; index: number }[] = [];
+  let charPos = 0;
+  words.forEach((word, i) => {
+    const startChar = charPos;
+    charPos += word.length;
+    if (i < words.length - 1) charPos += 1; // space
+    timings.push({ start: (startChar / totalChars) * duration, end: (charPos / totalChars) * duration, index: i });
+  });
+  return timings;
+}
+
 function extractSentences(text: string): string[] {
   // Protect markdown links, images, and inline code from being split at
   // dots/! inside URLs or code (e.g. https://dev.to/... would otherwise
@@ -391,6 +410,9 @@ export default function App() {
   const usingFallback = useRef(false);
   const nativeTimeout = useRef<any>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const wordRafRef = useRef<number | null>(null);
+  const wordTimingsRef = useRef<{ start: number; end: number; index: number }[]>([]);
+  const audioStartRef = useRef(0);
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -697,7 +719,6 @@ export default function App() {
       if (fileType === 'pdf') {
         el.classList.add('pdf-highlight-active');
       } else {
-        // EPUB rich paragraphs use zero-size marker spans → highlight parent <p>
         const target = (el.textContent === '' && el.closest('p')) ? el.closest('p')! : el;
         target.classList.add('epub-highlight-active');
       }
@@ -879,6 +900,8 @@ export default function App() {
   };
 
   const stopAllAudio = () => {
+    if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
+    document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
     playbackSessionId.current += 1;
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
@@ -994,7 +1017,12 @@ export default function App() {
       // model's native tempo is preserved without raising pitch.
       source.playbackRate.value = 1.0;
       source.connect(audioContext.current!.destination);
+
+      if (wordRafRef.current) cancelAnimationFrame(wordRafRef.current);
+
       source.onended = () => {
+        if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
+        document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
         currentSource.current = null;
         if (isPlaying && currentSession === playbackSessionId.current) {
           advanceSentence();
@@ -1002,7 +1030,27 @@ export default function App() {
       };
       currentSource.current = source;
       setPlaybackState("Playing");
+
+      // Word timing — calculated once from char proportions against audio duration
+      wordTimingsRef.current = calculateWordTimings(text, buffer.duration);
+      audioStartRef.current = audioContext.current!.currentTime;
       source.start(0);
+
+      // rAF loop: direct DOM update at 60 fps, no React re-renders
+      const lineId = unit.lines[0];
+      const animateWords = () => {
+        if (currentSource.current !== source) return;
+        const elapsed = audioContext.current!.currentTime - audioStartRef.current;
+        const active = wordTimingsRef.current.find(t => elapsed >= t.start && elapsed < t.end);
+        document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
+        if (active) {
+          document.getElementById(`word-${lineId}-${active.index}`)?.classList.add('word-highlight-active');
+        }
+        if (elapsed < buffer.duration) {
+          wordRafRef.current = requestAnimationFrame(animateWords);
+        }
+      };
+      wordRafRef.current = requestAnimationFrame(animateWords);
     } else {
       triggerFallback();
       playCurrentSentence();
@@ -1021,6 +1069,8 @@ export default function App() {
   };
 
   const handleLineClick = (lineId: number) => {
+    if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
+    document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
       currentSource.current.disconnect();
@@ -1269,7 +1319,7 @@ export default function App() {
         const lineId = idCounter++;
         newSentences.push({ text: clean, lines: [lineId] });
         // Store original markdown text only when it differs (has inline syntax)
-        paraSentences.push({ id: lineId, text: clean, ...(clean !== s ? { md: s } : {}) });
+        paraSentences.push({ id: lineId, text: clean, words: extractWords(clean), ...(clean !== s ? { md: s } : {}) });
       }
       if (paraSentences.length > 0) {
         contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
@@ -1365,7 +1415,7 @@ export default function App() {
       for (const sText of extractSentences(paraText)) {
         const lineId = globalLineIdCounter++;
         newSentences.push({ text: sText, lines: [lineId] });
-        paraSentences.push({ id: lineId, text: sText });
+        paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
       }
       if (paraSentences.length > 0) {
         contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
@@ -1465,7 +1515,7 @@ export default function App() {
               if (chapterTitle && sText.trim() === chapterTitle) continue;
               const lineId = globalLineIdCounter++;
               newSentences.push({ text: sText, lines: [lineId] });
-              paraSentences.push({ id: lineId, text: sText });
+              paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
             }
             if (paraSentences.length > 0) {
               // Store lightweight runs array instead of pre-built React nodes
@@ -1802,13 +1852,11 @@ export default function App() {
                     if (item.type === 'paragraph') {
                       const isBlockquote = item.elementType === 'blockquote';
                       const isList = item.elementType === 'li';
-                      // EPUB paragraph — rich formatting, paragraph-level highlighting via CSS class
+                      // EPUB paragraph — per-sentence word spans (preserves blockquote/list styling)
                       if (item.runs) {
-                        const firstId = item.sentences[0]?.id;
                         return (
                           <LazyBlock key={item.id}>
                           <p
-                            onClick={() => firstId !== undefined && handleLineClick(firstId)}
                             style={{
                               margin: isBlockquote ? '0 0 0.9em' : '0 0 1.1em',
                               padding: 0,
@@ -1817,21 +1865,36 @@ export default function App() {
                               fontStyle: isBlockquote ? 'italic' as const : 'normal' as const,
                               color: isBlockquote ? t.textMuted : 'inherit',
                               lineHeight: 'inherit',
-                              cursor: 'pointer',
-                              borderRadius: '3px',
-                              transition: `background-color 0.2s, ${TT}`,
                               position: 'relative' as const,
                             }}
                           >
-                            {/* Zero-size spans so scroll-to-sentence works for every sentence */}
-                            {item.sentences.map((s: any) => <span key={s.id} id={`line-${s.id}`} />)}
                             {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' as const }}>•</span>}
-                            {runsToReactNode(item.runs)}
+                            {item.sentences.map((sentence: any) => (
+                              <span
+                                key={sentence.id}
+                                id={`line-${sentence.id}`}
+                                onClick={() => handleLineClick(sentence.id)}
+                                style={styles.epubSentence}
+                              >
+                                {sentence.words
+                                  ? sentence.words.map((word: string, wi: number) => (
+                                      <span
+                                        key={wi}
+                                        id={`word-${sentence.id}-${wi}`}
+                                        style={{ transition: 'background-color 0.08s ease' }}
+                                      >
+                                        {word}{wi < sentence.words.length - 1 ? ' ' : ''}
+                                      </span>
+                                    ))
+                                  : sentence.text
+                                }{' '}
+                              </span>
+                            ))}
                           </p>
                           </LazyBlock>
                         );
                       }
-                      // Text / Markdown paragraph — per-sentence spans, highlight via CSS class
+                      // Text / Markdown paragraph — word-level spans inside sentence spans
                       return (
                         <LazyBlock key={item.id}>
                         <p style={{ margin: '0 0 1.1em', padding: 0, lineHeight: 'inherit' }}>
@@ -1842,7 +1905,18 @@ export default function App() {
                               onClick={() => handleLineClick(sentence.id)}
                               style={styles.epubSentence}
                             >
-                              {sentence.md ? renderMd(sentence.md, isDarkMode ? '#60a5fa' : '#2563eb') : sentence.text}{' '}
+                              {sentence.words
+                                ? sentence.words.map((word: string, wi: number) => (
+                                    <span
+                                      key={wi}
+                                      id={`word-${sentence.id}-${wi}`}
+                                      style={{ transition: 'background-color 0.08s ease' }}
+                                    >
+                                      {word}{wi < sentence.words.length - 1 ? ' ' : ''}
+                                    </span>
+                                  ))
+                                : (sentence.md ? renderMd(sentence.md, isDarkMode ? '#60a5fa' : '#2563eb') : sentence.text)
+                              }{' '}
                             </span>
                           ))}
                         </p>
@@ -1935,6 +2009,12 @@ export default function App() {
         .epub-highlight-active {
           background-color: rgba(250, 204, 21, 0.45) !important;
           border-radius: 3px;
+        }
+        .word-highlight-active {
+          background-color: #b47a32 !important;
+          color: inherit !important;
+          border-radius: 3px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.25);
         }
         .pdf-highlight-active {
           background-color: rgba(250, 204, 21, 0.45) !important;

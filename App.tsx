@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 // import * as pdfjsLib from 'pdfjs-dist';
-import ePub from 'epubjs';
+import { unzipSync } from 'fflate';
 import { Target } from 'lucide-react';
 import { THEMES, TT } from './theme';
 import {
@@ -884,73 +884,137 @@ export default function App() {
   const loadEPUB = async (data: ArrayBuffer) => {
     try {
       setFileType('epub');
-      const book = ePub(data);
-      await book.ready;
-      const spine = book.spine;
+      const files = unzipSync(new Uint8Array(data));
+      const decoder = new TextDecoder();
+      const parser = new DOMParser();
+
+      // 1. Find the .opf file via container.xml
+      const containerXml = decoder.decode(files['META-INF/container.xml']);
+      const containerDoc = parser.parseFromString(containerXml, 'text/xml');
+      const opfPath = containerDoc.querySelector('rootfile')?.getAttribute('full-path');
+      if (!opfPath) throw new Error("No OPF file found");
+
+      const opfDir = opfPath.includes('/') ? opfPath.substring(0, opfPath.lastIndexOf('/') + 1) : '';
+      const opfXml = decoder.decode(files[opfPath]);
+      const opfDoc = parser.parseFromString(opfXml, 'text/xml');
+
+      // 2. Parse Manifest (id -> href)
+      const manifest: Record<string, string> = {};
+      opfDoc.querySelectorAll('manifest > item').forEach(el => {
+        const id = el.getAttribute('id');
+        const href = el.getAttribute('href');
+        if (id && href) manifest[id] = href;
+      });
+
+      // 3. Parse Spine (reading order)
+      const spineIds = Array.from(opfDoc.querySelectorAll('spine > itemref')).map(el => el.getAttribute('idref')!);
+
+      // 4. Try to parse TOC for chapter titles
+      let toc: { href: string; label: string }[] = [];
+      // EPUB 3 Nav
+      const navItem = Array.from(opfDoc.querySelectorAll('manifest > item')).find(el => el.getAttribute('properties')?.includes('nav'));
+      if (navItem) {
+        const navPath = opfDir + navItem.getAttribute('href');
+        if (files[navPath]) {
+          const navDoc = parser.parseFromString(decoder.decode(files[navPath]), 'text/html');
+          toc = Array.from(navDoc.querySelectorAll('nav li a')).map(a => ({
+            href: a.getAttribute('href') || '',
+            label: a.textContent?.trim() || ''
+          }));
+        }
+      }
+      // EPUB 2 NCX fallback
+      if (toc.length === 0) {
+        const ncxItem = Array.from(opfDoc.querySelectorAll('manifest > item')).find(el => el.getAttribute('media-type') === 'application/x-dtbncx+xml' || el.getAttribute('id') === 'ncx');
+        if (ncxItem) {
+          const ncxPath = opfDir + ncxItem.getAttribute('href');
+          if (files[ncxPath]) {
+            const ncxDoc = parser.parseFromString(decoder.decode(files[ncxPath]), 'text/xml');
+            toc = Array.from(ncxDoc.querySelectorAll('navPoint')).map(np => ({
+              href: np.querySelector('content')?.getAttribute('src') || '',
+              label: np.querySelector('navLabel text')?.textContent?.trim() || ''
+            }));
+          }
+        }
+      }
+
       const newSentences: any[] = [];
       const contentData: any[] = [];
       let globalLineIdCounter = 0;
-      const items = (spine as any).items || [];
-      const navigation = await book.loaded.navigation;
       const normHead = (s: string) => s.replace(/[\u00a0\s]+/g, ' ').trim();
       let lastAddedHeaderText: string | null = null;
 
-      for (const item of items) {
-        try {
-          const doc = await book.load(item.href);
-          if (!doc) continue;
-          let chapterTitle: string | null = null;
-          if (navigation && (navigation as any).toc) {
-            chapterTitle = findTitleInToc((navigation as any).toc, item.href);
+      const normalizePath = (path: string) => {
+        const parts = path.split('/');
+        const result: string[] = [];
+        for (const part of parts) {
+          if (part === '..') result.pop();
+          else if (part !== '.') result.push(part);
+        }
+        return result.join('/');
+      };
+
+      for (const id of spineIds) {
+        const href = manifest[id];
+        if (!href) continue;
+        const fullPath = normalizePath(opfDir + href);
+        const cleanPath = decodeURIComponent(fullPath.split('#')[0]);
+        const fileBytes = files[cleanPath];
+        if (!fileBytes) continue;
+
+        const htmlString = decoder.decode(fileBytes);
+        const doc = parser.parseFromString(htmlString, 'application/xhtml+xml');
+
+        let chapterTitle: string | null = null;
+        if (toc.length > 0) {
+          chapterTitle = findTitleInToc(toc, href);
+        }
+        if (!chapterTitle) {
+          const h1 = doc.querySelector('h1');
+          const raw = (h1?.textContent || '').trim();
+          if (raw) chapterTitle = raw;
+        }
+
+        if (chapterTitle) {
+          const norm = normHead(chapterTitle);
+          if (norm && norm !== lastAddedHeaderText) {
+            lastAddedHeaderText = norm;
+            contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: norm, level: 1 });
           }
-          if (!chapterTitle) {
-            const h1 = doc.querySelector('h1');
-            const raw = (h1?.textContent || '').trim();
-            if (raw) chapterTitle = raw;
+        }
+
+        const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote'));
+        const elementsToProcess: Element[] = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
+
+        for (const el of elementsToProcess) {
+          const tag = el.tagName.toLowerCase();
+
+          if (/^h[1-6]$/.test(tag)) {
+            const headText = normHead(el.textContent || '');
+            if (!headText || headText === lastAddedHeaderText) continue;
+            lastAddedHeaderText = headText;
+            contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: headText, level: parseInt(tag[1]) });
+            continue;
           }
 
-          if (chapterTitle) {
-            const norm = normHead(chapterTitle);
-            if (norm && norm !== lastAddedHeaderText) {
-              lastAddedHeaderText = norm;
-              contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: norm, level: 1 });
-            }
+          const runs = extractRuns(el);
+          const rawText = runs.filter(r => !r.br).map(r => r.text).join('');
+          const cleanText = rawText.replace(/\s+/g, ' ').trim();
+          if (!cleanText) continue;
+
+          const paraId = `para-${globalLineIdCounter}`;
+          const paraSentences: any[] = [];
+          for (const sText of extractSentences(cleanText)) {
+            if (chapterTitle && sText.trim() === chapterTitle) continue;
+            const lineId = globalLineIdCounter++;
+            newSentences.push({ text: sText, lines: [lineId] });
+            paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
           }
-
-          const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote'));
-          const elementsToProcess: Element[] = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
-
-          for (const el of elementsToProcess) {
-            const tag = el.tagName.toLowerCase();
-
-            if (/^h[1-6]$/.test(tag)) {
-              const headText = normHead(el.textContent || '');
-              if (!headText || headText === lastAddedHeaderText) continue;
-              lastAddedHeaderText = headText;
-              contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: headText, level: parseInt(tag[1]) });
-              continue;
-            }
-
-            const runs = extractRuns(el);
-            const rawText = runs.filter(r => !r.br).map(r => r.text).join('');
-            const cleanText = rawText.replace(/\s+/g, ' ').trim();
-            if (!cleanText) continue;
-
-            const paraId = `para-${globalLineIdCounter}`;
-            const paraSentences: any[] = [];
-            for (const sText of extractSentences(cleanText)) {
-              if (chapterTitle && sText.trim() === chapterTitle) continue;
-              const lineId = globalLineIdCounter++;
-              newSentences.push({ text: sText, lines: [lineId] });
-              paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
-            }
-            if (paraSentences.length > 0) {
-              contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs });
-            }
+          if (paraSentences.length > 0) {
+            contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs });
           }
-        } catch (err) { console.error("Error loading chapter", err); }
+        }
       }
-      try { book.destroy(); } catch(e) {}
       setSentences(newSentences);
       setEpubContent(contentData);
     } catch (e) {

@@ -2,7 +2,11 @@ import React from 'react';
 
 export function findTitleInToc(toc: any[], href: string): string | null {
   for (const entry of toc) {
-    if (href.includes(entry.href)) return entry.label;
+    // Basic match: if either contains the other, it's likely a match for this chapter
+    const entryHref = entry.href || '';
+    if (entryHref && (href.includes(entryHref) || entryHref.includes(href))) {
+      return entry.label;
+    }
     if (entry.subitems) {
       const sub = findTitleInToc(entry.subitems, href);
       if (sub) return sub;

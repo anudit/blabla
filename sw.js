@@ -6,7 +6,7 @@ const APP_SHELL = [
   '/bundle.js',
   '/180.png',
   '/tts.worker.js',
-  '/pdf.worker.mjs',
+  '/pdf.worker.min.mjs',
   '/manifest.json'
 ];
 

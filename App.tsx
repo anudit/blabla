@@ -14,7 +14,7 @@ import LandingCard from './components/LandingCard';
 import ContentViewer from './components/ContentViewer';
 import BottomBar from './components/BottomBar';
 
-// pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
+// pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
 export default function App() {
   // ── State ──────────────────────────────────────────────────────────────
@@ -1029,7 +1029,7 @@ export default function App() {
       // 1. Dynamically import PDF.js
       const pdfjsLib = await import('pdfjs-dist');
      // 2. Set the worker source dynamically
-      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
       const doc = await pdfjsLib.getDocument(data).promise;
       setPdfDoc(doc);

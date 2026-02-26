@@ -51,10 +51,10 @@ await cp("./sitemap.xml", "./dist/sitemap.xml");
 await cp("./robots.txt", "./dist/robots.txt");
 
 // Critical: Copy the PDF worker from node_modules to dist
-// This ensures pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs' works
+// This ensures pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs' works
 await cp(
-  "./node_modules/pdfjs-dist/build/pdf.worker.mjs",
-  "./dist/pdf.worker.mjs"
+  "./node_modules/pdfjs-dist/build/pdf.worker.min.mjs",
+  "./dist/pdf.worker.min.mjs"
 );
 
 console.log("✅ Build Complete! Files are in /dist");

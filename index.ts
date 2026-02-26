@@ -40,7 +40,7 @@ const server = serve({
     },
 
     // 3. Serve Static Assets
-    "/pdf.worker.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.mjs"),
+    "/pdf.worker.min.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.min.mjs"),
     "/manifest.json": Bun.file("./manifest.json"),
     "/sw.js": Bun.file("./sw.js"),
     // "/logo.png": Bun.file("./logo.png"),

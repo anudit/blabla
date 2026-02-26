@@ -59,13 +59,14 @@ await cp(
 
 console.log("Injecting file list into Service Worker...");
 const meta = JSON.parse(await readFile("./dist/meta.json", "utf8"));
-const outputs = Object.keys(meta.outputs).map(path => '/' + path.substring(5)); // remove "dist/"
+const outputs = Object.keys(meta.outputs);
 
 const baseShell = [
     '/',
     '/index.html',
     '/180.png',
-    '/manifest.json'
+    '/manifest.json',
+    '/pdf.worker.min.mjs'
 ];
 
 const appShellFiles = [...new Set([...baseShell, ...outputs])];

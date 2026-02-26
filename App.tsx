@@ -65,6 +65,7 @@ export default function App() {
   const isWaitingForAudio = useRef(false);
   const eggTimerRef = useRef<any>(null);
   const pendingResumeRef = useRef<number>(-1);
+  const isResuming = useRef(false);
 
   // ── Derived ────────────────────────────────────────────────────────────
   const t = isDarkMode ? THEMES.dark : THEMES.light;
@@ -169,7 +170,12 @@ export default function App() {
     const vh = window.innerHeight || document.documentElement.clientHeight;
     const isVisible = rect.top >= 80 && rect.bottom <= vh - 120;
     if (!isVisible) {
-      setTimeout(() => target.scrollIntoView({ behavior: 'smooth', block: 'center' }), 50);
+      const isInitialResume = isResuming.current;
+      if (isInitialResume) isResuming.current = false;
+      setTimeout(() => target.scrollIntoView({ 
+        behavior: isInitialResume ? 'instant' : 'smooth', 
+        block: 'center' 
+      }), isInitialResume ? 150 : 50);
     }
   }, [currentSentenceIndex, sentences, fileType]);
 
@@ -237,6 +243,7 @@ export default function App() {
     if (sentences.length > 0 && pendingResumeRef.current > 0) {
       const idx = Math.min(pendingResumeRef.current, sentences.length - 1);
       pendingResumeRef.current = -1;
+      isResuming.current = true;
       setCurrentSentenceIndex(idx);
       setIsPlaying(true);
     }
@@ -323,9 +330,8 @@ export default function App() {
     }
     window.speechSynthesis.cancel();
     if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
-    if (audioContext.current) {
-      audioContext.current.close();
-      audioContext.current = null;
+    if (audioContext.current && audioContext.current.state === 'running') {
+      audioContext.current.suspend();
     }
     audioCache.current.clear();
     pendingFetches.current.clear();
@@ -1026,56 +1032,75 @@ export default function App() {
   const loadPDF = async (data: ArrayBuffer) => {
     setFileType('pdf');
     try {
-      // 1. Dynamically import PDF.js
       const pdfjsLib = await import('pdfjs-dist');
-     // 2. Set the worker source dynamically
       pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
       const doc = await pdfjsLib.getDocument(data).promise;
       setPdfDoc(doc);
-      const newPages = [];
-      let globalLineList: any[] = [];
-      const scale = Math.min(window.devicePixelRatio || 1, 2);
 
+      const pagePromises = [];
       for (let i = 1; i <= doc.numPages; i++) {
-        const page = await doc.getPage(i);
+        pagePromises.push(doc.getPage(i));
+      }
+      const pageResults = await Promise.all(pagePromises);
+      const newPages = pageResults.map((page, i) => {
+        const scale = Math.min(window.devicePixelRatio || 1, 2);
         const viewport = page.getViewport({ scale });
-        const textContent = await page.getTextContent();
-        const lines = processTextContent(textContent, viewport, scale, globalLineList.length, pdfjsLib);
-        globalLineList.push(...lines);
-        newPages.push({ viewport, lines, pageNumber: i });
-        page.cleanup();
-        if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
-      }
-
-      const fullText = globalLineList.map(l => l.text).join(' ');
-      const sentenceRegex = /[^.!?]+[.!?]/g;
-      let match;
-      const sentenceTexts = [];
-      while ((match = sentenceRegex.exec(fullText)) !== null) {
-        sentenceTexts.push({ text: match[0].trim(), start: match.index, end: match.index + match[0].length });
-      }
-
-      let cumPos = 0;
-      globalLineList.forEach(line => {
-        line.startPos = cumPos;
-        cumPos += line.text.length + 1;
+        return { viewport, lines:[], pageNumber: i + 1 };
       });
-
-      const newSentences = sentenceTexts.map(sent => {
-        const sentLines = globalLineList.filter(line =>
-          line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start
-        ).map(line => line.id);
-        return { text: sent.text, lines: sentLines };
-      }).filter(sent => sent.text && sent.lines.length > 0);
-
-      setSentences(newSentences);
-      setAllLines(globalLineList);
       setPages(newPages);
+
+      // Now, do the slow text extraction in the background
+      setTimeout(() => {
+        const extract = async () => {
+          let globalLineList: any[] = [];
+          const scale = Math.min(window.devicePixelRatio || 1, 2);
+
+          for (let i = 0; i < doc.numPages; i++) {
+            const page = pageResults[i];
+            const viewport = page.getViewport({ scale });
+            const textContent = await page.getTextContent();
+            const lines = processTextContent(textContent, viewport, scale, globalLineList.length, pdfjsLib);
+            globalLineList.push(...lines);
+            
+            // Update page with its lines for highlighting, but don't re-render the whole list
+            newPages[i].lines = lines;
+
+            page.cleanup();
+            if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
+          }
+          
+          const fullText = globalLineList.map(l => l.text).join(' ');
+          const sentenceRegex = /[^.!?]+[.!?]/g;
+          let match;
+          const sentenceTexts = [];
+          while ((match = sentenceRegex.exec(fullText)) !== null) {
+            sentenceTexts.push({ text: match[0].trim(), start: match.index, end: match.index + match[0].length });
+          }
+
+          let cumPos = 0;
+          globalLineList.forEach(line => {
+            line.startPos = cumPos;
+            cumPos += line.text.length + 1;
+          });
+
+          const newSentences = sentenceTexts.map(sent => {
+            const sentLines = globalLineList.filter(line =>
+              line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start
+            ).map(line => line.id);
+            return { text: sent.text, lines: sentLines };
+          }).filter(sent => sent.text && sent.lines.length > 0);
+
+          setSentences(newSentences);
+          setAllLines(globalLineList);
+        };
+        extract().catch(console.error);
+      }, 0);
+
     } catch (e) { console.error(e); }
   };
 
-  const processTextContent = async (textContent: any, viewport: any, scale: number, startIndex: number, pdfjsLib: any) => {
+  const processTextContent = (textContent: any, viewport: any, scale: number, startIndex: number, pdfjsLib: any) => {
     const items = textContent.items.map((item: any) => {
       const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
       const fontHeight = Math.sqrt((tx[2] * tx[2]) + (tx[3] * tx[3]));

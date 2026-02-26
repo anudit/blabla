@@ -1,14 +1,6 @@
 // sw.js
 const CACHE_VERSION = 'bla-bla-v3';
-const APP_SHELL = [
-  '/',
-  '/index.html',
-  '/bundle.js',
-  '/180.png',
-  '/tts.worker.js',
-  '/pdf.worker.min.mjs',
-  '/manifest.json'
-];
+const APP_SHELL = __APP_SHELL_PLACEHOLDER__;
 
 // Install: pre-cache app shell and activate immediately
 self.addEventListener('install', (e) => {

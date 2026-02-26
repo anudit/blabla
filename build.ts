@@ -1,6 +1,6 @@
 // build.ts
 import { build } from "bun";
-import { cp, rm } from "node:fs/promises";
+import { cp, rm, readFile, writeFile } from "node:fs/promises";
 
 console.log("🧹 Cleaning dist folder...");
 await rm("./dist", { recursive: true, force: true });
@@ -56,5 +56,27 @@ await cp(
   "./node_modules/pdfjs-dist/build/pdf.worker.min.mjs",
   "./dist/pdf.worker.min.mjs"
 );
+
+console.log("Injecting file list into Service Worker...");
+const meta = JSON.parse(await readFile("./dist/meta.json", "utf8"));
+const outputs = Object.keys(meta.outputs).map(path => '/' + path.substring(5)); // remove "dist/"
+
+const baseShell = [
+    '/',
+    '/index.html',
+    '/180.png',
+    '/manifest.json'
+];
+
+const appShellFiles = [...new Set([...baseShell, ...outputs])];
+
+const swPath = "./dist/sw.js";
+const swContent = await readFile(swPath, "utf8");
+const finalSw = swContent.replace(
+    '__APP_SHELL_PLACEHOLDER__',
+    JSON.stringify(appShellFiles, null, 2)
+);
+await writeFile(swPath, finalSw);
+
 
 console.log("✅ Build Complete! Files are in /dist");

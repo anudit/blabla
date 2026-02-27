@@ -4,7 +4,7 @@ import { unzipSync } from 'fflate';
 import { Target } from 'lucide-react';
 import { THEMES, TT } from './theme';
 import {
-  findTitleInToc, calculateWordTimings,
+  findTitleInToc, extractWords, calculateWordTimings,
   extractSentences, stripMd, isMarkdown, extractRuns,
 } from './utils';
 import { getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
@@ -66,8 +66,6 @@ export default function App() {
   const eggTimerRef = useRef<any>(null);
   const pendingResumeRef = useRef<number>(-1);
   const isResuming = useRef(false);
-  const activeWordElRef = useRef<HTMLElement | null>(null);
-  const activeSentenceElsRef = useRef<Element[]>([]);
 
   // ── Derived ────────────────────────────────────────────────────────────
   const t = isDarkMode ? THEMES.dark : THEMES.light;
@@ -148,8 +146,8 @@ export default function App() {
 
   // DOM-based highlight + smart scroll (bypasses React diffing entirely)
   useEffect(() => {
-    activeSentenceElsRef.current.forEach(el => el.classList.remove('epub-highlight-active', 'pdf-highlight-active'));
-    activeSentenceElsRef.current = [];
+    document.querySelectorAll('.epub-highlight-active').forEach(el => el.classList.remove('epub-highlight-active'));
+    document.querySelectorAll('.pdf-highlight-active').forEach(el => el.classList.remove('pdf-highlight-active'));
 
     const unit = sentences[currentSentenceIndex];
     if (currentSentenceIndex < 0 || !unit) return;
@@ -159,11 +157,9 @@ export default function App() {
       if (!el) return;
       if (fileType === 'pdf') {
         el.classList.add('pdf-highlight-active');
-        activeSentenceElsRef.current.push(el);
       } else {
         const target = (el.textContent === '' && el.closest('p')) ? el.closest('p')! : el;
         target.classList.add('epub-highlight-active');
-        activeSentenceElsRef.current.push(target);
       }
     });
 
@@ -325,8 +321,7 @@ export default function App() {
 
   const stopAllAudio = () => {
     if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
-    activeWordElRef.current?.classList.remove('word-highlight-active');
-    activeWordElRef.current = null;
+    document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
     playbackSessionId.current += 1;
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
@@ -443,8 +438,7 @@ export default function App() {
 
       source.onended = () => {
         if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
-        activeWordElRef.current?.classList.remove('word-highlight-active');
-        activeWordElRef.current = null;
+        document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
         currentSource.current = null;
         if (isPlaying && currentSession === playbackSessionId.current) {
           advanceSentence();
@@ -463,14 +457,9 @@ export default function App() {
         if (currentSource.current !== source) return;
         const elapsed = audioContext.current!.currentTime - audioStartRef.current;
         const active = wordTimingsRef.current.find(t => elapsed >= t.start && elapsed < t.end);
-        activeWordElRef.current?.classList.remove('word-highlight-active');
-        activeWordElRef.current = null;
+        document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
         if (active) {
-          const wordEl = document.getElementById(`word-${lineId}-${active.index}`);
-          if (wordEl) {
-            wordEl.classList.add('word-highlight-active');
-            activeWordElRef.current = wordEl;
-          }
+          document.getElementById(`word-${lineId}-${active.index}`)?.classList.add('word-highlight-active');
         }
         if (elapsed < buffer.duration) {
           wordRafRef.current = requestAnimationFrame(animateWords);
@@ -513,8 +502,7 @@ export default function App() {
 
   const handleLineClick = (lineId: number) => {
     if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
-    activeWordElRef.current?.classList.remove('word-highlight-active');
-    activeWordElRef.current = null;
+    document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
       currentSource.current.disconnect();
@@ -798,7 +786,7 @@ export default function App() {
         if (!clean.trim()) continue;
         const lineId = idCounter++;
         newSentences.push({ text: clean, lines: [lineId] });
-        paraSentences.push({ id: lineId, text: clean, ...(clean !== s ? { md: s } : {}) });
+        paraSentences.push({ id: lineId, text: clean, words: extractWords(clean), ...(clean !== s ? { md: s } : {}) });
       }
       if (paraSentences.length > 0) {
         contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
@@ -884,7 +872,7 @@ export default function App() {
       for (const sText of extractSentences(paraText)) {
         const lineId = globalLineIdCounter++;
         newSentences.push({ text: sText, lines: [lineId] });
-        paraSentences.push({ id: lineId, text: sText });
+        paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
       }
       if (paraSentences.length > 0) {
         contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
@@ -1026,7 +1014,7 @@ export default function App() {
             if (chapterTitle && sText.trim() === chapterTitle) continue;
             const lineId = globalLineIdCounter++;
             newSentences.push({ text: sText, lines: [lineId] });
-            paraSentences.push({ id: lineId, text: sText });
+            paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
           }
           if (paraSentences.length > 0) {
             contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs });

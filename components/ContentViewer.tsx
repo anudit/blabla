@@ -29,6 +29,15 @@ const H_SIZE: Record<number, string> = {
   4: '1rem', 5: '0.95rem', 6: '0.9rem',
 };
 
+const EPUB_SENTENCE_STYLE: React.CSSProperties = {
+  cursor: 'pointer',
+  padding: '2px 0',
+  transition: `background-color 0.2s, ${TT}`,
+  borderRadius: '4px',
+};
+
+const WORD_SPAN_STYLE: React.CSSProperties = { transition: 'background-color 0.08s ease' };
+
 export default function ContentViewer({
   fileType, pages, pdfDoc, epubContent, outline, activeHeaderId,
   t, isDarkMode, fontSize, onLineClick,
@@ -40,13 +49,6 @@ export default function ContentViewer({
     backgroundColor: '#fff',
     width: '100%',
     height: 'auto',
-  };
-
-  const epubSentenceStyle: React.CSSProperties = {
-    cursor: 'pointer',
-    padding: '2px 0',
-    transition: `background-color 0.2s, ${TT}`,
-    borderRadius: '4px',
   };
 
   const lc = isDarkMode ? '#60a5fa' : '#2563eb';
@@ -85,7 +87,7 @@ export default function ContentViewer({
             color: t.text,
             transition: TT,
           }}>
-            {renderContent({ epubContent, t, isDarkMode, lc, epubSentenceStyle, onLineClick })}
+            {renderContent({ epubContent, t, isDarkMode, lc, onLineClick })}
           </div>
         </>
       )}
@@ -98,11 +100,10 @@ interface RenderContentProps {
   t: ThemeTokens;
   isDarkMode: boolean;
   lc: string;
-  epubSentenceStyle: React.CSSProperties;
   onLineClick: (lineId: number) => void;
 }
 
-function renderContent({ epubContent, t, isDarkMode, lc, epubSentenceStyle, onLineClick }: RenderContentProps) {
+function renderContent({ epubContent, t, isDarkMode, lc, onLineClick }: RenderContentProps) {
   let headersSeen = 0;
 
   return epubContent.map((item) => {
@@ -182,23 +183,23 @@ function renderContent({ epubContent, t, isDarkMode, lc, epubSentenceStyle, onLi
               position: 'relative',
             }}>
               {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' }}>•</span>}
-              {item.sentences.map((sentence: any) => (
-                <span
-                  key={sentence.id}
-                  id={`line-${sentence.id}`}
-                  onClick={() => onLineClick(sentence.id)}
-                  style={epubSentenceStyle}
-                >
-                  {sentence.words
-                    ? sentence.words.map((word: string, wi: number) => (
-                        <span key={wi} id={`word-${sentence.id}-${wi}`} style={{ transition: 'background-color 0.08s ease' }}>
-                          {word}{wi < sentence.words.length - 1 ? ' ' : ''}
-                        </span>
-                      ))
-                    : sentence.text
-                  }{' '}
-                </span>
-              ))}
+              {item.sentences.map((sentence: any) => {
+                const words = sentence.text.trim().split(/\s+/);
+                return (
+                  <span
+                    key={sentence.id}
+                    id={`line-${sentence.id}`}
+                    onClick={() => onLineClick(sentence.id)}
+                    style={EPUB_SENTENCE_STYLE}
+                  >
+                    {words.map((word: string, wi: number) => (
+                      <span key={wi} id={`word-${sentence.id}-${wi}`} style={WORD_SPAN_STYLE}>
+                        {word}{wi < words.length - 1 ? ' ' : ''}
+                      </span>
+                    ))}{' '}
+                  </span>
+                );
+              })}
             </p>
           </LazyBlock>
         );
@@ -208,23 +209,23 @@ function renderContent({ epubContent, t, isDarkMode, lc, epubSentenceStyle, onLi
       return (
         <LazyBlock key={item.id}>
           <p style={{ margin: '0 0 1.1em', padding: 0, lineHeight: 'inherit' }}>
-            {item.sentences.map((sentence: any) => (
-              <span
-                key={sentence.id}
-                id={`line-${sentence.id}`}
-                onClick={() => onLineClick(sentence.id)}
-                style={epubSentenceStyle}
-              >
-                {sentence.words
-                  ? sentence.words.map((word: string, wi: number) => (
-                      <span key={wi} id={`word-${sentence.id}-${wi}`} style={{ transition: 'background-color 0.08s ease' }}>
-                        {word}{wi < sentence.words.length - 1 ? ' ' : ''}
-                      </span>
-                    ))
-                  : (sentence.md ? renderMd(sentence.md, lc) : sentence.text)
-                }{' '}
-              </span>
-            ))}
+            {item.sentences.map((sentence: any) => {
+              const words = sentence.text.trim().split(/\s+/);
+              return (
+                <span
+                  key={sentence.id}
+                  id={`line-${sentence.id}`}
+                  onClick={() => onLineClick(sentence.id)}
+                  style={EPUB_SENTENCE_STYLE}
+                >
+                  {words.map((word: string, wi: number) => (
+                    <span key={wi} id={`word-${sentence.id}-${wi}`} style={WORD_SPAN_STYLE}>
+                      {word}{wi < words.length - 1 ? ' ' : ''}
+                    </span>
+                  ))}{' '}
+                </span>
+              );
+            })}
           </p>
         </LazyBlock>
       );

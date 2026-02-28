@@ -725,6 +725,7 @@ export default function App() {
 
   // ── Loaders ────────────────────────────────────────────────────────────
   const loadMarkdown = (raw: string) => {
+    const _t0 = performance.now();
     const newSentences: any[] = [];
     const contentData: any[] = [];
     let idCounter = 0;
@@ -853,10 +854,13 @@ export default function App() {
     setEpubContent(contentData);
     setShowTextInput(false);
     setTextInputValue('');
+    const _totalWords = newSentences.reduce((n: number, s: any) => n + (s.text.trim().split(/\s+/).length), 0);
+    console.log(`[blabla] markdown | ${(performance.now() - _t0).toFixed(1)}ms | sentences: ${newSentences.length} | words: ${_totalWords} | blocks: ${contentData.length} | chars: ${raw.length}`);
   };
 
   const loadText = (text: string) => {
     if (isMarkdown(text)) { loadMarkdown(text); return; }
+    const _t0 = performance.now();
     const newSentences: any[] = [];
     const contentData: any[] = [];
     let globalLineIdCounter = 0;
@@ -885,12 +889,17 @@ export default function App() {
     setEpubContent(contentData);
     setShowTextInput(false);
     setTextInputValue('');
+    const _totalWords = newSentences.reduce((n: number, s: any) => n + (s.text.trim().split(/\s+/).length), 0);
+    console.log(`[blabla] text | ${(performance.now() - _t0).toFixed(1)}ms | sentences: ${newSentences.length} | words: ${_totalWords} | paragraphs: ${contentData.length} | chars: ${text.length}`);
   };
 
   const loadEPUB = async (data: ArrayBuffer) => {
+    const _t0 = performance.now();
     try {
       setFileType('epub');
       const files = unzipSync(new Uint8Array(data));
+      const _tUnzip = performance.now();
+
       const decoder = new TextDecoder();
       const parser = new DOMParser();
 
@@ -914,6 +923,7 @@ export default function App() {
 
       // 3. Parse Spine (reading order)
       const spineIds = Array.from(opfDoc.querySelectorAll('spine > itemref')).map(el => el.getAttribute('idref')!);
+      const _tMeta = performance.now();
 
       // 4. Try to parse TOC for chapter titles
       let toc: { href: string; label: string }[] = [];
@@ -943,6 +953,7 @@ export default function App() {
           }
         }
       }
+      const _tToc = performance.now();
 
       const newSentences: any[] = [];
       const contentData: any[] = [];
@@ -960,6 +971,11 @@ export default function App() {
         return result.join('/');
       };
 
+      // Inline sentence split: skips markdown-protection overhead (EPUB is HTML, not markdown)
+      const sentRe = /[^.!?]+[.!?]+/g;
+
+      let _tParseHtml = 0, _tExtract = 0, _tYield = 0;
+      let _lastYield = performance.now();
       for (const id of spineIds) {
         const href = manifest[id];
         if (!href) continue;
@@ -969,7 +985,9 @@ export default function App() {
         if (!fileBytes) continue;
 
         const htmlString = decoder.decode(fileBytes);
+        const _tp = performance.now();
         const doc = parser.parseFromString(htmlString, 'application/xhtml+xml');
+        _tParseHtml += performance.now() - _tp;
 
         let chapterTitle: string | null = null;
         if (toc.length > 0) {
@@ -992,6 +1010,7 @@ export default function App() {
         const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote'));
         const elementsToProcess: Element[] = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
 
+        const _te = performance.now();
         for (const el of elementsToProcess) {
           const tag = el.tagName.toLowerCase();
 
@@ -1010,19 +1029,62 @@ export default function App() {
 
           const paraId = `para-${globalLineIdCounter}`;
           const paraSentences: any[] = [];
-          for (const sText of extractSentences(cleanText)) {
-            if (chapterTitle && sText.trim() === chapterTitle) continue;
-            const lineId = globalLineIdCounter++;
-            newSentences.push({ text: sText, lines: [lineId] });
-            paraSentences.push({ id: lineId, text: sText, words: extractWords(sText) });
+
+          // Inline split: no markdown protection needed for HTML-derived EPUB text.
+          // `words` intentionally omitted — ContentViewer splits inline at render time
+          // so only visible paragraphs pay the cost (LazyBlock).
+          let sm: RegExpExecArray | null;
+          let lastIdx = 0;
+          sentRe.lastIndex = 0;
+          while ((sm = sentRe.exec(cleanText)) !== null) {
+            const sText = sm[0].trim();
+            if (sText && !(chapterTitle && sText === chapterTitle)) {
+              const lineId = globalLineIdCounter++;
+              newSentences.push({ text: sText, lines: [lineId] });
+              paraSentences.push({ id: lineId, text: sText });
+            }
+            lastIdx = sm.index + sm[0].length;
           }
+          const sRem = cleanText.slice(lastIdx).trim();
+          if (sRem && !(chapterTitle && sRem === chapterTitle)) {
+            const lineId = globalLineIdCounter++;
+            newSentences.push({ text: sRem, lines: [lineId] });
+            paraSentences.push({ id: lineId, text: sRem });
+          }
+
           if (paraSentences.length > 0) {
             contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs });
           }
         }
+        _tExtract += performance.now() - _te;
+
+        // Yield to the browser every ~50ms of processing so content renders progressively
+        // and we avoid blocking the main thread (no Violation warnings).
+        if (performance.now() - _lastYield > 50) {
+          setSentences(newSentences.slice());
+          setEpubContent(contentData.slice());
+          const _ty = performance.now();
+          await new Promise<void>(r => setTimeout(r, 0));
+          _tYield += performance.now() - _ty;
+          _lastYield = performance.now();
+        }
       }
+      const _tSpine = performance.now();
+
       setSentences(newSentences);
       setEpubContent(contentData);
+      const _tDone = performance.now();
+
+      const _totalWords = newSentences.reduce((n: number, s: any) => n + (s.text.trim().split(/\s+/).length), 0);
+      const _fmt = (ms: number) => ms.toFixed(1) + 'ms';
+      console.log(
+        `[blabla] epub | total: ${_fmt(_tDone - _t0)}  (js: ${_fmt(_tDone - _t0 - _tYield)}, yield: ${_fmt(_tYield)})\n` +
+        `  unzip:         ${_fmt(_tUnzip - _t0)}\n` +
+        `  container+OPF: ${_fmt(_tMeta - _tUnzip)}\n` +
+        `  toc:           ${_fmt(_tToc - _tMeta)}\n` +
+        `  spine loop:    ${_fmt(_tSpine - _tToc - _tYield)}  (html parse: ${_fmt(_tParseHtml)}, text extract: ${_fmt(_tExtract)})\n` +
+        `  sentences: ${newSentences.length} | words: ${_totalWords} | blocks: ${contentData.length} | spine items: ${spineIds.length}`
+      );
     } catch (e) {
       console.error("Failed to load EPUB", e);
       alert("Could not load EPUB file");
@@ -1053,6 +1115,7 @@ export default function App() {
       // Now, do the slow text extraction in the background
       setTimeout(() => {
         const extract = async () => {
+          const _t0 = performance.now();
           let globalLineList: any[] = [];
           const scale = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -1093,6 +1156,8 @@ export default function App() {
 
           setSentences(newSentences);
           setAllLines(globalLineList);
+          const _totalWords = newSentences.reduce((n: number, s: any) => n + (s.text.trim().split(/\s+/).length), 0);
+          console.log(`[blabla] pdf | ${(performance.now() - _t0).toFixed(1)}ms | sentences: ${newSentences.length} | words: ${_totalWords} | lines: ${globalLineList.length} | pages: ${doc.numPages}`);
         };
         extract().catch(console.error);
       }, 0);

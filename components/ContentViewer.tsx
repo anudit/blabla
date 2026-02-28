@@ -182,23 +182,24 @@ function renderContent({ epubContent, t, isDarkMode, lc, epubSentenceStyle, onLi
               position: 'relative',
             }}>
               {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' }}>•</span>}
-              {item.sentences.map((sentence: any) => (
-                <span
-                  key={sentence.id}
-                  id={`line-${sentence.id}`}
-                  onClick={() => onLineClick(sentence.id)}
-                  style={epubSentenceStyle}
-                >
-                  {sentence.words
-                    ? sentence.words.map((word: string, wi: number) => (
-                        <span key={wi} id={`word-${sentence.id}-${wi}`} style={{ transition: 'background-color 0.08s ease' }}>
-                          {word}{wi < sentence.words.length - 1 ? ' ' : ''}
-                        </span>
-                      ))
-                    : sentence.text
-                  }{' '}
-                </span>
-              ))}
+              {item.sentences.map((sentence: any) => {
+                // Words computed here so only visible paragraphs (inside LazyBlock) pay the cost
+                const words: string[] = sentence.words ?? sentence.text.trim().split(/\s+/);
+                return (
+                  <span
+                    key={sentence.id}
+                    id={`line-${sentence.id}`}
+                    onClick={() => onLineClick(sentence.id)}
+                    style={epubSentenceStyle}
+                  >
+                    {words.map((word: string, wi: number) => (
+                      <span key={wi} id={`word-${sentence.id}-${wi}`} style={{ transition: 'background-color 0.08s ease' }}>
+                        {word}{wi < words.length - 1 ? ' ' : ''}
+                      </span>
+                    ))}{' '}
+                  </span>
+                );
+              })}
             </p>
           </LazyBlock>
         );

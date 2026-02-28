@@ -486,23 +486,23 @@ export default function App() {
   };
 
   // ── Handlers ───────────────────────────────────────────────────────────
-  const triggerEasterEgg = () => {
+  const triggerEasterEgg = React.useCallback(() => {
     if (eggPhase !== null) return;
     setEggPhase('in');
     eggTimerRef.current = setTimeout(() => {
       setEggPhase('out');
       setTimeout(() => setEggPhase(null), 600);
     }, 2400);
-  };
+  }, [eggPhase]);
 
-  const triggerFallback = () => {
+  const triggerFallback = React.useCallback(() => {
     if (usingFallback.current) return;
     usingFallback.current = true;
     setTtsStatus("System Voice");
     setIsModelReady(true);
-  };
+  }, []);
 
-  const handleLineClick = (lineId: number) => {
+  const handleLineClick = React.useCallback((lineId: number) => {
     if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
     document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
     if (currentSource.current) {
@@ -530,9 +530,9 @@ export default function App() {
       const el = document.getElementById(`line-${lineId}`);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  };
+  }, [sentences]);
 
-  const togglePlay = () => {
+  const togglePlay = React.useCallback(() => {
     if (!isModelReady) return;
     if (currentSentenceIndex === -1 && sentences.length > 0) {
       setCurrentSentenceIndex(0);
@@ -546,9 +546,9 @@ export default function App() {
       setIsPlaying(true);
       setPlaybackState("Starting");
     }
-  };
+  }, [isModelReady, currentSentenceIndex, sentences.length, isPlaying]);
 
-  const handleTestAudio = () => {
+  const handleTestAudio = React.useCallback(() => {
     if (!isModelReady) return;
     stopAllAudio();
     const text = "Hello! I am ready to read.";
@@ -561,9 +561,9 @@ export default function App() {
       setPlaybackState("Generating");
       workerRef.current?.postMessage({ type: 'generate', text, voice: selectedVoice, speed: playbackSpeed });
     }
-  };
+  }, [isModelReady, playbackSpeed, selectedVoice]);
 
-  const resetReader = () => {
+  const resetReader = React.useCallback(() => {
     setIsPlaying(false);
     stopAllAudio();
     if (pdfDoc) { try { pdfDoc.destroy(); } catch(e) {} }
@@ -584,20 +584,20 @@ export default function App() {
     setCurrentFileId(null);
     setCurrentFileName(null);
     pendingResumeRef.current = -1;
-  };
+  }, [pdfDoc]);
 
-  const handleDeleteBookmark = (id: string) => {
+  const handleDeleteBookmark = React.useCallback((id: string) => {
     removeBookmark(id);
     setBookmarks(getBookmarks());
-  };
+  }, []);
 
-  const handleSelectBookmark = (entry: BookmarkEntry) => {
+  const handleSelectBookmark = React.useCallback((entry: BookmarkEntry) => {
     if (entry.fileType === 'url' && entry.url) {
       handleUrlLoad(entry.url);
     }
-  };
+  }, []);
 
-  const handleVoiceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+  const handleVoiceChange = React.useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     const newVoice = e.target.value;
     setSelectedVoice(newVoice);
     drainResolvers();
@@ -612,9 +612,9 @@ export default function App() {
     playbackSessionId.current += 1;
     isWaitingForAudio.current = false;
     if (isPlaying) setRestartTrigger(p => p + 1);
-  };
+  }, [isPlaying]);
 
-  const handleSpeedChange = (speed: number) => {
+  const handleSpeedChange = React.useCallback((speed: number) => {
     setPlaybackSpeed(speed);
     drainResolvers();
     audioCache.current.clear();
@@ -628,19 +628,19 @@ export default function App() {
     playbackSessionId.current += 1;
     isWaitingForAudio.current = false;
     if (isPlaying) setRestartTrigger(p => p + 1);
-  };
+  }, [isPlaying]);
 
-  const handleToggleTheme = () => {
+  const handleToggleTheme = React.useCallback(() => {
     const next = !isDarkMode;
     setIsDarkMode(next);
     localStorage.setItem('theme', next ? 'dark' : 'light');
-  };
+  }, [isDarkMode]);
 
-  const handleFontSizeChange = (delta: number) => {
+  const handleFontSizeChange = React.useCallback((delta: number) => {
     const next = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + delta)).toFixed(2));
     setFontSize(next);
     localStorage.setItem('fontSize', String(next));
-  };
+  }, [fontSize]);
 
   const handleFileDrop = async (e: React.DragEvent<HTMLDivElement> | React.ChangeEvent<HTMLInputElement>) => {
     if ('preventDefault' in e) e.preventDefault();
@@ -707,7 +707,7 @@ export default function App() {
     }
   };
 
-  const handleClipboardPaste = async (e: React.MouseEvent<HTMLButtonElement>) => {
+  const handleClipboardPaste = React.useCallback(async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     try {
       const text = await navigator.clipboard.readText();
@@ -722,7 +722,7 @@ export default function App() {
     } catch {
       setShowTextInput(true);
     }
-  };
+  }, []);
 
   // ── Loaders ────────────────────────────────────────────────────────────
   const loadMarkdown = (raw: string) => {
@@ -756,6 +756,7 @@ export default function App() {
     let fenceLines: string[] = [];
     let paraLines: string[] = [];
     let tableLines: string[] = [];
+    let currentHeaderId: string | null = null;
 
     const parseTableRow = (line: string): string[] => {
       const cells = line.split('|').map(c => c.trim());
@@ -771,7 +772,7 @@ export default function App() {
       if (dataRows.length) {
         const headers = dataRows[0];
         const rows = dataRows.slice(1);
-        contentData.push({ type: 'table', id: `table-${idCounter++}`, headers, rows });
+        contentData.push({ type: 'table', id: `table-${idCounter++}`, headers, rows, headerId: currentHeaderId });
       }
       tableLines = [];
     };
@@ -787,18 +788,18 @@ export default function App() {
         const clean = stripMd(s);
         if (!clean.trim()) continue;
         const lineId = idCounter++;
-        newSentences.push({ text: clean, lines: [lineId] });
+        newSentences.push({ text: clean, lines: [lineId], headerId: currentHeaderId });
         paraSentences.push({ id: lineId, text: clean, words: extractWords(clean), ...(clean !== s ? { md: s } : {}) });
       }
       if (paraSentences.length > 0) {
-        contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences });
+        contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, headerId: currentHeaderId });
       }
     };
 
     for (const line of content.split('\n')) {
       if (/^(`{3,}|~{3,})/.test(line)) {
         if (!inFence) { flushPara(); inFence = true; fenceLines = []; }
-        else { inFence = false; contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n') }); }
+        else { inFence = false; contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n'), headerId: currentHeaderId }); }
         continue;
       }
       if (inFence) { fenceLines.push(line); continue; }
@@ -806,7 +807,8 @@ export default function App() {
       const hm = line.match(/^(#{1,6})\s+(.+)$/);
       if (hm) {
         flushPara();
-        contentData.push({ type: 'header', id: `header-${idCounter++}`, text: stripMd(hm[2].replace(/\s+#+\s*$/, '').trim()), level: hm[1].length });
+        currentHeaderId = `header-${idCounter++}`;
+        contentData.push({ type: 'header', id: currentHeaderId, text: stripMd(hm[2].replace(/\s+#+\s*$/, '').trim()), level: hm[1].length });
         continue;
       }
 
@@ -828,7 +830,7 @@ export default function App() {
       const imgM = line.match(/^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/);
       if (imgM) {
         flushPara();
-        contentData.push({ type: 'image', id: `img-${idCounter++}`, src: imgM[2], alt: imgM[1] });
+        contentData.push({ type: 'image', id: `img-${idCounter++}`, src: imgM[2], alt: imgM[1], headerId: currentHeaderId });
         continue;
       }
 
@@ -977,6 +979,8 @@ export default function App() {
 
       let _tParseHtml = 0, _tExtract = 0, _tYield = 0;
       let _lastYield = performance.now();
+      let currentHeaderId: string | null = null;
+
       for (const id of spineIds) {
         const href = manifest[id];
         if (!href) continue;
@@ -1004,7 +1008,8 @@ export default function App() {
           const norm = normHead(chapterTitle);
           if (norm && norm !== lastAddedHeaderText) {
             lastAddedHeaderText = norm;
-            contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: norm, level: 1 });
+            currentHeaderId = `header-${globalLineIdCounter++}`;
+            contentData.push({ type: 'header', id: currentHeaderId, text: norm, level: 1 });
           }
         }
 
@@ -1019,7 +1024,8 @@ export default function App() {
             const headText = normHead(el.textContent || '');
             if (!headText || headText === lastAddedHeaderText) continue;
             lastAddedHeaderText = headText;
-            contentData.push({ type: 'header', id: `header-${globalLineIdCounter++}`, text: headText, level: parseInt(tag[1]) });
+            currentHeaderId = `header-${globalLineIdCounter++}`;
+            contentData.push({ type: 'header', id: currentHeaderId, text: headText, level: parseInt(tag[1]) });
             continue;
           }
 
@@ -1031,9 +1037,6 @@ export default function App() {
           const paraId = `para-${globalLineIdCounter}`;
           const paraSentences: any[] = [];
 
-          // Inline split: no markdown protection needed for HTML-derived EPUB text.
-          // `words` intentionally omitted — ContentViewer splits inline at render time
-          // so only visible paragraphs pay the cost (LazyBlock).
           let sm: RegExpExecArray | null;
           let lastIdx = 0;
           sentRe.lastIndex = 0;
@@ -1041,7 +1044,7 @@ export default function App() {
             const sText = sm[0].trim();
             if (sText && !(chapterTitle && sText === chapterTitle)) {
               const lineId = globalLineIdCounter++;
-              newSentences.push({ text: sText, lines: [lineId] });
+              newSentences.push({ text: sText, lines: [lineId], headerId: currentHeaderId });
               paraSentences.push({ id: lineId, text: sText });
             }
             lastIdx = sm.index + sm[0].length;
@@ -1049,12 +1052,12 @@ export default function App() {
           const sRem = cleanText.slice(lastIdx).trim();
           if (sRem && !(chapterTitle && sRem === chapterTitle)) {
             const lineId = globalLineIdCounter++;
-            newSentences.push({ text: sRem, lines: [lineId] });
+            newSentences.push({ text: sRem, lines: [lineId], headerId: currentHeaderId });
             paraSentences.push({ id: lineId, text: sRem });
           }
 
           if (paraSentences.length > 0) {
-            contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs });
+            contentData.push({ type: 'paragraph', id: paraId, sentences: paraSentences, elementType: tag, runs, headerId: currentHeaderId });
           }
         }
         _tExtract += performance.now() - _te;
@@ -1225,18 +1228,8 @@ export default function App() {
 
   const activeHeaderId = useMemo(() => {
     if (currentSentenceIndex < 0 || !sentences[currentSentenceIndex]) return null;
-    const currentLines = new Set<number>(sentences[currentSentenceIndex].lines);
-    let lastId: string | null = null;
-    for (const item of epubContent) {
-      if (item.type === 'header') { lastId = item.id; }
-      else if (item.type === 'paragraph') {
-        for (const s of item.sentences) {
-          if (currentLines.has(s.id)) return lastId;
-        }
-      }
-    }
-    return null;
-  }, [currentSentenceIndex, epubContent, sentences]);
+    return sentences[currentSentenceIndex].headerId || null;
+  }, [currentSentenceIndex, sentences]);
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (

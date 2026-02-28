@@ -166,9 +166,9 @@ export default function BottomBar({
       {/* ── Speed picker ──────────────────────────────────────────── */}
       {isSpeedMenuOpen && (
         <div style={{ ...popoverBase, left: '2rem', width: '90px' }}>
-          {[1.0, 1.25, 1.5, 2.0].map((speed, idx) => {
+          {[1.0, 1.25, 1.5, 1.75, 2.0].map((speed, idx, arr) => {
             const active = playbackSpeed === speed;
-            const isLast = idx === 3;
+            const isLast = idx === arr.length - 1;
             return (
               <div key={speed}>
                 <button

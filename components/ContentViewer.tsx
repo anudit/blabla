@@ -29,7 +29,7 @@ const H_SIZE: Record<number, string> = {
   4: '1rem', 5: '0.95rem', 6: '0.9rem',
 };
 
-export default function ContentViewer({
+export default React.memo(function ContentViewer({
   fileType, pages, pdfDoc, epubContent, outline, activeHeaderId,
   t, isDarkMode, fontSize, onLineClick,
 }: ContentViewerProps) {
@@ -91,7 +91,7 @@ export default function ContentViewer({
       )}
     </div>
   );
-}
+});
 
 interface RenderContentProps {
   epubContent: any[];

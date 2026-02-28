@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Play, Pause, Loader2, Menu, Sun, Moon, Beaker } from 'lucide-react';
 import type { ThemeTokens } from '../theme';
 import { TT, staticStyles, VOICES } from '../theme';
@@ -16,9 +16,6 @@ interface BottomBarProps {
   hasSentences: boolean;
   onTogglePlay: () => void;
   onSpeedChange: (speed: number) => void;
-  // Settings menu (open state lives in App to allow resetReader to close it)
-  isMenuOpen: boolean;
-  onToggleMenu: () => void;
   // TTS status
   ttsStatus: string;
   usingFallback: boolean;
@@ -42,7 +39,6 @@ export default function BottomBar({
   t, isDarkMode, onToggleTheme,
   isPlaying, isModelReady, playbackState, playbackSpeed, hasSentences,
   onTogglePlay, onSpeedChange,
-  isMenuOpen, onToggleMenu,
   ttsStatus, usingFallback,
   selectedVoice, onVoiceChange,
   currentSentenceIndex, sentencesLength,
@@ -50,6 +46,22 @@ export default function BottomBar({
   onTestAudio, onReset, onLogoClick,
 }: BottomBarProps) {
   const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [memGb, setMemGb] = useState<number | null>(null);
+  const [cpuPct, setCpuPct] = useState<number | null>(null);
+
+  useEffect(() => {
+    let lastTick = performance.now();
+    const id = setInterval(() => {
+      const mem = (performance as any).memory;
+      if (mem) setMemGb(+(mem.usedJSHeapSize / 1e9).toFixed(2));
+      const now = performance.now();
+      const drift = Math.max(0, now - lastTick - 1000);
+      setCpuPct(Math.min(100, Math.round(drift / 10)));
+      lastTick = now;
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const iconButtonStyle: React.CSSProperties = {
     padding: '0.5rem',
@@ -116,7 +128,7 @@ export default function BottomBar({
       </button>
 
       {/* Speed button */}
-      <button onClick={() => setIsSpeedMenuOpen(v => !v)} style={speedButtonStyle}>
+      <button onClick={() => { setIsMenuOpen(false); setIsSpeedMenuOpen(v => !v); }} style={speedButtonStyle}>
         {playbackSpeed}x
       </button>
 
@@ -138,7 +150,7 @@ export default function BottomBar({
       </button>
 
       {/* Settings menu button */}
-      <button onClick={onToggleMenu} style={iconButtonStyle}>
+      <button onClick={() => { setIsSpeedMenuOpen(false); setIsMenuOpen(v => !v); }} style={iconButtonStyle}>
         <Menu size={24} />
       </button>
 
@@ -202,6 +214,8 @@ export default function BottomBar({
           onTestAudio={onTestAudio}
           onReset={onReset}
           popoverBase={popoverBase}
+          cpuPct={cpuPct}
+          memGb={memGb}
         />
       )}
     </div>
@@ -224,6 +238,8 @@ interface SettingsMenuProps {
   onTestAudio: () => void;
   onReset: () => void;
   popoverBase: React.CSSProperties;
+  cpuPct: number | null;
+  memGb: number | null;
 }
 
 function SettingsMenu({
@@ -231,6 +247,7 @@ function SettingsMenu({
   selectedVoice, onVoiceChange, playbackState,
   currentSentenceIndex, sentencesLength,
   fontSize, onFontSizeChange, onTestAudio, onReset, popoverBase,
+  cpuPct, memGb,
 }: SettingsMenuProps) {
   const row: React.CSSProperties = { padding: '0.55rem 1rem', display: 'flex', alignItems: 'center' };
   const divider = <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />;
@@ -276,11 +293,21 @@ function SettingsMenu({
         <span style={val}>{playbackState}</span>
       </div>
       {/* Progress */}
-      <div style={{ ...row, justifyContent: 'space-between', paddingTop: '0.3rem', paddingBottom: '0.55rem' }}>
+      <div style={{ ...row, justifyContent: 'space-between', paddingTop: '0.3rem' }}>
         <span style={lbl}>Progress</span>
         <span style={val}>
           {currentSentenceIndex >= 0 ? `${Math.round((currentSentenceIndex / sentencesLength) * 100)}%` : '0%'}
         </span>
+      </div>
+      {/* CPU */}
+      <div style={{ ...row, justifyContent: 'space-between' }}>
+        <span style={lbl}>CPU</span>
+        <span style={val}>{cpuPct !== null ? `${cpuPct}%` : '—'}</span>
+      </div>
+      {/* Memory */}
+      <div style={{ ...row, justifyContent: 'space-between', paddingBottom: '0.55rem' }}>
+        <span style={lbl}>Memory</span>
+        <span style={val}>{memGb !== null ? `${memGb} GB` : '—'}</span>
       </div>
 
       {divider}
@@ -327,7 +354,7 @@ function SettingsMenu({
           <Beaker size={13} /> Test Voice
         </button>
         <button
-          onClick={onReset}
+          onClick={() => { setIsMenuOpen(false); onReset(); }}
           style={{
             padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500,
             backgroundColor: 'transparent', color: '#ef4444',

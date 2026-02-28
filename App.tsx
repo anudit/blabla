@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 // import * as pdfjsLib from 'pdfjs-dist';
 import { unzipSync } from 'fflate';
-import { Target } from 'lucide-react';
+import { Target, Loader2 } from 'lucide-react';
 import { THEMES, TT } from './theme';
 import {
   findTitleInToc, extractWords, calculateWordTimings,
@@ -43,11 +43,11 @@ export default function App() {
     const s = parseFloat(localStorage.getItem('fontSize') || '');
     return isNaN(s) ? 1.05 : s;
   });
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [eggPhase, setEggPhase] = useState<'in' | 'out' | null>(null);
   const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>(() => getBookmarks());
   const [currentFileId, setCurrentFileId] = useState<string | null>(null);
   const [currentFileName, setCurrentFileName] = useState<string | null>(null);
+  const [isDocLoading, setIsDocLoading] = useState(false);
 
   // ── Refs ───────────────────────────────────────────────────────────────
   const workerRef = useRef<Worker | null>(null);
@@ -81,6 +81,8 @@ export default function App() {
       if (status === 'ready') {
         setTtsStatus(`Ready (${device}/${dtype})`);
         setIsModelReady(true);
+        // Warm up model silently — first inference is slow; discarded via missing resolver
+        workerRef.current?.postMessage({ type: 'generate', text: 'Warm up.', lineIndex: -1, voice: 'af_bella', speed: 1.0 });
       }
       else if (status === 'complete') {
         try {
@@ -577,7 +579,6 @@ export default function App() {
     drainResolvers();
     setPlaybackState("Idle");
     isWaitingForAudio.current = false;
-    setIsMenuOpen(false);
     setShowTextInput(false);
     setTextInputValue('');
     setCurrentFileId(null);
@@ -895,8 +896,8 @@ export default function App() {
 
   const loadEPUB = async (data: ArrayBuffer) => {
     const _t0 = performance.now();
+    setIsDocLoading(true);
     try {
-      setFileType('epub');
       const files = unzipSync(new Uint8Array(data));
       const _tUnzip = performance.now();
 
@@ -1058,11 +1059,8 @@ export default function App() {
         }
         _tExtract += performance.now() - _te;
 
-        // Yield to the browser every ~50ms of processing so content renders progressively
-        // and we avoid blocking the main thread (no Violation warnings).
+        // Yield to the event loop every ~50ms to stay responsive during parsing.
         if (performance.now() - _lastYield > 50) {
-          setSentences(newSentences.slice());
-          setEpubContent(contentData.slice());
           const _ty = performance.now();
           await new Promise<void>(r => setTimeout(r, 0));
           _tYield += performance.now() - _ty;
@@ -1071,6 +1069,8 @@ export default function App() {
       }
       const _tSpine = performance.now();
 
+      // Commit everything atomically — one re-render, then ContentViewer appears
+      setFileType('epub');
       setSentences(newSentences);
       setEpubContent(contentData);
       const _tDone = performance.now();
@@ -1088,81 +1088,80 @@ export default function App() {
     } catch (e) {
       console.error("Failed to load EPUB", e);
       alert("Could not load EPUB file");
+    } finally {
+      setIsDocLoading(false);
     }
   };
 
   const loadPDF = async (data: ArrayBuffer) => {
-    setFileType('pdf');
+    setIsDocLoading(true);
     try {
       const pdfjsLib = await import('pdfjs-dist');
       pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
       const doc = await pdfjsLib.getDocument(data).promise;
-      setPdfDoc(doc);
 
       const pagePromises = [];
       for (let i = 1; i <= doc.numPages; i++) {
         pagePromises.push(doc.getPage(i));
       }
       const pageResults = await Promise.all(pagePromises);
+      const scale = Math.min(window.devicePixelRatio || 1, 2);
       const newPages = pageResults.map((page, i) => {
-        const scale = Math.min(window.devicePixelRatio || 1, 2);
         const viewport = page.getViewport({ scale });
-        return { viewport, lines:[], pageNumber: i + 1 };
+        return { viewport, lines: [], pageNumber: i + 1 };
       });
+
+      // Text extraction — yields every 10 pages so the loader stays responsive
+      const _t0 = performance.now();
+      const globalLineList: any[] = [];
+
+      for (let i = 0; i < doc.numPages; i++) {
+        const page = pageResults[i];
+        const viewport = page.getViewport({ scale });
+        const textContent = await page.getTextContent();
+        const lines = processTextContent(textContent, viewport, scale, globalLineList.length, pdfjsLib);
+        globalLineList.push(...lines);
+        newPages[i].lines = lines;
+        page.cleanup();
+        if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
+      }
+
+      const fullText = globalLineList.map(l => l.text).join(' ');
+      const sentenceRegex = /[^.!?]+[.!?]/g;
+      let match;
+      const sentenceTexts: { text: string; start: number; end: number }[] = [];
+      while ((match = sentenceRegex.exec(fullText)) !== null) {
+        sentenceTexts.push({ text: match[0].trim(), start: match.index, end: match.index + match[0].length });
+      }
+
+      let cumPos = 0;
+      globalLineList.forEach(line => {
+        line.startPos = cumPos;
+        cumPos += line.text.length + 1;
+      });
+
+      const newSentences = sentenceTexts.map(sent => {
+        const sentLines = globalLineList
+          .filter(line => line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start)
+          .map(line => line.id);
+        return { text: sent.text, lines: sentLines };
+      }).filter(sent => sent.text && sent.lines.length > 0);
+
+      // Commit everything atomically — one re-render, then ContentViewer appears
+      setPdfDoc(doc);
       setPages(newPages);
+      setAllLines(globalLineList);
+      setSentences(newSentences);
+      setFileType('pdf');
 
-      // Now, do the slow text extraction in the background
-      setTimeout(() => {
-        const extract = async () => {
-          const _t0 = performance.now();
-          let globalLineList: any[] = [];
-          const scale = Math.min(window.devicePixelRatio || 1, 2);
-
-          for (let i = 0; i < doc.numPages; i++) {
-            const page = pageResults[i];
-            const viewport = page.getViewport({ scale });
-            const textContent = await page.getTextContent();
-            const lines = processTextContent(textContent, viewport, scale, globalLineList.length, pdfjsLib);
-            globalLineList.push(...lines);
-            
-            // Update page with its lines for highlighting, but don't re-render the whole list
-            newPages[i].lines = lines;
-
-            page.cleanup();
-            if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
-          }
-          
-          const fullText = globalLineList.map(l => l.text).join(' ');
-          const sentenceRegex = /[^.!?]+[.!?]/g;
-          let match;
-          const sentenceTexts = [];
-          while ((match = sentenceRegex.exec(fullText)) !== null) {
-            sentenceTexts.push({ text: match[0].trim(), start: match.index, end: match.index + match[0].length });
-          }
-
-          let cumPos = 0;
-          globalLineList.forEach(line => {
-            line.startPos = cumPos;
-            cumPos += line.text.length + 1;
-          });
-
-          const newSentences = sentenceTexts.map(sent => {
-            const sentLines = globalLineList.filter(line =>
-              line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start
-            ).map(line => line.id);
-            return { text: sent.text, lines: sentLines };
-          }).filter(sent => sent.text && sent.lines.length > 0);
-
-          setSentences(newSentences);
-          setAllLines(globalLineList);
-          const _totalWords = newSentences.reduce((n: number, s: any) => n + (s.text.trim().split(/\s+/).length), 0);
-          console.log(`[blabla] pdf | ${(performance.now() - _t0).toFixed(1)}ms | sentences: ${newSentences.length} | words: ${_totalWords} | lines: ${globalLineList.length} | pages: ${doc.numPages}`);
-        };
-        extract().catch(console.error);
-      }, 0);
-
-    } catch (e) { console.error(e); }
+      const _totalWords = newSentences.reduce((n: number, s: any) => n + (s.text.trim().split(/\s+/).length), 0);
+      console.log(`[blabla] pdf | ${(performance.now() - _t0).toFixed(1)}ms | sentences: ${newSentences.length} | words: ${_totalWords} | lines: ${globalLineList.length} | pages: ${doc.numPages}`);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsDocLoading(false);
+    }
   };
 
   const processTextContent = (textContent: any, viewport: any, scale: number, startIndex: number, pdfjsLib: any) => {
@@ -1253,7 +1252,19 @@ export default function App() {
       transition: TT,
     }}>
 
-      {sentences.length === 0 ? (
+      {isDocLoading ? (
+        <div style={{
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          minHeight: '60vh', gap: '0.85rem',
+          color: t.textMuted,
+        }}>
+          <Loader2 size={28} color={t.textMuted} style={{ animation: 'spin 0.8s linear infinite' }} />
+          <span style={{ fontSize: '0.85rem' }}>
+            {currentFileName ? `Loading ${currentFileName}…` : 'Loading PDF…'}
+          </span>
+        </div>
+      ) : sentences.length === 0 ? (
         <LandingCard
           isDarkMode={isDarkMode}
           t={t}
@@ -1387,8 +1398,6 @@ export default function App() {
         hasSentences={sentences.length > 0}
         onTogglePlay={togglePlay}
         onSpeedChange={handleSpeedChange}
-        isMenuOpen={isMenuOpen}
-        onToggleMenu={() => setIsMenuOpen(v => !v)}
         ttsStatus={ttsStatus}
         usingFallback={usingFallback.current}
         selectedVoice={selectedVoice}

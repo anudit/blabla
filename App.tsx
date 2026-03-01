@@ -1,7 +1,15 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'preact/hooks';
+import { useSignalEffect, useComputed } from '@preact/signals';
+import type { JSX } from 'preact';
 // import * as pdfjsLib from 'pdfjs-dist';
 import { unzipSync } from 'fflate';
-import { Target, Loader2 } from 'lucide-react';
+import { Target, Loader2 } from 'lucide-preact';
+import {
+  isPlayingSignal, playbackStateSignal, ttsStatusSignal,
+  isModelReadySignal, currentSentenceIndexSignal, restartSignal,
+  sentencesSignal, fileTypeSignal, playbackSpeedSignal,
+  selectedVoiceSignal, currentFileIdSignal, currentFileNameSignal,
+} from './signals';
 import { THEMES, TT } from './theme';
 import {
   findTitleInToc, extractWords, calculateWordTimings,
@@ -17,39 +25,33 @@ import BottomBar from './components/BottomBar';
 // pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
 export default function App() {
-  // ── State ──────────────────────────────────────────────────────────────
+  // ── State & Refs (MUST BE FIRST) ───────────────────────────────────────
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
   const [allLines, setAllLines] = useState<any[]>([]);
-  const [sentences, setSentences] = useState<any[]>([]);
-  const [currentSentenceIndex, setCurrentSentenceIndex] = useState(-1);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
-  const [fileType, setFileType] = useState<'pdf' | 'epub' | 'text' | null>(null);
   const [epubContent, setEpubContent] = useState<any[]>([]);
   const [showTextInput, setShowTextInput] = useState(false);
   const [textInputValue, setTextInputValue] = useState('');
   const [urlInputValue, setUrlInputValue] = useState('');
   const [isUrlLoading, setIsUrlLoading] = useState(false);
   const [urlError, setUrlError] = useState('');
-  const [ttsStatus, setTtsStatus] = useState("Init");
-  const [isModelReady, setIsModelReady] = useState(false);
-  const [playbackState, setPlaybackState] = useState("Idle");
-  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
-  const [selectedVoice, setSelectedVoice] = useState('af_bella');
-  const [restartTrigger, setRestartTrigger] = useState(0);
   const [fontSize, setFontSize] = useState(() => {
     const s = parseFloat(localStorage.getItem('fontSize') || '');
     return isNaN(s) ? 1.05 : s;
   });
   const [eggPhase, setEggPhase] = useState<'in' | 'out' | null>(null);
   const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>(() => getBookmarks());
-  const [currentFileId, setCurrentFileId] = useState<string | null>(null);
-  const [currentFileName, setCurrentFileName] = useState<string | null>(null);
   const [isDocLoading, setIsDocLoading] = useState(false);
 
-  // ── Refs ───────────────────────────────────────────────────────────────
+  // ── Signals/Refs ────────────────────────────────────────────────────────
+  const sentences          = sentencesSignal.value;
+  const fileType           = fileTypeSignal.value;
+  const playbackSpeed      = playbackSpeedSignal.value;
+  const selectedVoice      = selectedVoiceSignal.value;
+  const currentFileName    = currentFileNameSignal.value;
+
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -66,9 +68,17 @@ export default function App() {
   const eggTimerRef = useRef<any>(null);
   const pendingResumeRef = useRef<number>(-1);
   const isResuming = useRef(false);
+  const nextStartTimeRef = useRef(0);
 
   // ── Derived ────────────────────────────────────────────────────────────
   const t = isDarkMode ? THEMES.dark : THEMES.light;
+  
+  const activeHeaderId = useComputed(() => {
+    const idx = currentSentenceIndexSignal.value;
+    const sents = sentencesSignal.value;
+    if (idx < 0 || !sents[idx]) return null;
+    return sents[idx].headerId || null;
+  });
 
   // ── Effects ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -79,8 +89,8 @@ export default function App() {
     workerRef.current.onmessage = (e) => {
       const { status, audio, error, text, lineIndex, device, dtype } = e.data;
       if (status === 'ready') {
-        setTtsStatus(`Ready (${device}/${dtype})`);
-        setIsModelReady(true);
+        ttsStatusSignal.value = `Ready (${device}/${dtype})`;
+        isModelReadySignal.value = true;
         // Warm up model silently — first inference is slow; discarded via missing resolver
         workerRef.current?.postMessage({ type: 'generate', text: 'Warm up.', lineIndex: -1, voice: 'af_bella', speed: 1.0 });
       }
@@ -110,7 +120,7 @@ export default function App() {
         }
       }
     };
-    setTtsStatus("Downloading Model...");
+    ttsStatusSignal.value = "Downloading Model...";
     workerRef.current.postMessage({ type: 'init' });
 
     return () => {
@@ -120,44 +130,31 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (isPlaying && currentSentenceIndex >= 0 && !isWaitingForAudio.current) {
+  useSignalEffect(() => {
+    const playing = isPlayingSignal.value;
+    const idx     = currentSentenceIndexSignal.value;
+    restartSignal.value; // subscribe — triggers restart after voice/speed change
+    if (playing && idx >= 0 && !isWaitingForAudio.current) {
       playCurrentSentence();
     }
-  }, [isPlaying, currentSentenceIndex, restartTrigger]);
-
-  // Global Cmd+V paste → URL or text load on landing page
-  useEffect(() => {
-    if (sentences.length > 0) return;
-    const handler = (e: ClipboardEvent) => {
-      const tag = (document.activeElement as HTMLElement)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      const text = e.clipboardData?.getData('text') ?? '';
-      const trimmed = text.trim();
-      if (!trimmed) return;
-      e.preventDefault();
-      if (/^https?:\/\/\S+$/.test(trimmed)) {
-        handleUrlLoad(trimmed);
-      } else {
-        loadText(trimmed);
-      }
-    };
-    window.addEventListener('paste', handler);
-    return () => window.removeEventListener('paste', handler);
-  }, [sentences.length]);
+  });
 
   // DOM-based highlight + smart scroll (bypasses React diffing entirely)
-  useEffect(() => {
+  useSignalEffect(() => {
+    const currentSentenceIndex = currentSentenceIndexSignal.value;
+    const sents = sentencesSignal.value;
+    const fType = fileTypeSignal.value;
+    
     document.querySelectorAll('.epub-highlight-active').forEach(el => el.classList.remove('epub-highlight-active'));
     document.querySelectorAll('.pdf-highlight-active').forEach(el => el.classList.remove('pdf-highlight-active'));
 
-    const unit = sentences[currentSentenceIndex];
+    const unit = sents[currentSentenceIndex];
     if (currentSentenceIndex < 0 || !unit) return;
 
     unit.lines.forEach((id: number) => {
       const el = document.getElementById(`line-${id}`);
       if (!el) return;
-      if (fileType === 'pdf') {
+      if (fType === 'pdf') {
         el.classList.add('pdf-highlight-active');
       } else {
         const target = (el.textContent === '' && el.closest('p')) ? el.closest('p')! : el;
@@ -174,17 +171,62 @@ export default function App() {
     if (!isVisible) {
       const isInitialResume = isResuming.current;
       if (isInitialResume) isResuming.current = false;
-      setTimeout(() => target.scrollIntoView({ 
-        behavior: isInitialResume ? 'instant' : 'smooth', 
-        block: 'center' 
-      }), isInitialResume ? 150 : 50);
+      setTimeout(() => target.scrollIntoView({
+        behavior: isInitialResume ? 'instant' : 'smooth',
+        block: 'center'
+      }), 0);
     }
-  }, [currentSentenceIndex, sentences, fileType]);
+  });
+
+  // Bookmark sync
+  useSignalEffect(() => {
+    const currentSentenceIndex = currentSentenceIndexSignal.value;
+    const sents = sentencesSignal.value;
+    const fType = fileTypeSignal.value;
+    const cFileId = currentFileIdSignal.value;
+    const cFileName = currentFileNameSignal.value;
+
+    if (currentSentenceIndex > 0 && sents.length > 0 && cFileId && cFileName && fType) {
+      const isUrl = fType === 'text' && cFileId.startsWith('http');
+      const entry: BookmarkEntry = {
+        id: cFileId,
+        fileName: cFileName,
+        sentenceIndex: currentSentenceIndex,
+        totalSentences: sents.length,
+        timestamp: Date.now(),
+        fileType: isUrl ? 'url' : fType as 'pdf' | 'epub',
+        preview: (sents[currentSentenceIndex]?.text || '').slice(0, 80),
+        ...(isUrl ? { url: cFileId } : {}),
+      };
+      saveBookmark(entry);
+      setBookmarks(getBookmarks());
+    }
+  });
+
+  // Global Cmd+V paste → URL or text load on landing page
+  useEffect(() => {
+    if (sentencesSignal.peek().length > 0) return;
+    const handler = (e: ClipboardEvent) => {
+      const tag = (document.activeElement as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const text = e.clipboardData?.getData('text') ?? '';
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      e.preventDefault();
+      if (/^https?:\/\/\S+$/.test(trimmed)) {
+        handleUrlLoad(trimmed);
+      } else {
+        loadText(trimmed);
+      }
+    };
+    window.addEventListener('paste', handler);
+    return () => window.removeEventListener('paste', handler);
+  }, [sentencesSignal.value.length === 0]); // Re-bind if we clear the reader
 
   useEffect(() => {
     const handleKeyDown = async (e: KeyboardEvent) => {
       const isPaste = (e.metaKey || e.ctrlKey) && e.key === 'v';
-      if (!isPaste || sentences.length > 0) return;
+      if (!isPaste || sentencesSignal.peek().length > 0) return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'TEXTAREA' || tag === 'INPUT') return;
       e.preventDefault();
@@ -198,16 +240,18 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [sentences.length]);
+  }, [sentencesSignal.value.length === 0]);
 
-  useEffect(() => {
+  useSignalEffect(() => {
+    const hasSentences = sentencesSignal.value.length > 0;
+
     const handleMediaKey = (e: KeyboardEvent) => {
       if (e.key === 'MediaPlayPause' || e.key === 'F8') {
         e.preventDefault();
         togglePlay();
         return;
       }
-      if (e.code === 'Space' && sentences.length > 0) {
+      if (e.code === 'Space' && hasSentences) {
         const tag = (e.target as HTMLElement)?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA') return;
         e.preventDefault();
@@ -228,48 +272,29 @@ export default function App() {
         } catch (e) {}
       }
     };
-  }, [isPlaying, sentences.length, isModelReady, currentSentenceIndex]);
+  });
 
-  useEffect(() => {
+  useSignalEffect(() => {
     if (!('mediaSession' in navigator)) return;
-    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
-  }, [isPlaying]);
+    navigator.mediaSession.playbackState = isPlayingSignal.value ? 'playing' : 'paused';
+  });
 
-  useEffect(() => {
-    if (!('mediaSession' in navigator) || !currentFileName) return;
-    navigator.mediaSession.metadata = new MediaMetadata({ title: currentFileName, artist: 'blabla reader' });
-  }, [currentFileName]);
+  useSignalEffect(() => {
+    if (!('mediaSession' in navigator) || !currentFileNameSignal.value) return;
+    navigator.mediaSession.metadata = new MediaMetadata({ title: currentFileNameSignal.value, artist: 'blabla reader' });
+  });
 
   // Auto-resume: fires once sentences are loaded if a bookmark was found for this file
-  useEffect(() => {
-    if (sentences.length > 0 && pendingResumeRef.current > 0) {
-      const idx = Math.min(pendingResumeRef.current, sentences.length - 1);
+  useSignalEffect(() => {
+    const sents = sentencesSignal.value;
+    if (sents.length > 0 && pendingResumeRef.current > 0) {
+      const idx = Math.min(pendingResumeRef.current, sents.length - 1);
       pendingResumeRef.current = -1;
       isResuming.current = true;
-      setCurrentSentenceIndex(idx);
-      setIsPlaying(true);
+      currentSentenceIndexSignal.value = idx;
+      isPlayingSignal.value = true;
     }
-  }, [sentences]);
-
-  // Save progress to localStorage whenever the sentence index advances
-  useEffect(() => {
-    if (currentSentenceIndex > 0 && sentences.length > 0 && currentFileId && currentFileName && fileType) {
-      const isUrl = currentFileId.startsWith('http://') || currentFileId.startsWith('https://');
-      if (fileType === 'text' && !isUrl) return;
-      const entry: BookmarkEntry = {
-        id: currentFileId,
-        fileName: currentFileName,
-        sentenceIndex: currentSentenceIndex,
-        totalSentences: sentences.length,
-        timestamp: Date.now(),
-        fileType: isUrl ? 'url' : fileType as 'pdf' | 'epub',
-        preview: (sentences[currentSentenceIndex]?.text || '').slice(0, 80),
-        ...(isUrl ? { url: currentFileId } : {}),
-      };
-      saveBookmark(entry);
-      setBookmarks(getBookmarks());
-    }
-  }, [currentSentenceIndex]);
+  });
 
   useEffect(() => {
     return () => { if (eggTimerRef.current) clearTimeout(eggTimerRef.current); };
@@ -295,8 +320,8 @@ export default function App() {
     source.playbackRate.value = 1.0;
     source.connect(ctx.destination);
     source.start(0);
-    setPlaybackState("Playing");
-    source.onended = () => setPlaybackState("Ready");
+    playbackStateSignal.value = "Playing";
+    source.onended = () => { playbackStateSignal.value = "Ready"; };
   };
 
   const generateAudioInWorker = (text: string, sentenceIndex: number, voice: string, speed: number): Promise<AudioBuffer | null> => {
@@ -338,17 +363,18 @@ export default function App() {
     audioCache.current.clear();
     pendingFetches.current.clear();
     drainResolvers();
-    setPlaybackState("Stopped");
+    playbackStateSignal.value = "Stopped";
     isWaitingForAudio.current = false;
   };
 
   const processSentenceAudio = async (index: number, sessionId: number, voice: string, speed: number): Promise<AudioBuffer | null> => {
+    const sents = sentencesSignal.peek();
     if (usingFallback.current) return null;
-    if (index >= sentences.length) return null;
+    if (index >= sents.length) return null;
     if (audioCache.current.has(index)) return audioCache.current.get(index);
     if (pendingFetches.current.has(index)) return null;
 
-    const text = sentences[index].text;
+    const text = sents[index].text;
     if (!text.trim()) return null;
 
     pendingFetches.current.add(index);
@@ -368,15 +394,21 @@ export default function App() {
   };
 
   const playCurrentSentence = async () => {
+    const isPlaying = isPlayingSignal.peek();
+    const currentSentenceIndex = currentSentenceIndexSignal.peek();
+    const sents = sentencesSignal.peek();
+    const sVoice = selectedVoiceSignal.peek();
+    const pSpeed = playbackSpeedSignal.peek();
+
     if (!isPlaying || currentSentenceIndex === -1) return;
-    if (currentSentenceIndex >= sentences.length) {
-      setIsPlaying(false);
-      setPlaybackState("Completed");
+    if (currentSentenceIndex >= sents.length) {
+      isPlayingSignal.value = false;
+      playbackStateSignal.value = "Completed";
       return;
     }
 
     const currentSession = playbackSessionId.current;
-    const unit = sentences[currentSentenceIndex];
+    const unit = sents[currentSentenceIndex];
     const text = unit.text;
 
     if (text.trim().length <= 1) {
@@ -389,20 +421,20 @@ export default function App() {
       if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
       nativeTimeout.current = setTimeout(() => {
         const u = new SpeechSynthesisUtterance(text);
-        u.rate = playbackSpeed;
+        u.rate = pSpeed;
         u.onend = () => {
-          if (isPlaying && currentSession === playbackSessionId.current) {
+          if (isPlayingSignal.peek() && currentSession === playbackSessionId.current) {
             advanceSentence();
           }
         };
-        u.onerror = () => { if (isPlaying) advanceSentence(); };
+        u.onerror = () => { if (isPlayingSignal.peek()) advanceSentence(); };
         window.speechSynthesis.speak(u);
-        setPlaybackState("Playing");
+        playbackStateSignal.value = "Playing";
       }, 50);
       return;
     }
 
-    getAudioContext();
+    const ctx = getAudioContext();
     if (currentSource.current) {
       try { currentSource.current.stop(); } catch(e){}
       currentSource.current.disconnect();
@@ -410,16 +442,16 @@ export default function App() {
     }
 
     for (let i = 1; i <= 3; i++) {
-      if (currentSentenceIndex + i < sentences.length && !audioCache.current.has(currentSentenceIndex + i)) {
-        processSentenceAudio(currentSentenceIndex + i, currentSession, selectedVoice, playbackSpeed);
+      if (currentSentenceIndex + i < sents.length && !audioCache.current.has(currentSentenceIndex + i)) {
+        processSentenceAudio(currentSentenceIndex + i, currentSession, sVoice, pSpeed);
       }
     }
 
     let buffer = audioCache.current.get(currentSentenceIndex);
     if (!buffer) {
-      setPlaybackState("Buffering");
+      playbackStateSignal.value = "Buffering";
       isWaitingForAudio.current = true;
-      buffer = await processSentenceAudio(currentSentenceIndex, currentSession, selectedVoice, playbackSpeed);
+      buffer = await processSentenceAudio(currentSentenceIndex, currentSession, sVoice, pSpeed);
       isWaitingForAudio.current = false;
     }
 
@@ -428,13 +460,13 @@ export default function App() {
       return;
     }
 
-    if (currentSession !== playbackSessionId.current || !isPlaying) return;
+    if (currentSession !== playbackSessionId.current || !isPlayingSignal.peek()) return;
 
     if (buffer) {
-      const source = audioContext.current!.createBufferSource();
+      const source = ctx.createBufferSource();
       source.buffer = buffer;
       source.playbackRate.value = 1.0;
-      source.connect(audioContext.current!.destination);
+      source.connect(ctx.destination);
 
       if (wordRafRef.current) cancelAnimationFrame(wordRafRef.current);
 
@@ -442,26 +474,35 @@ export default function App() {
         if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
         document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
         currentSource.current = null;
-        if (isPlaying && currentSession === playbackSessionId.current) {
+        if (isPlayingSignal.peek() && currentSession === playbackSessionId.current) {
           advanceSentence();
         }
       };
       currentSource.current = source;
-      setPlaybackState("Playing");
+      playbackStateSignal.value = "Playing";
 
       wordTimingsRef.current = calculateWordTimings(text, buffer.duration);
-      audioStartRef.current = audioContext.current!.currentTime;
-      source.start(0);
+      
+      // Gapless: schedule precisely if we're close enough to the next slot
+      let startTime = ctx.currentTime;
+      if (nextStartTimeRef.current > startTime && nextStartTimeRef.current < startTime + 0.5) {
+        startTime = nextStartTimeRef.current;
+      }
+      audioStartRef.current = startTime;
+      nextStartTimeRef.current = startTime + buffer.duration;
+      
+      source.start(startTime);
 
       // rAF loop: direct DOM updates at 60 fps, no React re-renders
       const lineId = unit.lines[0];
       const animateWords = () => {
         if (currentSource.current !== source) return;
-        const elapsed = audioContext.current!.currentTime - audioStartRef.current;
+        const elapsed = ctx.currentTime - audioStartRef.current;
         const active = wordTimingsRef.current.find(t => elapsed >= t.start && elapsed < t.end);
         document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
         if (active) {
-          document.getElementById(`word-${lineId}-${active.index}`)?.classList.add('word-highlight-active');
+          const el = document.getElementById(`word-${lineId}-${active.index}`);
+          if (el) el.classList.add('word-highlight-active');
         }
         if (elapsed < buffer.duration) {
           wordRafRef.current = requestAnimationFrame(animateWords);
@@ -475,18 +516,18 @@ export default function App() {
   };
 
   const advanceSentence = () => {
-    setCurrentSentenceIndex(prev => {
-      const next = prev + 1;
-      // Sliding-window cache: keep only prev-1..next+3
-      for (const key of Array.from(audioCache.current.keys())) {
-        if (key < next - 1 || key > next + 3) audioCache.current.delete(key);
-      }
-      return next;
-    });
+    const prev = currentSentenceIndexSignal.peek();
+    const next = prev + 1;
+    // Sliding-window cache: keep only prev-1..next+3
+    for (const key of Array.from(audioCache.current.keys())) {
+      if (key < next - 1 || key > next + 3) audioCache.current.delete(key);
+    }
+    currentSentenceIndexSignal.value = next;
   };
 
+
   // ── Handlers ───────────────────────────────────────────────────────────
-  const triggerEasterEgg = React.useCallback(() => {
+  const triggerEasterEgg = useCallback(() => {
     if (eggPhase !== null) return;
     setEggPhase('in');
     eggTimerRef.current = setTimeout(() => {
@@ -495,111 +536,114 @@ export default function App() {
     }, 2400);
   }, [eggPhase]);
 
-  const triggerFallback = React.useCallback(() => {
+  const triggerFallback = useCallback(() => {
     if (usingFallback.current) return;
+    console.warn("[App] Triggering Web Speech API fallback...");
     usingFallback.current = true;
-    setTtsStatus("System Voice");
-    setIsModelReady(true);
+    ttsStatusSignal.value = "Fallback (Native)";
+    isWaitingForAudio.current = false;
+    drainResolvers();
   }, []);
 
-  const handleLineClick = React.useCallback((lineId: number) => {
-    if (wordRafRef.current) { cancelAnimationFrame(wordRafRef.current); wordRafRef.current = null; }
-    document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
-    if (currentSource.current) {
-      try { currentSource.current.stop(); } catch(e){}
-      currentSource.current.disconnect();
-      currentSource.current = null;
-    }
-    window.speechSynthesis.cancel();
-    playbackSessionId.current += 1;
+  const handleLineClick = useCallback((lineId: number) => {
+    isPlayingSignal.value = false;
+    stopAllAudio();
     audioCache.current.clear();
     pendingFetches.current.clear();
     drainResolvers();
     isWaitingForAudio.current = false;
 
+    const sents = sentencesSignal.peek();
     let targetSentenceIndex = -1;
-    for (let i = 0; i < sentences.length; i++) {
-      if (sentences[i].lines.includes(lineId)) {
+    for (let i = 0; i < sents.length; i++) {
+      if (sents[i].lines.includes(lineId)) {
         targetSentenceIndex = i;
         break;
       }
     }
     if (targetSentenceIndex !== -1) {
-      setCurrentSentenceIndex(targetSentenceIndex);
-      setIsPlaying(true);
+      currentSentenceIndexSignal.value = targetSentenceIndex;
+      isPlayingSignal.value = true;
       const el = document.getElementById(`line-${lineId}`);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [sentences]);
+  }, []);
 
-  const togglePlay = React.useCallback(() => {
-    if (!isModelReady) return;
-    if (currentSentenceIndex === -1 && sentences.length > 0) {
-      setCurrentSentenceIndex(0);
-      setIsPlaying(true);
+  const togglePlay = useCallback(() => {
+    if (!isModelReadySignal.peek()) return;
+    const currentSentenceIndex = currentSentenceIndexSignal.peek();
+    const isPlaying = isPlayingSignal.peek();
+    const sents = sentencesSignal.peek();
+
+    if (currentSentenceIndex === -1 && sents.length > 0) {
+      currentSentenceIndexSignal.value = 0;
+      isPlayingSignal.value = true;
       return;
     }
     if (isPlaying) {
-      setIsPlaying(false);
+      isPlayingSignal.value = false;
       stopAllAudio();
     } else {
-      setIsPlaying(true);
-      setPlaybackState("Starting");
+      isPlayingSignal.value = true;
+      playbackStateSignal.value = "Starting";
     }
-  }, [isModelReady, currentSentenceIndex, sentences.length, isPlaying]);
+  }, []);
 
-  const handleTestAudio = React.useCallback(() => {
-    if (!isModelReady) return;
+  const handleTestAudio = useCallback(() => {
+    if (!isModelReadySignal.peek()) return;
     stopAllAudio();
     const text = "Hello! I am ready to read.";
+    const pSpeed = playbackSpeedSignal.peek();
+    const sVoice = selectedVoiceSignal.peek();
+
     if (usingFallback.current) {
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = playbackSpeed;
+      u.rate = pSpeed;
       window.speechSynthesis.speak(u);
-      setPlaybackState("Testing");
+      playbackStateSignal.value = "Testing";
     } else {
-      setPlaybackState("Generating");
-      workerRef.current?.postMessage({ type: 'generate', text, voice: selectedVoice, speed: playbackSpeed });
+      playbackStateSignal.value = "Generating";
+      workerRef.current?.postMessage({ type: 'generate', text, voice: sVoice, speed: pSpeed });
     }
-  }, [isModelReady, playbackSpeed, selectedVoice]);
+  }, []);
 
-  const resetReader = React.useCallback(() => {
-    setIsPlaying(false);
+  const resetReader = useCallback(() => {
+    isPlayingSignal.value = false;
     stopAllAudio();
     if (pdfDoc) { try { pdfDoc.destroy(); } catch(e) {} }
     setPdfDoc(null);
     setPages([]);
     setAllLines([]);
-    setSentences([]);
-    setFileType(null);
+    sentencesSignal.value = [];
+    fileTypeSignal.value = null;
     setEpubContent([]);
-    setCurrentSentenceIndex(-1);
+    currentSentenceIndexSignal.value = -1;
     audioCache.current.clear();
     pendingFetches.current.clear();
     drainResolvers();
-    setPlaybackState("Idle");
+    playbackStateSignal.value = "Idle";
     isWaitingForAudio.current = false;
     setShowTextInput(false);
     setTextInputValue('');
-    setCurrentFileId(null);
-    setCurrentFileName(null);
+    currentFileIdSignal.value = null;
+    currentFileNameSignal.value = null;
     pendingResumeRef.current = -1;
   }, [pdfDoc]);
 
-  const handleDeleteBookmark = React.useCallback((id: string) => {
+  const handleDeleteBookmark = useCallback((id: string) => {
     removeBookmark(id);
     setBookmarks(getBookmarks());
   }, []);
 
-  const handleSelectBookmark = React.useCallback((entry: BookmarkEntry) => {
+  const handleSelectBookmark = useCallback((entry: BookmarkEntry) => {
     if (entry.fileType === 'url' && entry.url) {
       handleUrlLoad(entry.url);
     }
   }, []);
 
-  const handleVoiceChange = React.useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    const newVoice = e.target.value;
-    setSelectedVoice(newVoice);
+  const handleVoiceChange = useCallback((e: JSX.TargetedEvent<HTMLSelectElement, Event>) => {
+    const newVoice = (e.target as HTMLSelectElement).value;
+    selectedVoiceSignal.value = newVoice;
     drainResolvers();
     audioCache.current.clear();
     pendingFetches.current.clear();
@@ -611,11 +655,11 @@ export default function App() {
     window.speechSynthesis.cancel();
     playbackSessionId.current += 1;
     isWaitingForAudio.current = false;
-    if (isPlaying) setRestartTrigger(p => p + 1);
-  }, [isPlaying]);
+    if (isPlayingSignal.peek()) restartSignal.value++;
+  }, []);
 
-  const handleSpeedChange = React.useCallback((speed: number) => {
-    setPlaybackSpeed(speed);
+  const handleSpeedChange = useCallback((speed: number) => {
+    playbackSpeedSignal.value = speed;
     drainResolvers();
     audioCache.current.clear();
     pendingFetches.current.clear();
@@ -627,35 +671,35 @@ export default function App() {
     window.speechSynthesis.cancel();
     playbackSessionId.current += 1;
     isWaitingForAudio.current = false;
-    if (isPlaying) setRestartTrigger(p => p + 1);
-  }, [isPlaying]);
+    if (isPlayingSignal.peek()) restartSignal.value++;
+  }, []);
 
-  const handleToggleTheme = React.useCallback(() => {
+  const handleToggleTheme = useCallback(() => {
     const next = !isDarkMode;
     setIsDarkMode(next);
     localStorage.setItem('theme', next ? 'dark' : 'light');
   }, [isDarkMode]);
 
-  const handleFontSizeChange = React.useCallback((delta: number) => {
+  const handleFontSizeChange = useCallback((delta: number) => {
     const next = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + delta)).toFixed(2));
     setFontSize(next);
     localStorage.setItem('fontSize', String(next));
   }, [fontSize]);
 
-  const handleFileDrop = async (e: React.DragEvent<HTMLDivElement> | React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileDrop = async (e: JSX.TargetedDragEvent<HTMLDivElement> | JSX.TargetedEvent<HTMLInputElement, Event>) => {
     if ('preventDefault' in e) e.preventDefault();
     setIsDragOver(false);
     let file: File | undefined;
     if ('dataTransfer' in e) {
-      file = e.dataTransfer.files[0];
+      file = e.dataTransfer?.files[0];
     } else if ('target' in e) {
       file = (e.target as HTMLInputElement).files?.[0];
     }
 
     if (file) {
       const fileId = `${file.name}:${file.size}`;
-      setCurrentFileId(fileId);
-      setCurrentFileName(file.name);
+      currentFileIdSignal.value = fileId;
+      currentFileNameSignal.value = file.name;
       const existing = getBookmarks().find(b => b.id === fileId);
       if (existing) pendingResumeRef.current = existing.sentenceIndex;
 
@@ -694,8 +738,8 @@ export default function App() {
       if (!markdown.trim()) throw new Error('No content returned for that URL');
       const titleLine = markdown.match(/^Title:\s*(.+)/m);
       const pageTitle = titleLine ? titleLine[1].trim() : new URL(url).hostname;
-      setCurrentFileId(url);
-      setCurrentFileName(pageTitle);
+      currentFileIdSignal.value = url;
+      currentFileNameSignal.value = pageTitle;
       const existing = getBookmarks().find(b => b.id === url);
       if (existing) pendingResumeRef.current = existing.sentenceIndex;
       setUrlInputValue('');
@@ -707,7 +751,7 @@ export default function App() {
     }
   };
 
-  const handleClipboardPaste = React.useCallback(async (e: React.MouseEvent<HTMLButtonElement>) => {
+  const handleClipboardPaste = useCallback(async (e: JSX.TargetedMouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     try {
       const text = await navigator.clipboard.readText();
@@ -852,8 +896,8 @@ export default function App() {
     flushPara();
 
     if (!newSentences.length) return;
-    setFileType('text');
-    setSentences(newSentences);
+    fileTypeSignal.value = 'text';
+    sentencesSignal.value = newSentences;
     setEpubContent(contentData);
     setShowTextInput(false);
     setTextInputValue('');
@@ -887,8 +931,8 @@ export default function App() {
     }
 
     if (newSentences.length === 0) return;
-    setFileType('text');
-    setSentences(newSentences);
+    fileTypeSignal.value = 'text';
+    sentencesSignal.value = newSentences;
     setEpubContent(contentData);
     setShowTextInput(false);
     setTextInputValue('');
@@ -1073,8 +1117,8 @@ export default function App() {
       const _tSpine = performance.now();
 
       // Commit everything atomically — one re-render, then ContentViewer appears
-      setFileType('epub');
-      setSentences(newSentences);
+      fileTypeSignal.value = 'epub';
+      sentencesSignal.value = newSentences;
       setEpubContent(contentData);
       const _tDone = performance.now();
 
@@ -1155,8 +1199,8 @@ export default function App() {
       setPdfDoc(doc);
       setPages(newPages);
       setAllLines(globalLineList);
-      setSentences(newSentences);
-      setFileType('pdf');
+      sentencesSignal.value = newSentences;
+      fileTypeSignal.value = 'pdf';
 
       const _totalWords = newSentences.reduce((n: number, s: any) => n + (s.text.trim().split(/\s+/).length), 0);
       console.log(`[blabla] pdf | ${(performance.now() - _t0).toFixed(1)}ms | sentences: ${newSentences.length} | words: ${_totalWords} | lines: ${globalLineList.length} | pages: ${doc.numPages}`);
@@ -1225,11 +1269,6 @@ export default function App() {
     epubContent.filter(i => i.type === 'header').map(i => ({ id: i.id, text: i.text, level: i.level })),
     [epubContent]
   );
-
-  const activeHeaderId = useMemo(() => {
-    if (currentSentenceIndex < 0 || !sentences[currentSentenceIndex]) return null;
-    return sentences[currentSentenceIndex].headerId || null;
-  }, [currentSentenceIndex, sentences]);
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (
@@ -1351,51 +1390,19 @@ export default function App() {
       )}
 
       {/* Scroll-to-current button — visible only when paused */}
-      {sentences.length > 0 && !isPlaying && currentSentenceIndex >= 0 && (
-        <button
-          onClick={() => {
-            const unit = sentences[currentSentenceIndex];
-            if (!unit) return;
-            const el = document.getElementById(`line-${unit.lines[0]}`);
-            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }}
-          title="Scroll to current position"
-          style={{
-            position: 'fixed', bottom: '1rem', right: '1rem', zIndex: 200,
-            display: 'flex', alignItems: 'center', gap: '0.35rem',
-            padding: '0.38rem 0.7rem',
-            backgroundColor: '#2a2015',
-            color: '#c0b4a4',
-            border: '1px solid #1a1510',
-            borderRadius: '999px',
-            cursor: 'pointer',
-            fontSize: '0.72rem',
-            fontWeight: 700,
-            letterSpacing: '0.03em',
-            boxShadow: '0 2px 10px rgba(0,0,0,0.25)',
-            transition: 'opacity 0.15s',
-          }}
-        >
-          <Target size={13} />
-        </button>
-      )}
+      <ScrollToCurrentButton sentences={sentences} />
 
       <BottomBar
         t={t}
         isDarkMode={isDarkMode}
         onToggleTheme={handleToggleTheme}
-        isPlaying={isPlaying}
-        isModelReady={isModelReady}
-        playbackState={playbackState}
         playbackSpeed={playbackSpeed}
         hasSentences={sentences.length > 0}
         onTogglePlay={togglePlay}
         onSpeedChange={handleSpeedChange}
-        ttsStatus={ttsStatus}
         usingFallback={usingFallback.current}
         selectedVoice={selectedVoice}
         onVoiceChange={handleVoiceChange}
-        currentSentenceIndex={currentSentenceIndex}
         sentencesLength={sentences.length}
         fontSize={fontSize}
         onFontSizeChange={handleFontSizeChange}
@@ -1404,5 +1411,41 @@ export default function App() {
         onLogoClick={triggerEasterEgg}
       />
     </div>
+  );
+}
+
+function ScrollToCurrentButton({ sentences }: { sentences: any[] }) {
+  const isPlaying = isPlayingSignal.value;
+  const currentSentenceIndex = currentSentenceIndexSignal.value;
+
+  if (sentences.length === 0 || isPlaying || currentSentenceIndex < 0) return null;
+
+  return (
+    <button
+      onClick={() => {
+        const unit = sentences[currentSentenceIndex];
+        if (!unit) return;
+        const el = document.getElementById(`line-${unit.lines[0]}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }}
+      title="Scroll to current position"
+      style={{
+        position: 'fixed', bottom: '1rem', right: '1rem', zIndex: 200,
+        display: 'flex', alignItems: 'center', gap: '0.35rem',
+        padding: '0.38rem 0.7rem',
+        backgroundColor: '#2a2015',
+        color: '#c0b4a4',
+        border: '1px solid #1a1510',
+        borderRadius: '999px',
+        cursor: 'pointer',
+        fontSize: '0.72rem',
+        fontWeight: 700,
+        letterSpacing: '0.03em',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.25)',
+        transition: 'opacity 0.15s',
+      }}
+    >
+      <Target size={13} />
+    </button>
   );
 }

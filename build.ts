@@ -6,13 +6,6 @@ console.log("🧹 Cleaning dist folder...");
 await rm("./dist", { recursive: true, force: true });
 
 console.log("📦 Building Frontend (bundle.js)...");
-const preactAlias = {
-  "react": "preact/compat",
-  "react-dom": "preact/compat",
-  "react/jsx-runtime": "preact/jsx-runtime",
-  "react-dom/client": "preact/compat/client",
-};
-
 const result = await build({
   entrypoints: ["./frontend.tsx"],
   outdir: "./dist",
@@ -24,7 +17,6 @@ const result = await build({
   target: "browser",
   minify: true,
   metafile: true,
-  alias: preactAlias,
 });
 await Bun.write("./dist/meta.json", JSON.stringify(result.metafile));
 
@@ -34,7 +26,6 @@ await build({
   outdir: "./dist",
   target: "browser",
   minify: true,
-  alias: preactAlias,
 });
 
 console.log("📂 Copying Static Assets...");

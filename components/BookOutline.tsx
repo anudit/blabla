@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { AlignJustify, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { AlignJustify, X } from 'lucide-preact';
+import type { Signal } from '@preact/signals';
 
 export interface OutlineEntry {
   id: string;
@@ -9,7 +10,7 @@ export interface OutlineEntry {
 
 interface Props {
   entries: OutlineEntry[];
-  activeId: string | null;
+  activeId: Signal<string | null>;
   isDarkMode: boolean;
 }
 
@@ -18,6 +19,7 @@ export default function BookOutline({ entries, activeId, isDarkMode }: Props) {
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 640);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const currentActiveId = activeId.value;
 
   // Track mobile breakpoint
   useEffect(() => {
@@ -43,10 +45,10 @@ export default function BookOutline({ entries, activeId, isDarkMode }: Props) {
 
   // Scroll active item into view inside panel
   useEffect(() => {
-    if (!isOpen || !activeId || !panelRef.current) return;
-    const el = panelRef.current.querySelector(`[data-id="${activeId}"]`) as HTMLElement | null;
+    if (!isOpen || !currentActiveId || !panelRef.current) return;
+    const el = panelRef.current.querySelector(`[data-id="${currentActiveId}"]`) as HTMLElement | null;
     if (el) el.scrollIntoView({ block: 'nearest' });
-  }, [activeId, isOpen]);
+  }, [currentActiveId, isOpen]);
 
   if (entries.length === 0) return null;
 
@@ -146,7 +148,7 @@ export default function BookOutline({ entries, activeId, isDarkMode }: Props) {
           {/* Entries */}
           <div style={{ padding: '0.35rem 0' }}>
             {entries.map(entry => {
-              const active = entry.id === activeId;
+              const active = entry.id === currentActiveId;
               return (
                 <button
                   key={entry.id}

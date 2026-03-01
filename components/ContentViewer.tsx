@@ -1,4 +1,6 @@
-import React from 'react';
+import { Fragment } from 'preact';
+import type { JSX } from 'preact';
+import type { Signal } from '@preact/signals';
 import type { ThemeTokens } from '../theme';
 import { TT } from '../theme';
 import { renderMd } from '../utils';
@@ -15,7 +17,7 @@ interface ContentViewerProps {
   // Epub/Text
   epubContent: any[];
   outline: OutlineEntry[];
-  activeHeaderId: string | null;
+  activeHeaderId: Signal<string | null>;
   // Theme
   t: ThemeTokens;
   isDarkMode: boolean;
@@ -29,11 +31,11 @@ const H_SIZE: Record<number, string> = {
   4: '1rem', 5: '0.95rem', 6: '0.9rem',
 };
 
-export default React.memo(function ContentViewer({
+export default function ContentViewer({
   fileType, pages, pdfDoc, epubContent, outline, activeHeaderId,
   t, isDarkMode, fontSize, onLineClick,
 }: ContentViewerProps) {
-  const pageContainerStyle: React.CSSProperties = {
+  const pageContainerStyle: JSX.CSSProperties = {
     position: 'relative',
     marginBottom: '1rem',
     boxShadow: t.pageShadow,
@@ -42,7 +44,7 @@ export default React.memo(function ContentViewer({
     height: 'auto',
   };
 
-  const epubSentenceStyle: React.CSSProperties = {
+  const epubSentenceStyle: JSX.CSSProperties = {
     cursor: 'pointer',
     padding: '2px 0',
     transition: `background-color 0.2s, ${TT}`,
@@ -91,14 +93,14 @@ export default React.memo(function ContentViewer({
       )}
     </div>
   );
-});
+}
 
 interface RenderContentProps {
   epubContent: any[];
   t: ThemeTokens;
   isDarkMode: boolean;
   lc: string;
-  epubSentenceStyle: React.CSSProperties;
+  epubSentenceStyle: JSX.CSSProperties;
   onLineClick: (lineId: number) => void;
 }
 
@@ -134,7 +136,7 @@ function renderContent({ epubContent, t, isDarkMode, lc, epubSentenceStyle, onLi
       const lvl: number = item.level ?? 1;
       const showDivider = !isFirst && lvl <= 1;
       return (
-        <React.Fragment key={item.id}>
+        <Fragment key={item.id}>
           {showDivider && (
             <hr style={{
               border: 'none',
@@ -159,7 +161,7 @@ function renderContent({ epubContent, t, isDarkMode, lc, epubSentenceStyle, onLi
           >
             {item.text}
           </div>
-        </React.Fragment>
+        </Fragment>
       );
     }
 

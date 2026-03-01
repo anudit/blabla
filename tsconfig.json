@@ -22,14 +22,6 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
 
-    "baseUrl": ".",
-    "paths": {
-      "react": ["./node_modules/preact/compat/"],
-      "react/jsx-runtime": ["./node_modules/preact/jsx-runtime"],
-      "react-dom": ["./node_modules/preact/compat/"],
-      "react-dom/client": ["./node_modules/preact/compat/client"]
-    },
-
     // Some stricter flags (disabled by default)
     "noUnusedLocals": false,
     "noUnusedParameters": false,

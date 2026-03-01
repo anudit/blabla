@@ -1,4 +1,4 @@
-import React from 'react';
+import type { ComponentChildren } from 'preact';
 
 export function findTitleInToc(toc: any[], href: string): string | null {
   for (const entry of toc) {
@@ -82,8 +82,8 @@ export function isMarkdown(text: string): boolean {
 export const INLINE_MD_RE = /!\[[^\]]*\]\([^)]+\)|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/g;
 
 /** Render inline markdown to React nodes for visual display. */
-export function renderMd(text: string, linkColor: string = '#3b82f6'): React.ReactNode {
-  const parts: React.ReactNode[] = [];
+export function renderMd(text: string, linkColor: string = '#3b82f6'): ComponentChildren {
+  const parts: ComponentChildren[] = [];
   let ki = 0, last = 0;
   for (const m of text.matchAll(new RegExp(INLINE_MD_RE.source, 'g'))) {
     if (m.index! > last) parts.push(text.slice(last, m.index));
@@ -137,8 +137,8 @@ export function extractRuns(el: Element): TextRun[] {
 }
 
 /** Convert runs to a React node, preserving em/strong/br formatting. */
-export function runsToReactNode(runs: TextRun[]): React.ReactNode {
-  const parts: React.ReactNode[] = [];
+export function runsToReactNode(runs: TextRun[]): ComponentChildren {
+  const parts: ComponentChildren[] = [];
   let ki = 0;
   for (const run of runs) {
     if (run.br) { parts.push(<br key={ki++} />); continue; }

@@ -1,5 +1,6 @@
-import React, { useRef } from 'react';
-import { Upload, Globe, Loader2, Clipboard } from 'lucide-react';
+import { useRef } from 'preact/hooks';
+import type { JSX } from 'preact';
+import { Upload, Globe, Loader2, Clipboard } from 'lucide-preact';
 import type { ThemeTokens } from '../theme';
 import BookmarkHistory from './BookmarkHistory';
 import type { BookmarkEntry } from './BookmarkHistory';
@@ -9,14 +10,14 @@ interface LandingCardProps {
   t: ThemeTokens;
   isDragOver: boolean;
   setIsDragOver: (v: boolean) => void;
-  onFileDrop: (e: React.DragEvent<HTMLDivElement> | React.ChangeEvent<HTMLInputElement>) => void;
+  onFileDrop: (e: JSX.TargetedDragEvent<HTMLDivElement> | JSX.TargetedEvent<HTMLInputElement, Event>) => void;
   urlInputValue: string;
   setUrlInputValue: (v: string) => void;
   urlError: string;
   setUrlError: (v: string) => void;
   isUrlLoading: boolean;
   onUrlLoad: (url?: string) => void;
-  onClipboardPaste: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  onClipboardPaste: (e: JSX.TargetedMouseEvent<HTMLButtonElement>) => void;
   showTextInput: boolean;
   setShowTextInput: (v: boolean) => void;
   textInputValue: string;
@@ -56,7 +57,7 @@ export default function LandingCard({
           onClick={() => fileInputRef.current?.click()}
           onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
           onDragLeave={() => setIsDragOver(false)}
-          onDrop={onFileDrop}
+          onDrop={onFileDrop as any}
           style={{ padding: '2.25rem 2rem 2rem', textAlign: 'center', cursor: 'pointer' }}
         >
           <div style={{
@@ -75,7 +76,7 @@ export default function LandingCard({
           <input
             type="file"
             ref={fileInputRef}
-            onChange={onFileDrop}
+            onChange={onFileDrop as any}
             accept="application/pdf,.epub,.md,.markdown,.txt,text/plain"
             style={{ display: 'none' }}
           />

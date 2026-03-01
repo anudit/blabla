@@ -1,7 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { Play, Pause, Loader2, Menu, Sun, Moon, Beaker } from 'lucide-react';
+import { useState, useEffect } from 'preact/hooks';
+import type { JSX } from 'preact';
+import { Play, Pause, Loader2, Menu, Sun, Moon, Beaker } from 'lucide-preact';
 import type { ThemeTokens } from '../theme';
 import { TT, staticStyles, VOICES } from '../theme';
+import {
+  isPlayingSignal, playbackStateSignal, ttsStatusSignal,
+  isModelReadySignal, currentSentenceIndexSignal,
+} from '../signals';
 
 interface BottomBarProps {
   // Theme
@@ -9,21 +14,16 @@ interface BottomBarProps {
   isDarkMode: boolean;
   onToggleTheme: () => void;
   // Playback
-  isPlaying: boolean;
-  isModelReady: boolean;
-  playbackState: string;
   playbackSpeed: number;
   hasSentences: boolean;
   onTogglePlay: () => void;
   onSpeedChange: (speed: number) => void;
-  // TTS status
-  ttsStatus: string;
+  // TTS
   usingFallback: boolean;
   // Voice
   selectedVoice: string;
-  onVoiceChange: (e: React.ChangeEvent<HTMLSelectElement>) => void;
+  onVoiceChange: (e: JSX.TargetedEvent<HTMLSelectElement, Event>) => void;
   // Progress
-  currentSentenceIndex: number;
   sentencesLength: number;
   // Font size
   fontSize: number;
@@ -37,14 +37,21 @@ interface BottomBarProps {
 
 export default function BottomBar({
   t, isDarkMode, onToggleTheme,
-  isPlaying, isModelReady, playbackState, playbackSpeed, hasSentences,
+  playbackSpeed, hasSentences,
   onTogglePlay, onSpeedChange,
-  ttsStatus, usingFallback,
+  usingFallback,
   selectedVoice, onVoiceChange,
-  currentSentenceIndex, sentencesLength,
+  sentencesLength,
   fontSize, onFontSizeChange,
   onTestAudio, onReset, onLogoClick,
 }: BottomBarProps) {
+  // Read signals — BottomBar subscribes independently (no App re-render needed)
+  const isPlaying          = isPlayingSignal.value;
+  const isModelReady       = isModelReadySignal.value;
+  const playbackState      = playbackStateSignal.value;
+  const ttsStatus          = ttsStatusSignal.value;
+  const currentSentenceIndex = currentSentenceIndexSignal.value;
+
   const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [memGb, setMemGb] = useState<number | null>(null);
@@ -63,7 +70,7 @@ export default function BottomBar({
     return () => clearInterval(id);
   }, []);
 
-  const iconButtonStyle: React.CSSProperties = {
+  const iconButtonStyle: JSX.CSSProperties = {
     padding: '0.5rem',
     borderRadius: '0.375rem',
     border: 'none',
@@ -76,7 +83,7 @@ export default function BottomBar({
     transition: TT,
   };
 
-  const speedButtonStyle: React.CSSProperties = {
+  const speedButtonStyle: JSX.CSSProperties = {
     fontSize: '0.8rem',
     fontWeight: 700,
     color: t.barSpeedColor,
@@ -89,7 +96,7 @@ export default function BottomBar({
     transition: TT,
   };
 
-  const popoverBase: React.CSSProperties = {
+  const popoverBase: JSX.CSSProperties = {
     position: 'absolute',
     bottom: 'calc(100% + 10px)',
     overflow: 'hidden',
@@ -216,6 +223,7 @@ export default function BottomBar({
           popoverBase={popoverBase}
           cpuPct={cpuPct}
           memGb={memGb}
+          onClose={() => setIsMenuOpen(false)}
         />
       )}
     </div>
@@ -229,7 +237,7 @@ interface SettingsMenuProps {
   usingFallback: boolean;
   isModelReady: boolean;
   selectedVoice: string;
-  onVoiceChange: (e: React.ChangeEvent<HTMLSelectElement>) => void;
+  onVoiceChange: (e: JSX.TargetedEvent<HTMLSelectElement, Event>) => void;
   playbackState: string;
   currentSentenceIndex: number;
   sentencesLength: number;
@@ -237,9 +245,10 @@ interface SettingsMenuProps {
   onFontSizeChange: (delta: number) => void;
   onTestAudio: () => void;
   onReset: () => void;
-  popoverBase: React.CSSProperties;
+  popoverBase: JSX.CSSProperties;
   cpuPct: number | null;
   memGb: number | null;
+  onClose: () => void;
 }
 
 function SettingsMenu({
@@ -247,12 +256,12 @@ function SettingsMenu({
   selectedVoice, onVoiceChange, playbackState,
   currentSentenceIndex, sentencesLength,
   fontSize, onFontSizeChange, onTestAudio, onReset, popoverBase,
-  cpuPct, memGb,
+  cpuPct, memGb, onClose,
 }: SettingsMenuProps) {
-  const row: React.CSSProperties = { padding: '0.55rem 1rem', display: 'flex', alignItems: 'center' };
+  const row: JSX.CSSProperties = { padding: '0.55rem 1rem', display: 'flex', alignItems: 'center' };
   const divider = <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />;
-  const lbl: React.CSSProperties = { fontSize: '0.75rem', color: t.textMuted, minWidth: '62px' };
-  const val: React.CSSProperties = { fontSize: '0.75rem', fontWeight: 600, color: t.text, fontFamily: 'monospace' };
+  const lbl: JSX.CSSProperties = { fontSize: '0.75rem', color: t.textMuted, minWidth: '62px' };
+  const val: JSX.CSSProperties = { fontSize: '0.75rem', fontWeight: 600, color: t.text, fontFamily: 'monospace' };
   const statusDot = isModelReady && !usingFallback ? '#22c55e' : usingFallback ? '#f59e0b' : '#3b82f6';
 
   return (
@@ -354,7 +363,7 @@ function SettingsMenu({
           <Beaker size={13} /> Test Voice
         </button>
         <button
-          onClick={() => { setIsMenuOpen(false); onReset(); }}
+          onClick={() => { onClose(); onReset(); }}
           style={{
             padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500,
             backgroundColor: 'transparent', color: '#ef4444',

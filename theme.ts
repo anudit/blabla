@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react';
+import type { JSX } from 'preact';
 
 export const VOICES = [
   { value: 'af_bella', label: 'Bella (Eng F)' },
@@ -8,24 +8,24 @@ export const VOICES = [
 ];
 
 export const staticStyles = {
-  canvas: { display: 'block', width: '100%', height: 'auto' } as CSSProperties,
+  canvas: { display: 'block', width: '100%', height: 'auto' } as JSX.CSSProperties,
   overlay: {
     position: 'absolute' as const, top: 0, left: 0, right: 0, bottom: 0,
     zIndex: 10, pointerEvents: 'none' as const,
-  } as CSSProperties,
+  } as JSX.CSSProperties,
   lineBase: {
     position: 'absolute' as const, cursor: 'pointer', borderRadius: '2px',
     backgroundColor: 'transparent', transition: 'background-color 0.2s ease',
     pointerEvents: 'auto' as const,
-  } as CSSProperties,
-  buttonDisabled: { opacity: 0.5, cursor: 'not-allowed' as const, filter: 'grayscale(1)' } as CSSProperties,
+  } as JSX.CSSProperties,
+  buttonDisabled: { opacity: 0.5, cursor: 'not-allowed' as const, filter: 'grayscale(1)' } as JSX.CSSProperties,
   playButton: {
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     width: '42px', height: '42px', borderRadius: '50%',
     backgroundColor: '#2563eb', color: 'white', border: 'none', cursor: 'pointer' as const,
     boxShadow: '0 2px 4px rgba(37,99,235,0.3)', transition: 'transform 0.1s',
     flexShrink: 0,
-  } as CSSProperties,
+  } as JSX.CSSProperties,
   statusLoading: { color: '#2563eb', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe' },
   statusReady:   { color: '#059669', backgroundColor: '#d1fae5', border: '1px solid #6ee7b7' },
   statusFallback:{ color: '#d97706', backgroundColor: '#fef3c7', border: '1px solid #fde68a' },

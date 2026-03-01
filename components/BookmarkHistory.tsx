@@ -1,5 +1,4 @@
-import React from 'react';
-import { Clock, Trash2, BookOpen, FileText, Globe } from 'lucide-react';
+import { Clock, Trash2, BookOpen, FileText, Globe } from 'lucide-preact';
 
 export interface BookmarkEntry {
   id: string;

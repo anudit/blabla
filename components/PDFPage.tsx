@@ -1,16 +1,17 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'preact/hooks';
+import type { JSX } from 'preact';
 import { staticStyles } from '../theme';
 
 interface PDFPageProps {
   data: any;
   pdfDoc: any;
   onLineClick: (lineId: number) => void;
-  pageContainerStyle: React.CSSProperties;
+  pageContainerStyle: JSX.CSSProperties;
 }
 
 // Lazy canvas rendering via IntersectionObserver — pages outside the viewport
 // are cleaned up to free GPU/bitmap memory, and re-rendered when scrolled into view.
-const PDFPage = React.memo(({ data, pdfDoc, onLineClick, pageContainerStyle }: PDFPageProps) => {
+const PDFPage = ({ data, pdfDoc, onLineClick, pageContainerStyle }: PDFPageProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<any>(null);
@@ -109,6 +110,6 @@ const PDFPage = React.memo(({ data, pdfDoc, onLineClick, pageContainerStyle }: P
       </div>
     </div>
   );
-}, (prev, next) => prev.data.pageNumber === next.data.pageNumber && prev.pdfDoc === next.pdfDoc);
+};
 
 export default PDFPage;

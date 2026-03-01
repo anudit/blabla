@@ -15,7 +15,8 @@ export const staticStyles = {
   } as JSX.CSSProperties,
   lineBase: {
     position: 'absolute' as const, cursor: 'pointer', borderRadius: '2px',
-    backgroundColor: 'transparent', transition: 'background-color 0.2s ease',
+    // REMOVED backgroundColor: 'transparent' to prevent specificity wars with classes
+    transition: 'background-color 0.2s ease',
     pointerEvents: 'auto' as const,
   } as JSX.CSSProperties,
   buttonDisabled: { opacity: 0.5, cursor: 'not-allowed' as const, filter: 'grayscale(1)' } as JSX.CSSProperties,

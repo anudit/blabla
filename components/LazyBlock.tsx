@@ -1,14 +1,30 @@
 import type { ComponentChildren, JSX } from 'preact';
 
+interface LazyBlockProps {
+  id: string;
+  // These are kept in props for future metadata needs, 
+  // but we no longer need to "force" renders since we aren't unmounting.
+  startLineId?: number;
+  endLineId?: number;
+  children: ComponentChildren;
+}
+
 const lazyBlockStyle: JSX.CSSProperties = {
+  // CRITICAL: content-visibility: auto is the "silver bullet".
+  // It stops the browser from painting/laying out off-screen blocks,
+  // BUT it keeps the text in the DOM so Ctrl+F (browser search) still works perfectly.
   contentVisibility: 'auto' as any,
-  containIntrinsicSize: 'auto 200px' as any,
+  // We provide a hint to the browser about the block size to prevent scrollbar jumping.
+  containIntrinsicSize: 'auto 100px' as any,
+  margin: '0 0 1em 0',
 };
 
-// Skip rendering off-screen EPUB/text content via CSS content-visibility:auto.
-// Keeps the DOM intact for Cmd+F and getElementById-based scroll-to-resume.
-const LazyBlock = ({ children }: { children: ComponentChildren }) => (
-  <div style={lazyBlockStyle}>{children}</div>
-);
+const LazyBlock = ({ children }: LazyBlockProps) => {
+  return (
+    <div style={lazyBlockStyle}>
+      {children}
+    </div>
+  );
+};
 
 export default LazyBlock;

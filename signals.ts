@@ -14,3 +14,4 @@ export const playbackSpeedSignal        = signal(1.0);
 export const selectedVoiceSignal        = signal('af_bella');
 export const currentFileIdSignal        = signal<string | null>(null);
 export const currentFileNameSignal      = signal<string | null>(null);
+export const outlineSignal              = signal<any[]>([]);

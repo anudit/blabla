@@ -53,9 +53,9 @@ const processElements = (
   }
 };
 
-export const loadMarkdown = (
+export const loadMarkdown = async (
   raw: string,
-  setEpubContent: (data: any[]) => void,
+  onChunk: (sentences: any[], content: any[], outline: any[], isFinal: boolean) => void,
   setShowTextInput: (show: boolean) => void,
   setTextInputValue: (val: string) => void
 ) => {
@@ -123,60 +123,77 @@ export const loadMarkdown = (
     }
   };
 
-  for (const line of content.split('\n')) {
+  const lines = content.split('\n');
+  let _lastYield = performance.now();
+  let hasYieldedInitial = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (/^(`{3,}|~{3,})/.test(line)) {
       if (!inFence) { flushPara(); inFence = true; fenceLines = []; }
       else { inFence = false; contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n'), headerId: currentHeaderId }); }
-      continue;
+    } else if (inFence) {
+      fenceLines.push(line);
+    } else {
+      const hm = line.match(/^(#{1,6})\s+(.+)$/);
+      if (hm) {
+        flushPara();
+        currentHeaderId = `header-${idCounter++}`;
+        const headText = stripMd(hm[2].replace(/\s+#+\s*$/, '').trim());
+        contentData.push({ type: 'header', id: currentHeaderId, text: headText, level: hm[1].length });
+        outline.push({ id: currentHeaderId, text: headText, level: hm[1].length });
+      } else if (/^\s{0,3}([-*_]\s*){3,}$/.test(line) && !/\w/.test(line)) {
+        flushPara(); contentData.push({ type: 'hr', id: `hr-${idCounter++}` });
+      } else if (!line.trim()) {
+        flushPara(); flushTable();
+      } else if (line.includes('|')) {
+        flushPara(); tableLines.push(line);
+      } else {
+        if (tableLines.length) flushTable();
+        const imgM = line.match(/^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/);
+        if (imgM) { flushPara(); contentData.push({ type: 'image', id: `img-${idCounter++}`, src: imgM[2], alt: imgM[1], headerId: currentHeaderId }); }
+        else {
+          const li = line.match(/^\s*(?:[-*+]|\d+[.)]) (.*)/);
+          if (li) {
+            const t = li[1].trim().replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
+            if (t) paraLines.push(/[.!?:;]$/.test(t) ? t : t + '.');
+          } else {
+            const bq = line.match(/^>\s*(.*)/);
+            if (bq) paraLines.push(bq[1]);
+            else paraLines.push(line);
+          }
+        }
+      }
     }
-    if (inFence) { fenceLines.push(line); continue; }
-    const hm = line.match(/^(#{1,6})\s+(.+)$/);
-    if (hm) {
-      flushPara();
-      currentHeaderId = `header-${idCounter++}`;
-      const headText = stripMd(hm[2].replace(/\s+#+\s*$/, '').trim());
-      contentData.push({ type: 'header', id: currentHeaderId, text: headText, level: hm[1].length });
-      outline.push({ id: currentHeaderId, text: headText, level: hm[1].length });
-      continue;
+
+    const isFinal = i === lines.length - 1;
+    if (isFinal || performance.now() - _lastYield > 50) {
+      if (isFinal) { flushTable(); flushPara(); }
+      onChunk([...newSentences], [...contentData], [...outline], isFinal);
+      hasYieldedInitial = true;
+      _lastYield = performance.now();
+      await new Promise<void>(r => setTimeout(r, 0));
     }
-    if (/^\s{0,3}([-*_]\s*){3,}$/.test(line) && !/\w/.test(line)) { flushPara(); contentData.push({ type: 'hr', id: `hr-${idCounter++}` }); continue; }
-    if (!line.trim()) { flushPara(); flushTable(); continue; }
-    if (line.includes('|')) { flushPara(); tableLines.push(line); continue; }
-    if (tableLines.length) flushTable();
-    const imgM = line.match(/^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/);
-    if (imgM) { flushPara(); contentData.push({ type: 'image', id: `img-${idCounter++}`, src: imgM[2], alt: imgM[1], headerId: currentHeaderId }); continue; }
-    const li = line.match(/^\s*(?:[-*+]|\d+[.)]) (.*)/);
-    if (li) {
-      const t = li[1].trim().replace(/!\[[^\]]*\]\([^)]+\)/g, '').trim();
-      if (t) paraLines.push(/[.!?:;]$/.test(t) ? t : t + '.');
-      continue;
-    }
-    const bq = line.match(/^>\s*(.*)/);
-    if (bq) { paraLines.push(bq[1]); continue; }
-    paraLines.push(line);
   }
-  if (inFence) contentData.push({ type: 'code', id: `code-${idCounter++}`, text: fenceLines.join('\n') });
-  flushTable(); flushPara();
-  if (!newSentences.length) return;
-  fileTypeSignal.value = 'text';
-  outlineSignal.value = outline;
-  sentencesSignal.value = newSentences;
-  setEpubContent(contentData);
+
   setShowTextInput(false);
   setTextInputValue('');
 };
 
-export const loadText = (
+export const loadText = async (
   text: string,
-  setEpubContent: (data: any[]) => void,
+  onChunk: (sentences: any[], content: any[], outline: any[], isFinal: boolean) => void,
   setShowTextInput: (show: boolean) => void,
   setTextInputValue: (val: string) => void
 ) => {
-  if (isMarkdown(text)) { loadMarkdown(text, setEpubContent, setShowTextInput, setTextInputValue); return; }
+  if (isMarkdown(text)) { await loadMarkdown(text, onChunk, setShowTextInput, setTextInputValue); return; }
   const newSentences: any[] = [], contentData: any[] = [];
   let globalLineIdCounter = 0;
   const paragraphs = text.split(/\n{2,}/).map(p => p.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim()).filter(p => p.length > 0);
-  for (const paraText of paragraphs) {
+  
+  let _lastYield = performance.now();
+  for (let i = 0; i < paragraphs.length; i++) {
+    const paraText = paragraphs[i];
     const startLineId = globalLineIdCounter;
     const paraId = `para-${globalLineIdCounter}`, paraSentences: any[] = [];
     for (const sText of extractSentences(paraText)) {
@@ -190,12 +207,14 @@ export const loadText = (
         startLineId, endLineId: globalLineIdCounter - 1
       });
     }
+
+    const isFinal = i === paragraphs.length - 1;
+    if (isFinal || performance.now() - _lastYield > 50) {
+      onChunk([...newSentences], [...contentData], [], isFinal);
+      _lastYield = performance.now();
+      await new Promise<void>(r => setTimeout(r, 0));
+    }
   }
-  if (newSentences.length === 0) return;
-  fileTypeSignal.value = 'text';
-  outlineSignal.value = [];
-  sentencesSignal.value = newSentences;
-  setEpubContent(contentData);
   setShowTextInput(false);
   setTextInputValue('');
 };
@@ -238,6 +257,7 @@ export const loadEPUB = async (
     const state = { globalLineIdCounter: 0, lastAddedHeaderText: null as string | null, allSentences: [] as any[], allContent: [] as any[], allOutline: [] as any[] };
     const normalizePath = (path: string) => { const parts = path.split('/'), res: string[] = []; for (const p of parts) { if (p === '..') res.pop(); else if (p !== '.') res.push(p); } return res.join('/'); };
     let _lastYield = performance.now();
+    let hasYieldedInitial = false;
 
     for (let i = 0; i < spineIds.length; i++) {
       const id = spineIds[i], href = manifest[id]; if (!href) continue;
@@ -258,10 +278,14 @@ export const loadEPUB = async (
       const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote')), elementsToProcess = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
       processElements(elementsToProcess, chapterTitle, state);
       
-      onChunk([...state.allSentences], [...state.allContent], [...state.allOutline], i === spineIds.length - 1);
-      if (performance.now() - _lastYield > 30) {
-        await new Promise<void>(r => setTimeout(r, 0));
+      const isFinal = i === spineIds.length - 1;
+      // Yield every chapter, or even more aggressively if it's the very first one
+      if (!hasYieldedInitial || isFinal || performance.now() - _lastYield > 50) {
+        onChunk([...state.allSentences], [...state.allContent], [...state.allOutline], isFinal);
+        hasYieldedInitial = true;
         _lastYield = performance.now();
+        // Force a small break to allow the UI to render the chunk
+        await new Promise<void>(r => setTimeout(r, 0));
       }
     }
   } catch (e) { console.error(e); alert("Could not load EPUB file"); } finally { setIsDocLoading(false); }
@@ -320,15 +344,26 @@ export const loadMOBI = async (
     const doc = new DOMParser().parseFromString(fullHtml, 'text/html');
     const state = { globalLineIdCounter: 0, lastAddedHeaderText: null as string | null, allSentences: [] as any[], allContent: [] as any[], allOutline: [] as any[] };
     const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote')), elementsToProcess = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
-    processElements(elementsToProcess, null, state);
-    onChunk(state.allSentences, state.allContent, state.allOutline, true);
+    
+    let _lastYield = performance.now();
+    const chunkSize = 100;
+    for (let i = 0; i < elementsToProcess.length; i += chunkSize) {
+      const chunk = elementsToProcess.slice(i, i + chunkSize);
+      processElements(chunk, null, state);
+      
+      const isFinal = i + chunkSize >= elementsToProcess.length;
+      if (isFinal || performance.now() - _lastYield > 50) {
+        onChunk([...state.allSentences], [...state.allContent], [...state.allOutline], isFinal);
+        _lastYield = performance.now();
+        await new Promise<void>(r => setTimeout(r, 0));
+      }
+    }
   } catch (e) { console.error(e); alert("Could not load MOBI file"); } finally { setIsDocLoading(false); }
 };
 
 export const loadPDF = async (
   data: ArrayBuffer,
-  setPdfDoc: (doc: any) => void,
-  setPages: (pages: any[]) => void,
+  onChunk: (sentences: any[], pages: any[], pdfDoc: any, isFinal: boolean) => void,
   setIsDocLoading: (loading: boolean) => void
 ) => {
   setIsDocLoading(true);
@@ -336,29 +371,47 @@ export const loadPDF = async (
     const pdfjsLib = await import('pdfjs-dist');
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
     const doc = await pdfjsLib.getDocument(data).promise;
-    const pageResults = await Promise.all(Array.from({ length: doc.numPages }, (_, i) => doc.getPage(i + 1)));
     const scale = Math.min(window.devicePixelRatio || 1, 2);
-    const newPages = pageResults.map((page, i) => ({ viewport: page.getViewport({ scale }), lines: [], pageNumber: i + 1 }));
+    
     const globalLineList: any[] = [];
-    for (let i = 0; i < doc.numPages; i++) {
-      const page = pageResults[i], textContent = await page.getTextContent();
-      const lines = processTextContent(textContent, scale, globalLineList.length, pdfjsLib, newPages[i].viewport);
-      globalLineList.push(...lines); newPages[i].lines = lines; page.cleanup();
-      if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
+    const allPages: any[] = [];
+    const sentenceRegex = /[^.!?]+[.!?]/g;
+
+    let _lastYield = performance.now();
+
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const textContent = await page.getTextContent();
+      const viewport = page.getViewport({ scale });
+      const lines = processTextContent(textContent, scale, globalLineList.length, pdfjsLib, viewport);
+      
+      globalLineList.push(...lines);
+      allPages.push({ viewport, lines, pageNumber: i });
+      page.cleanup();
+
+      const isFinal = i === doc.numPages;
+      if (isFinal || performance.now() - _lastYield > 100 || i === 1) {
+        // Recalculate sentences based on what we have so far
+        const fullText = globalLineList.map(l => l.text).join(' ');
+        let match, sentenceTexts: { text: string; start: number; end: number }[] = [];
+        sentenceRegex.lastIndex = 0;
+        while ((match = sentenceRegex.exec(fullText)) !== null) {
+          sentenceTexts.push({ text: match[0].trim(), start: match.index, end: match.index + match[0].length });
+        }
+        
+        let cumPos = 0; 
+        globalLineList.forEach(line => { line.startPos = cumPos; cumPos += line.text.length + 1; });
+        
+        const newSentences = sentenceTexts.map(sent => {
+          const sentLines = globalLineList.filter(line => line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start).map(line => line.id);
+          return { text: sent.text, lines: sentLines };
+        }).filter(sent => sent.text && sent.lines.length > 0);
+
+        onChunk(newSentences, [...allPages], doc, isFinal);
+        _lastYield = performance.now();
+        await new Promise(r => setTimeout(r, 0));
+      }
     }
-    const fullText = globalLineList.map(l => l.text).join(' '), sentenceRegex = /[^.!?]+[.!?]/g;
-    let match, sentenceTexts: { text: string; start: number; end: number }[] = [];
-    while ((match = sentenceRegex.exec(fullText)) !== null) sentenceTexts.push({ text: match[0].trim(), start: match.index, end: match.index + match[0].length });
-    let cumPos = 0; globalLineList.forEach(line => { line.startPos = cumPos; cumPos += line.text.length + 1; });
-    const newSentences = sentenceTexts.map(sent => {
-      const sentLines = globalLineList.filter(line => line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start).map(line => line.id);
-      return { text: sent.text, lines: sentLines };
-    }).filter(sent => sent.text && sent.lines.length > 0);
-    fileTypeSignal.value = 'pdf';
-    outlineSignal.value = [];
-    sentencesSignal.value = newSentences;
-    setPdfDoc(doc); 
-    setPages(newPages); 
   } catch (e) { console.error(e); } finally { setIsDocLoading(false); }
 };
 

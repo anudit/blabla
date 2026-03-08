@@ -1,8 +1,9 @@
 import { Fragment } from 'preact';
 import { memo } from 'preact/compat';
 import type { JSX } from 'preact';
+import { useComputed } from '@preact/signals';
 import type { Signal } from '@preact/signals';
-import { outlineSignal } from '../signals';
+import { outlineSignal, currentSentenceIndexSignal } from '../signals';
 import type { ThemeTokens } from '../theme';
 import { TT } from '../theme';
 import { renderMd } from '../utils';
@@ -88,6 +89,14 @@ const RenderItem = memo(({ item, t, isDarkMode, lc }: any) => {
   if (item.type === 'paragraph') {
     const isBlockquote = item.elementType === 'blockquote';
     const isList = item.elementType === 'li';
+
+    // OPTIMIZATION: Only subscribe to currentSentenceIndexSignal if it's within this paragraph's range
+    // This prevents all 53k sentences from re-rendering on every index change.
+    const isActive = useComputed(() => {
+      const idx = currentSentenceIndexSignal.value;
+      return idx >= (item.startLineId ?? -1) && idx <= (item.endLineId ?? -1);
+    });
+
     return (
       <LazyBlock id={item.id} startLineId={item.startLineId} endLineId={item.endLineId}>
         <p style={{
@@ -97,14 +106,7 @@ const RenderItem = memo(({ item, t, isDarkMode, lc }: any) => {
         }}>
           {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' }}>•</span>}
           {item.sentences.map((s: any) => (
-            <span 
-              key={s.id} 
-              id={`line-${s.id}`} 
-              data-line-id={s.id} 
-              style={{ cursor: 'pointer', padding: '2px 0', transition: `background-color 0.2s, ${TT}`, borderRadius: '4px' }}
-            >
-              {s.text}{' '}
-            </span>
+            <SentenceItem key={s.id} s={s} isActive={isActive} />
           ))}
         </p>
       </LazyBlock>
@@ -160,3 +162,26 @@ const RenderItem = memo(({ item, t, isDarkMode, lc }: any) => {
   if (item.type === 'hr') return <hr style={{ border: 'none', borderTop: `1px solid ${t.statBorder}`, margin: '1.5rem 0', opacity: 0.5 }} />;
   return null;
 });
+
+const SentenceItem = ({ s, isActive }: { s: any, isActive: Signal<boolean> }) => {
+  // Only the active paragraph re-renders its sentences, and even then, 
+  // we check if this specific sentence is the active one.
+  const isSelected = useComputed(() => isActive.value && currentSentenceIndexSignal.value === s.id);
+  
+  return (
+    <span 
+      id={`line-${s.id}`} 
+      data-line-id={s.id} 
+      style={{ 
+        cursor: 'pointer', 
+        padding: '2px 0', 
+        transition: `background-color 0.2s, ${TT}`, 
+        borderRadius: '4px',
+        // Optional: you could add a local "active" style here too, 
+        // though the global observer handles the DOM injection for word-level spans.
+      }}
+    >
+      {s.text}{' '}
+    </span>
+  );
+};

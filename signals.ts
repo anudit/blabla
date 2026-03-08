@@ -15,3 +15,29 @@ export const selectedVoiceSignal        = signal('af_bella');
 export const currentFileIdSignal        = signal<string | null>(null);
 export const currentFileNameSignal      = signal<string | null>(null);
 export const outlineSignal              = signal<any[]>([]);
+
+if (process.env.NODE_ENV !== 'production') {
+  // @ts-ignore
+  import('signals-devtool-provider').then(({ default: signalsDevtool }) => {
+    import('@preact/signals').then(({ effect }) => {
+      signalsDevtool.init({
+        signals: {
+          isPlayingSignal,
+          playbackStateSignal,
+          ttsStatusSignal,
+          isModelReadySignal,
+          currentSentenceIndexSignal,
+          restartSignal,
+          sentencesSignal,
+          fileTypeSignal,
+          playbackSpeedSignal,
+          selectedVoiceSignal,
+          currentFileIdSignal,
+          currentFileNameSignal,
+          outlineSignal,
+        },
+        effect,
+      });
+    });
+  });
+}

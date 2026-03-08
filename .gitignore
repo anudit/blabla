@@ -34,3 +34,5 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 dist
 note.txt
 .claude
+.agents
+skills-lock.json

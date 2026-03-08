@@ -17,6 +17,9 @@ const result = await build({
   target: "browser",
   minify: true,
   metafile: true,
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production"),
+  },
 });
 await Bun.write("./dist/meta.json", JSON.stringify(result.metafile));
 
@@ -26,6 +29,9 @@ await build({
   outdir: "./dist",
   target: "browser",
   minify: true,
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production"),
+  },
 });
 
 console.log("📂 Copying Static Assets...");

@@ -58,6 +58,7 @@ export default function App() {
   const isResuming = useRef(false);
   const nextStartTimeRef = useRef(0);
   const lastActiveSentenceRef = useRef<{ id: number, text: string } | null>(null);
+  const prevIndexRef = useRef<number>(-1);
 
   const t = isDarkMode ? THEMES.dark : THEMES.light;
   
@@ -114,20 +115,24 @@ export default function App() {
   // MASTER OBSERVER: Centralized highlight + DOM swap + scroll
   useSignalEffect(() => {
     const idx = currentSentenceIndexSignal.value, sents = sentencesSignal.value, fType = fileTypeSignal.value;
+    const prevIdx = prevIndexRef.current;
     
-    // 1. Cleanup previous highlights
-    document.querySelectorAll('.epub-highlight-active, .word-highlight-active, .pdf-highlight-active').forEach(el => {
-      el.classList.remove('epub-highlight-active', 'word-highlight-active', 'pdf-highlight-active');
-    });
-    
-    // 2. Restore previous active sentence to flat text (EPUB/Text only)
-    if (lastActiveSentenceRef.current && fType !== 'pdf') {
-      const el = document.getElementById(`line-${lastActiveSentenceRef.current.id}`);
-      if (el) el.textContent = lastActiveSentenceRef.current.text + ' ';
-      lastActiveSentenceRef.current = null;
+    // 1. Cleanup previous highlight (Targeted instead of querySelectorAll)
+    if (prevIdx >= 0 && sents[prevIdx]) {
+      const prevUnit = sents[prevIdx];
+      prevUnit.lines.forEach((id: number) => {
+        const el = document.getElementById(`line-${id}`);
+        if (el) {
+          el.classList.remove('epub-highlight-active', 'pdf-highlight-active');
+          // Note: Text restoration is now handled automatically by SentenceItem re-rendering
+        }
+      });
+      // Also cleanup word highlights if any
+      document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
     }
 
     const unit = sents[idx];
+    prevIndexRef.current = idx;
     if (idx < 0 || !unit) return;
 
     // 3. Apply highlight
@@ -142,6 +147,7 @@ export default function App() {
         (el.textContent === '' && el.closest('p') ? el.closest('p')! : el).classList.add('epub-highlight-active');
         
         // 4. EPUB Special: Inject word spans for granular highlighting
+        // We only do this for the first line of the active sentence
         if (id === unit.lines[0]) {
           lastActiveSentenceRef.current = { id, text: unit.text };
           const words = extractWords(unit.text);
@@ -191,7 +197,15 @@ export default function App() {
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       const t = (e.clipboardData?.getData('text') ?? '').trim();
       if (!t) return; e.preventDefault();
-      if (/^https?:\/\/\S+$/.test(t)) handleUrlLoad(t); else loadText(t, setEpubContent, setShowTextInput, setTextInputValue);
+      if (/^https?:\/\/\S+$/.test(t)) handleUrlLoad(t); else loadText(t, (sents, content, outline, isFinal) => {
+        sentencesSignal.value = sents;
+        setEpubContent(content);
+        outlineSignal.value = outline;
+        if (!fileTypeSignal.value && (sents.length > 5 || isFinal)) {
+          fileTypeSignal.value = 'text';
+          setIsDocLoading(false);
+        }
+      }, setShowTextInput, setTextInputValue);
     };
     window.addEventListener('paste', h); return () => window.removeEventListener('paste', h);
   }, []);
@@ -343,13 +357,35 @@ export default function App() {
       const fid = `${file.name}:${file.size}`; currentFileIdSignal.value = fid; currentFileNameSignal.value = file.name;
       const exist = getBookmarks().find(b => b.id === fid); if (exist) pendingResumeRef.current = exist.sentenceIndex;
       const r = new FileReader();
-      if (file.type === 'application/pdf') { r.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer, setPdfDoc, setPages, setIsDocLoading); r.readAsArrayBuffer(file); }
+      if (file.type === 'application/pdf') { 
+        r.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer, (sents, pdfPages, pdfDocObj, isFinal) => {
+          sentencesSignal.value = sents;
+          setPages(pdfPages);
+          setPdfDoc(pdfDocObj);
+          const resumeIdx = pendingResumeRef.current;
+          const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+            fileTypeSignal.value = 'pdf';
+            setIsDocLoading(false);
+          }
+        }, setIsDocLoading); 
+        r.readAsArrayBuffer(file); 
+      }
       else if (file.type === 'application/epub+zip' || file.name.endsWith('.epub')) { 
         r.onload = (ev) => loadEPUB(ev.target?.result as ArrayBuffer, (sents, content, outline, isFinal) => {
           sentencesSignal.value = sents;
           setEpubContent(content);
           outlineSignal.value = outline;
-          if (isFinal) fileTypeSignal.value = 'epub';
+          
+          // CRITICAL: First chunk received, or we've reached the pending resume index.
+          // Activate UI immediately and keep parsing in background.
+          const resumeIdx = pendingResumeRef.current;
+          const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+          
+          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+            fileTypeSignal.value = 'epub';
+            setIsDocLoading(false);
+          }
         }, setIsDocLoading); 
         r.readAsArrayBuffer(file); 
       }
@@ -358,12 +394,45 @@ export default function App() {
           sentencesSignal.value = sents;
           setEpubContent(content);
           outlineSignal.value = outline;
-          if (isFinal) fileTypeSignal.value = 'epub';
+          
+          const resumeIdx = pendingResumeRef.current;
+          const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+          
+          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+            fileTypeSignal.value = 'epub';
+            setIsDocLoading(false);
+          }
         }, setIsDocLoading);
         r.readAsArrayBuffer(file);
       }
-      else if (file.name.endsWith('.md') || file.name.endsWith('.markdown')) { r.onload = (ev) => loadMarkdown(ev.target?.result as string, setEpubContent, setShowTextInput, setTextInputValue); r.readAsText(file); }
-      else { r.onload = (ev) => loadText(ev.target?.result as string, setEpubContent, setShowTextInput, setTextInputValue); r.readAsText(file); }
+      else if (file.name.endsWith('.md') || file.name.endsWith('.markdown')) { 
+        r.onload = (ev) => loadMarkdown(ev.target?.result as string, (sents, content, outline, isFinal) => {
+          sentencesSignal.value = sents;
+          setEpubContent(content);
+          outlineSignal.value = outline;
+          const resumeIdx = pendingResumeRef.current;
+          const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+            fileTypeSignal.value = 'text';
+            setIsDocLoading(false);
+          }
+        }, setShowTextInput, setTextInputValue); 
+        r.readAsText(file); 
+      }
+      else { 
+        r.onload = (ev) => loadText(ev.target?.result as string, (sents, content, outline, isFinal) => {
+          sentencesSignal.value = sents;
+          setEpubContent(content);
+          outlineSignal.value = outline;
+          const resumeIdx = pendingResumeRef.current;
+          const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+            fileTypeSignal.value = 'text';
+            setIsDocLoading(false);
+          }
+        }, setShowTextInput, setTextInputValue); 
+        r.readAsText(file); 
+      }
     }
   };
 
@@ -377,7 +446,18 @@ export default function App() {
       const title = md.match(/^Title:\s*(.+)/m)?.[1].trim() || new URL(url).hostname;
       currentFileIdSignal.value = url; currentFileNameSignal.value = title;
       const exist = getBookmarks().find(b => b.id === url); if (exist) pendingResumeRef.current = exist.sentenceIndex;
-      setUrlInputValue(''); loadMarkdown(md, setEpubContent, setShowTextInput, setTextInputValue);
+      setUrlInputValue(''); 
+      loadMarkdown(md, (sents, content, outline, isFinal) => {
+        sentencesSignal.value = sents;
+        setEpubContent(content);
+        outlineSignal.value = outline;
+        const resumeIdx = pendingResumeRef.current;
+        const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+        if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+          fileTypeSignal.value = 'text';
+          setIsDocLoading(false);
+        }
+      }, setShowTextInput, setTextInputValue);
     } catch (err: any) { setUrlError(err.message || 'Load failed'); } finally { setIsUrlLoading(false); }
   };
 
@@ -389,7 +469,7 @@ export default function App() {
           <span>{currentFileNameSignal.value ? `Loading ${currentFileNameSignal.value}…` : 'Loading…'}</span>
         </div>
       ) : !hasSentences.value ? (
-        <Suspense fallback={null}><LandingCard isDarkMode={isDarkMode} t={t} isDragOver={isDragOver} setIsDragOver={setIsDragOver} onFileDrop={handleFileDrop} urlInputValue={urlInputValue} setUrlInputValue={setUrlInputValue} urlError={urlError} setUrlError={setUrlError} isUrlLoading={isUrlLoading} onUrlLoad={handleUrlLoad} onClipboardPaste={async (e: any) => { e.stopPropagation(); try { const t = await navigator.clipboard.readText(); if (/^https?:\/\/\S+$/.test(t)) handleUrlLoad(t); else if (t) loadText(t, setEpubContent, setShowTextInput, setTextInputValue); else setShowTextInput(true); } catch { setShowTextInput(true); } }} showTextInput={showTextInput} setShowTextInput={setShowTextInput} textInputValue={textInputValue} setTextInputValue={setTextInputValue} onLoadText={(t: string) => loadText(t, setEpubContent, setShowTextInput, setTextInputValue)} bookmarks={bookmarks} onSelectBookmark={(e: any) => e.fileType === 'url' && e.url && handleUrlLoad(e.url)} onDeleteBookmark={(id: string) => { removeBookmark(id); setBookmarks(getBookmarks()); }} /></Suspense>
+        <Suspense fallback={null}><LandingCard isDarkMode={isDarkMode} t={t} isDragOver={isDragOver} setIsDragOver={setIsDragOver} onFileDrop={handleFileDrop} urlInputValue={urlInputValue} setUrlInputValue={setUrlInputValue} urlError={urlError} setUrlError={setUrlError} isUrlLoading={isUrlLoading} onUrlLoad={handleUrlLoad} onClipboardPaste={async (e: any) => { e.stopPropagation(); try { const t = await navigator.clipboard.readText(); if (/^https?:\/\/\S+$/.test(t)) handleUrlLoad(t); else if (t) loadText(t, (sents, content, outline, isFinal) => { sentencesSignal.value = sents; setEpubContent(content); outlineSignal.value = outline; if (!fileTypeSignal.value && (sents.length > 5 || isFinal)) { fileTypeSignal.value = 'text'; setIsDocLoading(false); } }, setShowTextInput, setTextInputValue); else setShowTextInput(true); } catch { setShowTextInput(true); } }} showTextInput={showTextInput} setShowTextInput={setShowTextInput} textInputValue={textInputValue} setTextInputValue={setTextInputValue} onLoadText={(t: string) => loadText(t, (sents, content, outline, isFinal) => { sentencesSignal.value = sents; setEpubContent(content); outlineSignal.value = outline; if (!fileTypeSignal.value && (sents.length > 5 || isFinal)) { fileTypeSignal.value = 'text'; setIsDocLoading(false); } }, setShowTextInput, setTextInputValue)} bookmarks={bookmarks} onSelectBookmark={(e: any) => e.fileType === 'url' && e.url && handleUrlLoad(e.url)} onDeleteBookmark={(id: string) => { removeBookmark(id); setBookmarks(getBookmarks()); }} /></Suspense>
       ) : (
         <Suspense fallback={null}><ContentViewer fileType={fileTypeSignal.peek()!} pages={pages} pdfDoc={pdfDoc} epubContent={epubContent} activeHeaderId={activeHeaderId} isDarkMode={isDarkMode} t={t} fontSize={fontSize} onLineClick={handleLineClick} /></Suspense>
       )}

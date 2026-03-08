@@ -9,6 +9,9 @@ const server = serve({
         entrypoints: ["./frontend.tsx"],
         target: "browser",
         minify: process.env.NODE_ENV === "production",
+        define: {
+          "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "development"),
+        },
       });
       return new Response(build.outputs[0], {
         headers: { 'Content-Type': 'application/javascript' }
@@ -21,6 +24,9 @@ const server = serve({
         entrypoints: ["./tts.worker.ts"],
         target: "browser",
         minify: process.env.NODE_ENV === "production",
+        define: {
+          "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "development"),
+        },
       });
       return new Response(build.outputs[0], {
         headers: { 'Content-Type': 'application/javascript' }

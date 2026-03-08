@@ -12,7 +12,7 @@ import {
 import { THEMES, TT } from './theme';
 import { calculateWordTimings, extractWords } from './utils';
 import {
-  loadMarkdown, loadText, loadEPUB, loadPDF
+  loadMarkdown, loadText, loadEPUB, loadPDF, loadMOBI
 } from './loaders';
 import { getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
 import type { BookmarkEntry } from './components/BookmarkHistory';
@@ -352,6 +352,15 @@ export default function App() {
           if (isFinal) fileTypeSignal.value = 'epub';
         }, setIsDocLoading); 
         r.readAsArrayBuffer(file); 
+      }
+      else if (file.name.endsWith('.mobi') || file.name.endsWith('.azw') || file.name.endsWith('.azw3')) {
+        r.onload = (ev) => loadMOBI(ev.target?.result as ArrayBuffer, (sents, content, outline, isFinal) => {
+          sentencesSignal.value = sents;
+          setEpubContent(content);
+          outlineSignal.value = outline;
+          if (isFinal) fileTypeSignal.value = 'epub';
+        }, setIsDocLoading);
+        r.readAsArrayBuffer(file);
       }
       else if (file.name.endsWith('.md') || file.name.endsWith('.markdown')) { r.onload = (ev) => loadMarkdown(ev.target?.result as string, setEpubContent, setShowTextInput, setTextInputValue); r.readAsText(file); }
       else { r.onload = (ev) => loadText(ev.target?.result as string, setEpubContent, setShowTextInput, setTextInputValue); r.readAsText(file); }

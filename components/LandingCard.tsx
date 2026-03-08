@@ -71,13 +71,13 @@ export default function LandingCard({
             Drop a file to start reading
           </p>
           <p style={{ fontSize: '0.75rem', color: t.textMuted, margin: 0, letterSpacing: '0.02em' }}>
-            PDF · EPUB · Markdown · TXT
+            PDF · EPUB · MOBI · Markdown · TXT
           </p>
           <input
             type="file"
             ref={fileInputRef}
             onChange={onFileDrop as any}
-            accept="application/pdf,.epub,.md,.markdown,.txt,text/plain"
+            accept="application/pdf,.epub,.mobi,.azw,.azw3,.md,.markdown,.txt,text/plain"
             style={{ display: 'none' }}
           />
         </div>

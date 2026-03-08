@@ -447,12 +447,17 @@ export default function App() {
     }
 
     setIsUrlLoading(true); setUrlError('');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+
     try {
       const fetchUrl = gdocMatch 
         ? `https://test.cors.workers.dev/?${targetUrl}`
         : `https://test.cors.workers.dev/?https://markdown.new/${targetUrl}?method=auto&retain_images`;
       
-      const res = await fetch(fetchUrl);
+      const res = await fetch(fetchUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      
       if (!res.ok) {
         if (res.status === 404 || res.status === 403 || res.status === 401) {
           throw new Error('Document inaccessible');
@@ -461,8 +466,6 @@ export default function App() {
       }
 
       const md = await res.text(); 
-      // Google Docs export might return a HTML login page if private, 
-      // even if the status is 200 (depending on the proxy/redirects).
       if (!md.trim() || (gdocMatch && md.includes('<!DOCTYPE html>'))) {
         throw new Error('Document inaccessible');
       }
@@ -476,22 +479,32 @@ export default function App() {
       currentFileNameSignal.value = title;
       const exist = getBookmarks().find(b => b.id === inputUrl); if (exist) pendingResumeRef.current = exist.sentenceIndex;
       setUrlInputValue(''); 
-      loadMarkdown(md, (sents, content, outline, isFinal) => {
-        sentencesSignal.value = sents;
-        setEpubContent(content);
-        outlineSignal.value = outline;
-        const resumeIdx = pendingResumeRef.current;
-        const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
-        if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
-          fileTypeSignal.value = 'text';
-          setIsDocLoading(false);
-        }
-      }, setShowTextInput, setTextInputValue);
+      
+      // Use requestIdleCallback or setTimeout to ensure parsing doesn't block the next frame
+      setTimeout(() => {
+        loadMarkdown(md, (sents, content, outline, isFinal) => {
+          sentencesSignal.value = sents;
+          setEpubContent(content);
+          outlineSignal.value = outline;
+          const resumeIdx = pendingResumeRef.current;
+          const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+            fileTypeSignal.value = 'text';
+            setIsDocLoading(false);
+          }
+        }, setShowTextInput, setTextInputValue);
+      }, 10);
+
     } catch (err: any) { 
-      if (err.message === 'Document inaccessible') {
-        alert('Document inaccessible. Please ensure the document is shared with "Anyone with the link".');
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        setUrlError('Request timed out. The document might be too large or the proxy is slow.');
+      } else {
+        if (err.message === 'Document inaccessible') {
+          alert('Document inaccessible. Please ensure the document is shared with "Anyone with the link".');
+        }
+        setUrlError(err.message || 'Load failed'); 
       }
-      setUrlError(err.message || 'Load failed'); 
     } finally { setIsUrlLoading(false); }
   };
 

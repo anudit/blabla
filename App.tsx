@@ -437,15 +437,44 @@ export default function App() {
   };
 
   const handleUrlLoad = async (u?: string) => {
-    const url = (u || urlInputValue).trim(); if (!url) return;
-    try { new URL(url); } catch { setUrlError('Invalid URL'); return; }
+    const inputUrl = (u || urlInputValue).trim(); if (!inputUrl) return;
+    try { new URL(inputUrl); } catch { setUrlError('Invalid URL'); return; }
+    
+    let targetUrl = inputUrl;
+    const gdocMatch = inputUrl.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
+    if (gdocMatch) {
+      targetUrl = `https://docs.google.com/document/d/${gdocMatch[1]}/export?format=md`;
+    }
+
     setIsUrlLoading(true); setUrlError('');
     try {
-      const res = await fetch(`https://test.cors.workers.dev/?https://markdown.new/${url}?method=auto&retain_images`);
-      const md = await res.text(); if (!md.trim()) throw new Error('Empty content');
-      const title = md.match(/^Title:\s*(.+)/m)?.[1].trim() || new URL(url).hostname;
-      currentFileIdSignal.value = url; currentFileNameSignal.value = title;
-      const exist = getBookmarks().find(b => b.id === url); if (exist) pendingResumeRef.current = exist.sentenceIndex;
+      const fetchUrl = gdocMatch 
+        ? `https://test.cors.workers.dev/?${targetUrl}`
+        : `https://test.cors.workers.dev/?https://markdown.new/${targetUrl}?method=auto&retain_images`;
+      
+      const res = await fetch(fetchUrl);
+      if (!res.ok) {
+        if (res.status === 404 || res.status === 403 || res.status === 401) {
+          throw new Error('Document inaccessible');
+        }
+        throw new Error('Failed to load document');
+      }
+
+      const md = await res.text(); 
+      // Google Docs export might return a HTML login page if private, 
+      // even if the status is 200 (depending on the proxy/redirects).
+      if (!md.trim() || (gdocMatch && md.includes('<!DOCTYPE html>'))) {
+        throw new Error('Document inaccessible');
+      }
+      
+      const titleMatch = md.match(/^Title:\s*(.+)/m);
+      const title = titleMatch 
+        ? titleMatch[1].trim() 
+        : (gdocMatch ? md.match(/^#\s+(.+)/m)?.[1].trim() || "Google Doc" : new URL(inputUrl).hostname);
+      
+      currentFileIdSignal.value = inputUrl; 
+      currentFileNameSignal.value = title;
+      const exist = getBookmarks().find(b => b.id === inputUrl); if (exist) pendingResumeRef.current = exist.sentenceIndex;
       setUrlInputValue(''); 
       loadMarkdown(md, (sents, content, outline, isFinal) => {
         sentencesSignal.value = sents;
@@ -458,7 +487,12 @@ export default function App() {
           setIsDocLoading(false);
         }
       }, setShowTextInput, setTextInputValue);
-    } catch (err: any) { setUrlError(err.message || 'Load failed'); } finally { setIsUrlLoading(false); }
+    } catch (err: any) { 
+      if (err.message === 'Document inaccessible') {
+        alert('Document inaccessible. Please ensure the document is shared with "Anyone with the link".');
+      }
+      setUrlError(err.message || 'Load failed'); 
+    } finally { setIsUrlLoading(false); }
   };
 
   return (

@@ -1,5 +1,5 @@
 // sw.js
-const CACHE_VERSION = 'bla-bla-v3';
+const CACHE_VERSION = 'bla-bla-v4';
 const APP_SHELL = __APP_SHELL_PLACEHOLDER__;
 
 // Install: pre-cache app shell and activate immediately

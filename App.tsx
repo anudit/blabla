@@ -80,7 +80,7 @@ export default function App() {
       if (status === 'ready') {
         ttsStatusSignal.value = `Ready (${device}/${dtype})`;
         isModelReadySignal.value = true;
-        workerRef.current?.postMessage({ type: 'generate', text: 'Warm up.', lineIndex: -1, voice: 'af_bella', speed: 1.0 });
+        workerRef.current?.postMessage({ type: 'generate', text: 'Warm up.', lineIndex: -1, voice: 'Bella', speed: 1.0 });
       } else if (status === 'complete') {
         try {
           const ctx = getAudioContext();

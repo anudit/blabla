@@ -1,10 +1,14 @@
 import type { JSX } from 'preact';
 
 export const VOICES = [
-  { value: 'af_bella', label: 'Bella (Eng F)' },
-  { value: 'af_heart', label: 'Heart (Eng F)' },
-  { value: 'am_fenrir', label: 'Fenrir (Eng M)' },
-  { value: 'am_puck', label: 'Puck (Eng M)' },
+  { value: 'Bella',  label: 'Bella (Eng F)' },
+  { value: 'Jasper', label: 'Jasper (Eng M)' },
+  { value: 'Luna',   label: 'Luna (Eng F)' },
+  { value: 'Bruno',  label: 'Bruno (Eng M)' },
+  { value: 'Rosie',  label: 'Rosie (Eng F)' },
+  { value: 'Hugo',   label: 'Hugo (Eng M)' },
+  { value: 'Kiki',   label: 'Kiki (Eng F)' },
+  { value: 'Leo',    label: 'Leo (Eng M)' },
 ];
 
 export const staticStyles = {

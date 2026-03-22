@@ -14,7 +14,7 @@
   "dependencies": {
     "@preact/signals": "^2.8.2",
     "fflate": "^0.8.2",
-    "kokoro-js": "^1.2.1",
+    "kitten-tts-webgpu": "^0.1.1",
     "lucide-preact": "^0.577.0",
     "pdfjs-dist": "^5.5.207",
     "preact": "^10.28.4"

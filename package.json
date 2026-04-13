@@ -12,12 +12,12 @@
     "outdated": "bunx npm-check-updates --interactive"
   },
   "dependencies": {
-    "@preact/signals": "^2.8.2",
+    "@preact/signals": "^2.9.0",
     "fflate": "^0.8.2",
     "kitten-tts-webgpu": "^0.1.1",
-    "lucide-preact": "^0.577.0",
-    "pdfjs-dist": "^5.5.207",
-    "preact": "^10.28.4"
+    "lucide-preact": "^1.8.0",
+    "pdfjs-dist": "^5.6.205",
+    "preact": "^10.29.1"
   },
   "devDependencies": {
     "signals-devtool-provider": "^0.5.4",

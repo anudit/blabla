@@ -1,6 +1,6 @@
 import { useRef } from 'preact/hooks';
 import type { JSX } from 'preact';
-import { Upload, Globe, Loader2, Clipboard } from 'lucide-preact';
+import { Upload, Globe, Loader2, Clipboard, Bookmark } from 'lucide-preact';
 import type { ThemeTokens } from '../theme';
 import BookmarkHistory from './BookmarkHistory';
 import type { BookmarkEntry } from './BookmarkHistory';
@@ -142,6 +142,28 @@ export default function LandingCard({
           >
             <Clipboard size={13} /> Paste from Clipboard
           </button>
+
+          {/* Bookmarklet — drag to bookmarks bar */}
+          <a
+            href={`javascript:(function(){window.location='https://blabla.anudit.dev?url='+encodeURIComponent(window.location.href)})()`}
+            onClick={(e) => e.preventDefault()}
+            draggable
+            title="Drag this to your bookmarks bar. Click it on any page to open it in blabla."
+            style={{
+              marginTop: '0.5rem',
+              width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
+              padding: '0.5rem', fontSize: '0.8rem', fontWeight: 500,
+              backgroundColor: 'transparent', color: t.textMuted,
+              border: `1px dashed ${t.inputBorder}`,
+              borderRadius: '0.625rem', cursor: 'grab', transition: 'color 0.15s, border-color 0.15s',
+              textDecoration: 'none', boxSizing: 'border-box',
+              userSelect: 'none',
+            }}
+          >
+            <Bookmark size={13} />
+            <span>Open in BlaBla</span>
+            <span style={{ fontSize: '0.68rem', opacity: 0.6, marginLeft: '0.15rem' }}>— Drag to bookmarks bar</span>
+          </a>
 
           {showTextInput && (
             <div style={{ marginTop: '0.85rem' }}>

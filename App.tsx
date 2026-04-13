@@ -10,6 +10,7 @@ import {
   outlineSignal,
 } from './signals';
 import { THEMES, TT } from './theme';
+import type { ThemeName } from './theme';
 import { calculateWordTimings, extractWords } from './utils';
 import {
   loadMarkdown, loadText, loadEPUB, loadPDF, loadMOBI
@@ -25,7 +26,13 @@ export default function App() {
   const [pdfDoc, setPdfDoc] = useState<any>(null);
   const [pages, setPages] = useState<any[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(() => localStorage.getItem('theme') === 'dark');
+  const [themeName, setThemeName] = useState<ThemeName>(() => {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'dark') return 'quiet';
+    if (saved === 'light') return 'original';
+    if (saved && saved in THEMES) return saved as ThemeName;
+    return 'original';
+  });
   const [epubContent, setEpubContent] = useState<any[]>([]);
   const [showTextInput, setShowTextInput] = useState(false);
   const [textInputValue, setTextInputValue] = useState('');
@@ -58,9 +65,11 @@ export default function App() {
   const isResuming = useRef(false);
   const nextStartTimeRef = useRef(0);
   const lastActiveSentenceRef = useRef<{ id: number, text: string } | null>(null);
+  const lastActiveWordRef = useRef<HTMLElement | null>(null);
   const prevIndexRef = useRef<number>(-1);
 
-  const t = isDarkMode ? THEMES.dark : THEMES.light;
+  const t = THEMES[themeName];
+  const isDarkMode = t.isDark;
   
   const activeHeaderId = useComputed(() => {
     const idx = currentSentenceIndexSignal.value;
@@ -127,8 +136,9 @@ export default function App() {
           // Note: Text restoration is now handled automatically by SentenceItem re-rendering
         }
       });
-      // Also cleanup word highlights if any
-      document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
+      // Also cleanup word highlights + restore word spans to plain text
+      clearWordHighlight();
+      restoreWordSpans();
     }
 
     const unit = sents[idx];
@@ -181,12 +191,16 @@ export default function App() {
     }
   });
 
+  const bookmarkDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useSignalEffect(() => {
     const idx = currentSentenceIndexSignal.value, sents = sentencesSignal.value, fType = fileTypeSignal.value, cFileId = currentFileIdSignal.value, cFileName = currentFileNameSignal.value;
     if (idx > 0 && sents.length > 0 && cFileId && cFileName && fType) {
-      const isUrl = fType === 'text' && cFileId.startsWith('http');
-      saveBookmark({ id: cFileId, fileName: cFileName, sentenceIndex: idx, totalSentences: sents.length, timestamp: Date.now(), fileType: isUrl ? 'url' : fType as 'pdf' | 'epub', preview: (sents[idx]?.text || '').slice(0, 80), ...(isUrl ? { url: cFileId } : {}) });
-      setBookmarks(getBookmarks());
+      if (bookmarkDebounceRef.current) clearTimeout(bookmarkDebounceRef.current);
+      bookmarkDebounceRef.current = setTimeout(() => {
+        const isUrl = fType === 'text' && cFileId.startsWith('http');
+        saveBookmark({ id: cFileId, fileName: cFileName, sentenceIndex: idx, totalSentences: sents.length, timestamp: Date.now(), fileType: isUrl ? 'url' : fType as 'pdf' | 'epub', preview: (sents[idx]?.text || '').slice(0, 80), ...(isUrl ? { url: cFileId } : {}) });
+        setBookmarks(getBookmarks());
+      }, 2000);
     }
   });
 
@@ -238,9 +252,21 @@ export default function App() {
     playbackStateSignal.value = "Playing"; source.onended = () => { playbackStateSignal.value = "Ready"; };
   };
 
+  const clearWordHighlight = () => {
+    if (lastActiveWordRef.current) { lastActiveWordRef.current.classList.remove('word-highlight-active'); lastActiveWordRef.current = null; }
+  };
+
+  const restoreWordSpans = () => {
+    const last = lastActiveSentenceRef.current;
+    if (!last) return;
+    const el = document.getElementById(`line-${last.id}`);
+    if (el && el.querySelector(`[id^="word-${last.id}-"]`)) { el.textContent = last.text + ' '; }
+  };
+
   const stopAllAudio = () => {
     if (wordRafRef.current) cancelAnimationFrame(wordRafRef.current);
-    document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
+    clearWordHighlight();
+    restoreWordSpans();
     playbackSessionId.current += 1;
     if (currentSource.current) { try { currentSource.current.stop(); } catch(e){} currentSource.current.disconnect(); currentSource.current = null; }
     window.speechSynthesis.cancel(); if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
@@ -293,7 +319,7 @@ export default function App() {
     if (currentSession !== playbackSessionId.current || !isPlayingSignal.peek() || !buffer) return;
 
     const source = ctx.createBufferSource(); source.buffer = buffer; source.connect(ctx.destination);
-    source.onended = () => { if (wordRafRef.current) cancelAnimationFrame(wordRafRef.current); document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active')); currentSource.current = null; if (isPlayingSignal.peek() && currentSession === playbackSessionId.current) advanceSentence(); };
+    source.onended = () => { if (wordRafRef.current) cancelAnimationFrame(wordRafRef.current); clearWordHighlight(); restoreWordSpans(); currentSource.current = null; if (isPlayingSignal.peek() && currentSession === playbackSessionId.current) advanceSentence(); };
     currentSource.current = source; playbackStateSignal.value = "Playing";
     wordTimingsRef.current = calculateWordTimings(text, buffer.duration);
     let st = ctx.currentTime; if (nextStartTimeRef.current > st && nextStartTimeRef.current < st + 0.5) st = nextStartTimeRef.current;
@@ -304,8 +330,8 @@ export default function App() {
         if (currentSource.current !== source) return;
         const elap = ctx.currentTime - audioStartRef.current;
         const active = wordTimingsRef.current.find(t => elap >= t.start && elap < t.end);
-        document.querySelectorAll('.word-highlight-active').forEach(el => el.classList.remove('word-highlight-active'));
-        if (active) { const el = document.getElementById(`word-${unit.lines[0]}-${active.index}`); if (el) el.classList.add('word-highlight-active'); }
+        clearWordHighlight();
+        if (active) { const el = document.getElementById(`word-${unit.lines[0]}-${active.index}`); if (el) { el.classList.add('word-highlight-active'); lastActiveWordRef.current = el; } }
         if (elap < buffer!.duration) wordRafRef.current = requestAnimationFrame(animate);
       };
       wordRafRef.current = requestAnimationFrame(animate);
@@ -508,6 +534,15 @@ export default function App() {
     } finally { setIsUrlLoading(false); }
   };
 
+  // Auto-load from ?url= query param (used by the bookmarklet)
+  useEffect(() => {
+    const u = new URLSearchParams(window.location.search).get('url');
+    if (u) {
+      history.replaceState(null, '', window.location.pathname);
+      handleUrlLoad(u);
+    }
+  }, []);
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', backgroundColor: t.bg, fontFamily: 'system-ui, sans-serif', color: t.text, paddingTop: '1rem', transition: TT }}>
       {isDocLoading ? (
@@ -528,7 +563,7 @@ export default function App() {
       `}</style>
       {eggPhase && <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ width: '300px', height: '300px', borderRadius: '50%', backgroundColor: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: eggPhase === 'in' ? 'eggBounceIn 0.55s forwards' : 'eggFadeOut 0.6s forwards' }}><img src="./180.png" style={{ width: '250px', height: '250px' }} /></div></div>}
       <ScrollToCurrentButton />
-      <Suspense fallback={null}><BottomBar t={t} isDarkMode={isDarkMode} onToggleTheme={() => { const n = !isDarkMode; setIsDarkMode(n); localStorage.setItem('theme', n ? 'dark' : 'light'); }} playbackSpeed={playbackSpeedSignal.value} hasSentences={hasSentences.value} onTogglePlay={togglePlay} onSpeedChange={(s: number) => { playbackSpeedSignal.value = s; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} usingFallback={usingFallback.current} selectedVoice={selectedVoiceSignal.value} onVoiceChange={(e: any) => { selectedVoiceSignal.value = e.target.value; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} sentencesLength={sentencesSignal.value.length} fontSize={fontSize} onFontSizeChange={(d: number) => { const n = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + d)).toFixed(2)); setFontSize(n); localStorage.setItem('fontSize', String(n)); }} onTestAudio={handleTestAudio} onReset={resetReader} onLogoClick={() => { if (!eggPhase) { setEggPhase('in'); setTimeout(() => { setEggPhase('out'); setTimeout(() => setEggPhase(null), 600); }, 2400); } }} /></Suspense>
+      <Suspense fallback={null}><BottomBar t={t} isDarkMode={isDarkMode} themeName={themeName} onThemeChange={(name: ThemeName) => { setThemeName(name); localStorage.setItem('theme', name); }} playbackSpeed={playbackSpeedSignal.value} hasSentences={hasSentences.value} onTogglePlay={togglePlay} onSpeedChange={(s: number) => { playbackSpeedSignal.value = s; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} usingFallback={usingFallback.current} selectedVoice={selectedVoiceSignal.value} onVoiceChange={(e: any) => { selectedVoiceSignal.value = e.target.value; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} sentencesLength={sentencesSignal.value.length} fontSize={fontSize} onFontSizeChange={(d: number) => { const n = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + d)).toFixed(2)); setFontSize(n); localStorage.setItem('fontSize', String(n)); }} onTestAudio={handleTestAudio} onReset={resetReader} onLogoClick={() => { if (!eggPhase) { setEggPhase('in'); setTimeout(() => { setEggPhase('out'); setTimeout(() => setEggPhase(null), 600); }, 2400); } }} /></Suspense>
     </div>
   );
 }

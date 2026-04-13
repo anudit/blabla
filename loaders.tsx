@@ -1,4 +1,4 @@
-import { unzipSync } from 'fflate';
+import { unzip } from 'fflate';
 import {
   sentencesSignal, fileTypeSignal, outlineSignal,
 } from './signals';
@@ -226,7 +226,10 @@ export const loadEPUB = async (
 ) => {
   setIsDocLoading(true);
   try {
-    const files = unzipSync(new Uint8Array(data)), decoder = new TextDecoder(), parser = new DOMParser();
+    const files = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
+      unzip(new Uint8Array(data), (err, result) => err ? reject(err) : resolve(result));
+    });
+    const decoder = new TextDecoder(), parser = new DOMParser();
     const containerXml = decoder.decode(files['META-INF/container.xml']), containerDoc = parser.parseFromString(containerXml, 'text/xml');
     const opfPath = containerDoc.querySelector('rootfile')?.getAttribute('full-path');
     if (!opfPath) throw new Error("No OPF file found");
@@ -279,12 +282,13 @@ export const loadEPUB = async (
       processElements(elementsToProcess, chapterTitle, state);
       
       const isFinal = i === spineIds.length - 1;
-      // Yield every chapter, or even more aggressively if it's the very first one
-      if (!hasYieldedInitial || isFinal || performance.now() - _lastYield > 50) {
+      // Only yield on first chapter (show content immediately) and on final.
+      // Intermediate yields copy O(N) arrays K times (O(N*K) total); skipping them
+      // keeps total copy work at O(N) — two spreads instead of K spreads.
+      if (!hasYieldedInitial || isFinal) {
         onChunk([...state.allSentences], [...state.allContent], [...state.allOutline], isFinal);
         hasYieldedInitial = true;
         _lastYield = performance.now();
-        // Force a small break to allow the UI to render the chunk
         await new Promise<void>(r => setTimeout(r, 0));
       }
     }
@@ -375,7 +379,16 @@ export const loadPDF = async (
     
     const globalLineList: any[] = [];
     const allPages: any[] = [];
-    const sentenceRegex = /[^.!?]+[.!?]/g;
+    const allSentences: any[] = [];
+    const sentRe = /[^.!?]+[.!?]/g;
+
+    // Incremental sentence extraction — O(N) total instead of O(N²):
+    // fullText grows as pages load; we search only from searchFrom (end of last
+    // complete sentence) so each character is scanned at most twice across all yields.
+    let fullText = '';
+    const lineCumPos: number[] = []; // char offset where each line starts in fullText
+    let searchFrom = 0;              // regex start position (past already-extracted sentences)
+    let lineMapPtr = 0;              // two-pointer cursor for sentence→line ID mapping
 
     let _lastYield = performance.now();
 
@@ -384,30 +397,45 @@ export const loadPDF = async (
       const textContent = await page.getTextContent();
       const viewport = page.getViewport({ scale });
       const lines = processTextContent(textContent, scale, globalLineList.length, pdfjsLib, viewport);
-      
+
+      // Extend the text index with this page's new lines
+      for (const line of lines) {
+        lineCumPos.push(fullText.length > 0 ? fullText.length + 1 : 0);
+        fullText = fullText ? `${fullText} ${line.text}` : line.text;
+      }
       globalLineList.push(...lines);
       allPages.push({ viewport, lines, pageNumber: i });
       page.cleanup();
 
       const isFinal = i === doc.numPages;
       if (isFinal || performance.now() - _lastYield > 100 || i === 1) {
-        // Recalculate sentences based on what we have so far
-        const fullText = globalLineList.map(l => l.text).join(' ');
-        let match, sentenceTexts: { text: string; start: number; end: number }[] = [];
-        sentenceRegex.lastIndex = 0;
-        while ((match = sentenceRegex.exec(fullText)) !== null) {
-          sentenceTexts.push({ text: match[0].trim(), start: match.index, end: match.index + match[0].length });
+        // Extract sentences from searchFrom onward — new text only
+        sentRe.lastIndex = searchFrom;
+        let m;
+        while ((m = sentRe.exec(fullText)) !== null) {
+          const sentText = m[0].trim(), sentStart = m.index, sentEnd = m.index + m[0].length;
+          searchFrom = sentEnd;
+          // Advance two-pointer past lines that end before this sentence starts
+          while (lineMapPtr < globalLineList.length &&
+                 lineCumPos[lineMapPtr] + globalLineList[lineMapPtr].text.length <= sentStart) lineMapPtr++;
+          // Collect all lines overlapping [sentStart, sentEnd)
+          const sentLines: number[] = [];
+          for (let lp = lineMapPtr; lp < globalLineList.length && lineCumPos[lp] < sentEnd; lp++)
+            sentLines.push(globalLineList[lp].id);
+          if (sentText && sentLines.length > 0) allSentences.push({ text: sentText, lines: sentLines });
         }
-        
-        let cumPos = 0; 
-        globalLineList.forEach(line => { line.startPos = cumPos; cumPos += line.text.length + 1; });
-        
-        const newSentences = sentenceTexts.map(sent => {
-          const sentLines = globalLineList.filter(line => line.startPos < sent.end && (line.startPos + line.text.length + 1) > sent.start).map(line => line.id);
-          return { text: sent.text, lines: sentLines };
-        }).filter(sent => sent.text && sent.lines.length > 0);
+        // On final page grab any trailing fragment as the last sentence
+        if (isFinal) {
+          const rem = fullText.slice(searchFrom).trim();
+          if (rem) {
+            const sentLines: number[] = [];
+            for (let lp = lineMapPtr; lp < globalLineList.length; lp++)
+              sentLines.push(globalLineList[lp].id);
+            if (sentLines.length > 0) allSentences.push({ text: rem, lines: sentLines });
+          }
+        }
 
-        onChunk(newSentences, [...allPages], doc, isFinal);
+        onChunk(allSentences, [...allPages], doc, isFinal);
         _lastYield = performance.now();
         await new Promise(r => setTimeout(r, 0));
       }

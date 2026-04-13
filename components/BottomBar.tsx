@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
-import { Play, Pause, Loader2, Menu, Sun, Moon, Beaker } from 'lucide-preact';
-import type { ThemeTokens } from '../theme';
-import { TT, staticStyles, VOICES } from '../theme';
+import { Play, Pause, Loader2, Menu, Palette, Beaker } from 'lucide-preact';
+import type { ThemeTokens, ThemeName } from '../theme';
+import { TT, staticStyles, VOICES, THEMES, THEME_META } from '../theme';
 import {
   isPlayingSignal, playbackStateSignal, ttsStatusSignal,
   isModelReadySignal, currentSentenceIndexSignal,
@@ -11,7 +11,8 @@ import {
 interface BottomBarProps {
   t: ThemeTokens;
   isDarkMode: boolean;
-  onToggleTheme: () => void;
+  themeName: ThemeName;
+  onThemeChange: (name: ThemeName) => void;
   playbackSpeed: number;
   hasSentences: boolean;
   onTogglePlay: () => void;
@@ -28,7 +29,7 @@ interface BottomBarProps {
 }
 
 export default function BottomBar({
-  t, isDarkMode, onToggleTheme,
+  t, isDarkMode, themeName, onThemeChange,
   playbackSpeed, hasSentences,
   onTogglePlay, onSpeedChange,
   usingFallback,
@@ -37,14 +38,14 @@ export default function BottomBar({
   fontSize, onFontSizeChange,
   onTestAudio, onReset, onLogoClick,
 }: BottomBarProps) {
-  // Only subscribe to signals needed for the main bar buttons.
   const isPlaying     = isPlayingSignal.value;
   const isModelReady  = isModelReadySignal.value;
   const playbackState = playbackStateSignal.value;
 
-  const [isSpeedMenuOpen, setIsSpeedMenuOpen] = useState(false);
-  const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [memGb, setMemGb] = useState<number | null>(null);
+  const [isSpeedMenuOpen, setIsSpeedMenuOpen]     = useState(false);
+  const [isMenuOpen, setIsMenuOpen]               = useState(false);
+  const [isThemePickerOpen, setIsThemePickerOpen] = useState(false);
+  const [memGb, setMemGb]   = useState<number | null>(null);
   const [cpuPct, setCpuPct] = useState<number | null>(null);
 
   useEffect(() => {
@@ -60,6 +61,8 @@ export default function BottomBar({
     }, 1000);
     return () => clearInterval(id);
   }, [isMenuOpen]);
+
+  const closeAll = () => { setIsSpeedMenuOpen(false); setIsMenuOpen(false); setIsThemePickerOpen(false); };
 
   const iconButtonStyle: JSX.CSSProperties = {
     padding: '0.5rem', borderRadius: '0.375rem', border: 'none', cursor: 'pointer',
@@ -87,7 +90,7 @@ export default function BottomBar({
         <img src="./180.png" style={{ width: '32px', height: '32px' }} alt="logo" />
       </button>
 
-      <button onClick={() => { setIsMenuOpen(false); setIsSpeedMenuOpen(v => !v); }} style={speedButtonStyle}>
+      <button onClick={() => { const next = !isSpeedMenuOpen; closeAll(); setIsSpeedMenuOpen(next); }} style={speedButtonStyle}>
         {playbackSpeed}x
       </button>
 
@@ -99,12 +102,12 @@ export default function BottomBar({
         {playbackState === 'Buffering' ? <Loader2 size={20} color="white" style={{ animation: 'spin 0.8s linear infinite' }} /> : isPlaying ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" style={{ marginLeft: '2px' }} />}
       </button>
 
-      <button onClick={() => { setIsSpeedMenuOpen(false); setIsMenuOpen(v => !v); }} style={iconButtonStyle}>
+      <button onClick={() => { const next = !isMenuOpen; closeAll(); setIsMenuOpen(next); }} style={iconButtonStyle}>
         <Menu size={24} />
       </button>
 
-      <button onClick={onToggleTheme} style={iconButtonStyle} title={isDarkMode ? 'Switch to light mode' : 'Switch to dark mode'}>
-        {isDarkMode ? <Sun size={20} /> : <Moon size={20} />}
+      <button onClick={() => { const next = !isThemePickerOpen; closeAll(); setIsThemePickerOpen(next); }} style={iconButtonStyle} title="Choose theme">
+        <Palette size={20} />
       </button>
 
       {isSpeedMenuOpen && (
@@ -146,6 +149,69 @@ export default function BottomBar({
           onClose={() => setIsMenuOpen(false)}
         />
       )}
+
+      {isThemePickerOpen && (
+        <ThemePicker
+          t={t}
+          isDarkMode={isDarkMode}
+          themeName={themeName}
+          onThemeChange={(name) => { onThemeChange(name); setIsThemePickerOpen(false); }}
+          popoverBase={popoverBase}
+        />
+      )}
+    </div>
+  );
+}
+
+function ThemePicker({ t, isDarkMode, themeName, onThemeChange, popoverBase }: {
+  t: ThemeTokens;
+  isDarkMode: boolean;
+  themeName: ThemeName;
+  onThemeChange: (name: ThemeName) => void;
+  popoverBase: JSX.CSSProperties;
+}) {
+  const themeNames = Object.keys(THEME_META) as ThemeName[];
+
+  return (
+    <div style={{ ...popoverBase, right: '0', width: '236px', padding: '0.75rem' }}>
+      <div style={{ fontSize: '0.7rem', fontWeight: 600, color: t.textMuted, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: '0.6rem', paddingLeft: '0.15rem' }}>
+        Theme
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem' }}>
+        {themeNames.map((name) => {
+          const meta = THEME_META[name];
+          const theme = THEMES[name];
+          const isActive = themeName === name;
+          return (
+            <button
+              key={name}
+              onClick={() => onThemeChange(name)}
+              title={meta.label}
+              style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                gap: '0.3rem', padding: '0.6rem 0.4rem',
+                backgroundColor: meta.previewBg,
+                borderRadius: '0.625rem',
+                border: isActive ? `2.5px solid ${isDarkMode ? '#e0d8c8' : '#2a2015'}` : `1.5px solid ${isDarkMode ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.1)'}`,
+                cursor: 'pointer',
+                transition: 'border-color 0.2s ease, transform 0.15s ease, box-shadow 0.15s ease',
+                transform: isActive ? 'scale(1.03)' : 'scale(1)',
+                boxShadow: isActive
+                  ? (isDarkMode ? '0 0 0 1px rgba(224,216,200,0.3)' : '0 0 0 1px rgba(42,32,21,0.15)')
+                  : 'none',
+                outline: 'none',
+              }}
+            >
+              <span style={{ fontSize: '1.05rem', fontWeight: 700, color: meta.previewText, lineHeight: 1, fontFamily: 'Georgia, serif', letterSpacing: '-0.01em' }}>
+                Aa
+              </span>
+              <span style={{ fontSize: '0.62rem', fontWeight: 500, color: meta.previewText, opacity: 0.7, lineHeight: 1 }}>
+                {meta.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -155,8 +221,6 @@ function SettingsMenu({
   onVoiceChange, selectedVoice, usingFallback,
   onTestAudio, onReset, popoverBase, cpuPct, memGb, onClose,
 }: any) {
-  // Subscribe to signals ONLY when the menu is rendered.
-  // This keeps the bar from re-rendering on every progress tick when menu is hidden.
   const currentSentenceIndex = currentSentenceIndexSignal.value;
   const ttsStatus          = ttsStatusSignal.value;
   const isModelReady       = isModelReadySignal.value;
@@ -168,7 +232,7 @@ function SettingsMenu({
   const statusDot = isModelReady && !usingFallback ? '#22c55e' : usingFallback ? '#f59e0b' : '#3b82f6';
 
   return (
-    <div style={{ ...popoverBase, right: '0', width: '248px' }}>
+    <div style={{ ...popoverBase, right: '2.5rem', width: '248px' }}>
       <div style={{ ...row, gap: '0.5rem' }}>
         <div style={{ width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, backgroundColor: statusDot }} />
         <span style={{ fontSize: '0.75rem', color: t.textMuted, flex: 1 }}>{ttsStatus}</span>

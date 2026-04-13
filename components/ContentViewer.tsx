@@ -164,10 +164,6 @@ const RenderItem = memo(({ item, t, isDarkMode, lc }: any) => {
 });
 
 const SentenceItem = ({ s, isActive }: { s: any, isActive: Signal<boolean> }) => {
-  // Only the active paragraph re-renders its sentences, and even then, 
-  // we check if this specific sentence is the active one.
-  const isSelected = useComputed(() => isActive.value && currentSentenceIndexSignal.value === s.id);
-  
   return (
     <span 
       id={`line-${s.id}`} 

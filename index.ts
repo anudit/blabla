@@ -1,37 +1,33 @@
 // index.ts
 import { serve } from "bun";
 
+async function buildAndGzip(entrypoint: string) {
+  const build = await Bun.build({
+    entrypoints: [entrypoint],
+    target: "browser",
+    minify: process.env.NODE_ENV === "production",
+    define: {
+      "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "development"),
+    },
+  });
+  const bytes = new Uint8Array(await build.outputs[0].arrayBuffer());
+  const compressed = Bun.gzipSync(bytes);
+  return new Response(compressed, {
+    headers: {
+      'Content-Type': 'application/javascript',
+      'Content-Encoding': 'gzip',
+      'Vary': 'Accept-Encoding',
+    },
+  });
+}
+
 const server = serve({
   routes: {
     // 1. Build the Main App (Bundling React + dependencies)
-    "/bundle.js": async () => {
-      const build = await Bun.build({
-        entrypoints: ["./frontend.tsx"],
-        target: "browser",
-        minify: process.env.NODE_ENV === "production",
-        define: {
-          "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "development"),
-        },
-      });
-      return new Response(build.outputs[0], {
-        headers: { 'Content-Type': 'application/javascript' }
-      });
-    },
+    "/bundle.js": () => buildAndGzip("./frontend.tsx"),
 
     // 2. Build the TTS Worker
-    "/tts.worker.js": async () => {
-      const build = await Bun.build({
-        entrypoints: ["./tts.worker.ts"],
-        target: "browser",
-        minify: process.env.NODE_ENV === "production",
-        define: {
-          "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "development"),
-        },
-      });
-      return new Response(build.outputs[0], {
-        headers: { 'Content-Type': 'application/javascript' }
-      });
-    },
+    "/tts.worker.js": () => buildAndGzip("./tts.worker.ts"),
 
     // 3. Serve Static Assets
     "/pdf.worker.min.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.min.mjs"),

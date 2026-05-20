@@ -8,16 +8,16 @@
     "build": "bun run build.ts",
     "serve": "bunx live-server ./dist",
     "start": "NODE_ENV=production bun index.ts",
-    "stats": "bun run build && bunx esbuild-visualizer --metadata ./dist/meta.json --filename ./dist/stats.html --open",
+    "bundlestats": "bun run build && bunx esbuild-visualizer --metadata ./dist/meta.json --filename ./dist/stats.html --open",
     "outdated": "bunx npm-check-updates --interactive"
   },
   "dependencies": {
     "@preact/signals": "^2.9.0",
-    "fflate": "^0.8.2",
+    "fflate": "^0.8.3",
     "kitten-tts-webgpu": "^0.1.1",
-    "lucide-preact": "^1.8.0",
-    "pdfjs-dist": "^5.6.205",
-    "preact": "^10.29.1"
+    "lucide-preact": "^1.16.0",
+    "pdfjs-dist": "^5.7.284",
+    "preact": "^10.29.2"
   },
   "devDependencies": {
     "signals-devtool-provider": "^0.5.4",

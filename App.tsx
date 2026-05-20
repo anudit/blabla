@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'preact/compat';
 import { useSignalEffect, useComputed } from '@preact/signals';
 import type { JSX } from 'preact';
-import { Target, Loader2 } from 'lucide-preact';
+import { Target, Loader2, Check } from 'lucide-preact';
 import {
   isPlayingSignal, playbackStateSignal, ttsStatusSignal,
   isModelReadySignal, currentSentenceIndexSignal, restartSignal,
   sentencesSignal, fileTypeSignal, playbackSpeedSignal,
   selectedVoiceSignal, currentFileIdSignal, currentFileNameSignal,
-  outlineSignal,
+  outlineSignal, offlineReadySignal,
 } from './signals';
 import { THEMES, TT } from './theme';
 import type { ThemeName } from './theme';
@@ -556,14 +556,55 @@ export default function App() {
         <Suspense fallback={null}><ContentViewer fileType={fileTypeSignal.peek()!} pages={pages} pdfDoc={pdfDoc} epubContent={epubContent} activeHeaderId={activeHeaderId} isDarkMode={isDarkMode} t={t} fontSize={fontSize} onLineClick={handleLineClick} /></Suspense>
       )}
       <style>{`
-        .epub-highlight-active { background: rgba(250,204,21,0.45); border-radius:3px; } 
-        .word-highlight-active { background: #b47a32 !important; color: white !important; border-radius:3px; z-index: 30; } 
-        .pdf-highlight-active { background-color: rgba(250, 204, 21, 0.45) !important; box-shadow: 0 0 0 1px rgba(210, 170, 0, 0.4) !important; z-index:20 !important; } 
+        .epub-highlight-active { background: rgba(250,204,21,0.45); border-radius:3px; }
+        .word-highlight-active { background: #b47a32 !important; color: white !important; border-radius:3px; z-index: 30; }
+        .pdf-highlight-active { background-color: rgba(250, 204, 21, 0.45) !important; box-shadow: 0 0 0 1px rgba(210, 170, 0, 0.4) !important; z-index:20 !important; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+        @keyframes toastOut { from { opacity: 1; transform: translateX(-50%) translateY(0); } to { opacity: 0; transform: translateX(-50%) translateY(8px); } }
       `}</style>
+      <OfflineToast />
       {eggPhase && <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ width: '300px', height: '300px', borderRadius: '50%', backgroundColor: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: eggPhase === 'in' ? 'eggBounceIn 0.55s forwards' : 'eggFadeOut 0.6s forwards' }}><img src="./180.png" style={{ width: '250px', height: '250px' }} /></div></div>}
       <ScrollToCurrentButton />
       <Suspense fallback={null}><BottomBar t={t} isDarkMode={isDarkMode} themeName={themeName} onThemeChange={(name: ThemeName) => { setThemeName(name); localStorage.setItem('theme', name); }} playbackSpeed={playbackSpeedSignal.value} hasSentences={hasSentences.value} onTogglePlay={togglePlay} onSpeedChange={(s: number) => { playbackSpeedSignal.value = s; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} usingFallback={usingFallback.current} selectedVoice={selectedVoiceSignal.value} onVoiceChange={(e: any) => { selectedVoiceSignal.value = e.target.value; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} sentencesLength={sentencesSignal.value.length} fontSize={fontSize} onFontSizeChange={(d: number) => { const n = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + d)).toFixed(2)); setFontSize(n); localStorage.setItem('fontSize', String(n)); }} onTestAudio={handleTestAudio} onReset={resetReader} onLogoClick={() => { if (!eggPhase) { setEggPhase('in'); setTimeout(() => { setEggPhase('out'); setTimeout(() => setEggPhase(null), 600); }, 2400); } }} /></Suspense>
+    </div>
+  );
+}
+
+function OfflineToast() {
+  const show = offlineReadySignal.value;
+  const [leaving, setLeaving] = useState(false);
+
+  useEffect(() => {
+    if (!show) return;
+    const fadeTimer = setTimeout(() => setLeaving(true), 2600);
+    const hideTimer = setTimeout(() => { offlineReadySignal.value = false; setLeaving(false); }, 3200);
+    return () => { clearTimeout(fadeTimer); clearTimeout(hideTimer); };
+  }, [show]);
+
+  if (!show) return null;
+  return (
+    <div style={{
+      position: 'fixed', bottom: '5.5rem', left: '50%',
+      transform: 'translateX(-50%)',
+      zIndex: 400,
+      display: 'flex', alignItems: 'center', gap: '0.4rem',
+      padding: '0.45rem 0.9rem',
+      background: 'rgba(15,15,15,0.88)',
+      backdropFilter: 'blur(10px)',
+      WebkitBackdropFilter: 'blur(10px)',
+      color: '#e2fce8',
+      borderRadius: '999px',
+      fontSize: '0.78rem',
+      fontWeight: 500,
+      letterSpacing: '0.01em',
+      boxShadow: '0 2px 12px rgba(0,0,0,0.25)',
+      animation: `${leaving ? 'toastOut' : 'toastIn'} 0.3s ease forwards`,
+      pointerEvents: 'none',
+      whiteSpace: 'nowrap',
+    }}>
+      <Check size={13} color="#4ade80" strokeWidth={2.5} />
+      Offline ready
     </div>
   );
 }

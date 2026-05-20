@@ -15,6 +15,7 @@ export const selectedVoiceSignal        = signal('Bella');
 export const currentFileIdSignal        = signal<string | null>(null);
 export const currentFileNameSignal      = signal<string | null>(null);
 export const outlineSignal              = signal<any[]>([]);
+export const offlineReadySignal         = signal(false);
 
 if (process.env.NODE_ENV !== 'production') {
   // @ts-ignore

@@ -28,6 +28,8 @@ self.addEventListener('activate', (e) => {
         })
       ))
       .then(() => self.clients.claim())
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then((clients) => clients.forEach((c) => c.postMessage({ type: 'OFFLINE_READY' })))
   );
 });
 

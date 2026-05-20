@@ -37,13 +37,20 @@ self.addEventListener('message', async (e: MessageEvent<any>) => {
       self.postMessage({ status: 'loading', message: 'Initializing WebGPU...' });
       await engine.init();
 
-      self.postMessage({ status: 'loading', message: 'Downloading 40M Model...' });
+      const cache = await caches.open(MODEL_CACHE);
+      const alreadyCached = !!(await cache.match('kitten_tts_micro_v0_8.onnx'));
+      self.postMessage({ status: 'loading', message: alreadyCached ? 'Loading Model...' : 'Downloading 40M Model...' });
+
       const [onnxBlobUrl, voicesBlobUrl] = await Promise.all([
         fetchCached(ONNX_URL, 'kitten_tts_micro_v0_8.onnx', 'application/octet-stream'),
         fetchCached(VOICES_URL, 'kitten_tts_micro_v0_8_voices.npz', 'application/octet-stream'),
       ]);
+
+      // Both model files are now in cache — app is fully offline-capable
+      self.postMessage({ status: 'models_cached' });
+
       await engine.loadModel(onnxBlobUrl, voicesBlobUrl);
-      
+
       console.log("[KittenTTS Worker] Ready: device=webgpu, dtype=fp32");
       self.postMessage({ status: 'ready', device: 'webgpu', dtype: 'fp32' });
     }
@@ -52,19 +59,20 @@ self.addEventListener('message', async (e: MessageEvent<any>) => {
       const { text, lineIndex, voice = 'Bella', speed = 1.0 } = e.data;
       if (!engine) throw new Error('TTS not initialized');
 
-      // 1. Text to phonemes/ids
       const { ids } = await textToInputIds(text);
-      
-      // 2. Generate waveform
       const { waveform } = await engine.generate(ids, voice, speed, text.length);
-
-      // Post-process: trim last 5000 samples for better sentence boundaries (same as original code)
       const audio = waveform.slice(0, Math.max(0, waveform.length - 5000));
-
       self.postMessage({ status: 'complete', audio, text, lineIndex }, [audio.buffer]);
     }
   } catch (err: any) {
     console.error('[KittenTTS Worker]', err);
-    self.postMessage({ status: 'error', error: err?.message || String(err) || 'Unknown error' });
+    // Reset engine on init failures so the main thread can retry (e.g. after going back online)
+    if (type === 'init') engine = null;
+    const isFetchError = err instanceof TypeError && err.message.toLowerCase().includes('fetch');
+    self.postMessage({
+      status: 'error',
+      error: err?.message || String(err) || 'Unknown error',
+      fetchFailed: isFetchError,
+    });
   }
 });

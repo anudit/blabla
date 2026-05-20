@@ -80,16 +80,21 @@ export default function App() {
 
   const hasSentences = useComputed(() => sentencesSignal.value.length > 0);
 
+  const modelFetchFailedRef = useRef(false);
+
   useEffect(() => {
     const ctx = getAudioContext();
     ctx.resume().catch(console.warn);
     workerRef.current = new Worker("/tts.worker.js", { type: 'module' });
     workerRef.current.onmessage = (e) => {
-      const { status, audio, error, text, lineIndex, device, dtype } = e.data;
+      const { status, audio, error, fetchFailed, text, lineIndex, device, dtype } = e.data;
       if (status === 'ready') {
         ttsStatusSignal.value = `Ready (${device}/${dtype})`;
         isModelReadySignal.value = true;
+        modelFetchFailedRef.current = false;
         workerRef.current?.postMessage({ type: 'generate', text: 'Warm up.', lineIndex: -1, voice: 'Bella', speed: 1.0 });
+      } else if (status === 'models_cached') {
+        offlineReadySignal.value = true;
       } else if (status === 'complete') {
         try {
           const ctx = getAudioContext();
@@ -103,15 +108,32 @@ export default function App() {
           }
         } catch (err) { console.error("Audio conversion failed", err); }
       } else if (status === 'error') {
-        if (error.includes("import_promises") || error.includes("tokenizer")) triggerFallback();
+        if (error.includes("import_promises") || error.includes("tokenizer")) {
+          triggerFallback();
+        } else if (fetchFailed) {
+          modelFetchFailedRef.current = true;
+          ttsStatusSignal.value = 'Offline — connect to download model';
+        }
       }
     };
     ttsStatusSignal.value = "Downloading Model...";
     workerRef.current.postMessage({ type: 'init' });
+
+    // Retry model download automatically when the connection is restored
+    const onOnline = () => {
+      if (modelFetchFailedRef.current && workerRef.current) {
+        modelFetchFailedRef.current = false;
+        ttsStatusSignal.value = 'Downloading Model...';
+        workerRef.current.postMessage({ type: 'init' });
+      }
+    };
+    window.addEventListener('online', onOnline);
+
     return () => {
       stopAllAudio();
       workerRef.current?.terminate();
       if (audioContext.current) audioContext.current.close();
+      window.removeEventListener('online', onOnline);
     };
   }, []);
 

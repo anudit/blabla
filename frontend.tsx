@@ -7,7 +7,6 @@
 
 import { render } from "preact";
 import App from "./App";
-import { offlineReadySignal } from "./signals";
 
 const elem = document.getElementById("root")!;
 const app = <App />;
@@ -35,12 +34,5 @@ if ('serviceWorker' in navigator) {
       }
     });
 
-    // Show "offline ready" toast on first install only (not on updates, which
-    // trigger a reload via controllerchange before the toast would even render).
-    navigator.serviceWorker.addEventListener('message', (e) => {
-      if (e.data?.type === 'OFFLINE_READY' && !hadController) {
-        offlineReadySignal.value = true;
-      }
-    });
   });
 }

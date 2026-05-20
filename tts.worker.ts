@@ -3,21 +3,42 @@ import { KittenTTSEngine, textToInputIds } from 'kitten-tts-webgpu';
 
 const ONNX_URL = "https://huggingface.co/KittenML/kitten-tts-micro-0.8/resolve/main/kitten_tts_micro_v0_8.onnx";
 const VOICES_URL = "https://huggingface.co/KittenML/kitten-tts-micro-0.8/resolve/main/voices.npz";
-const MODEL_CACHE = 'kitten-tts-models-v1';
+const MODEL_DB = 'kitten-tts-models-v1';
 
-// Fetches a resource, caching it under a stable key so signed redirect URLs
-// (e.g. HuggingFace → S3) don't cause a re-download on every page load.
-async function fetchCached(remoteUrl: string, cacheKey: string, mimeType: string): Promise<string> {
-  const cache = await caches.open(MODEL_CACHE);
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const buf = await cached.arrayBuffer();
-    return URL.createObjectURL(new Blob([buf], { type: mimeType }));
-  }
+// IDB helpers — IndexedDB stores raw ArrayBuffer so there are no CORS or
+// redirect restrictions (unlike Cache Storage, which rejects cross-origin
+// redirected responses from dedicated workers).
+function openModelDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(MODEL_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('models');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbGet(db: IDBDatabase, key: string): Promise<ArrayBuffer | undefined> {
+  return new Promise((resolve, reject) => {
+    const req = db.transaction('models', 'readonly').objectStore('models').get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+function idbPut(db: IDBDatabase, key: string, buf: ArrayBuffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('models', 'readwrite');
+    tx.objectStore('models').put(buf, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function fetchCached(db: IDBDatabase, remoteUrl: string, cacheKey: string, mimeType: string): Promise<string> {
+  const cached = await idbGet(db, cacheKey);
+  if (cached) return URL.createObjectURL(new Blob([cached], { type: mimeType }));
   const res = await fetch(remoteUrl);
   if (!res.ok) throw new Error(`Failed to fetch ${remoteUrl}: ${res.status}`);
-  await cache.put(cacheKey, res.clone());
   const buf = await res.arrayBuffer();
+  await idbPut(db, cacheKey, buf);
   return URL.createObjectURL(new Blob([buf], { type: mimeType }));
 }
 
@@ -37,13 +58,13 @@ self.addEventListener('message', async (e: MessageEvent<any>) => {
       self.postMessage({ status: 'loading', message: 'Initializing WebGPU...' });
       await engine.init();
 
-      const cache = await caches.open(MODEL_CACHE);
-      const alreadyCached = !!(await cache.match('kitten_tts_micro_v0_8.onnx'));
+      const db = await openModelDB();
+      const alreadyCached = !!(await idbGet(db, 'kitten_tts_micro_v0_8.onnx'));
       self.postMessage({ status: 'loading', message: alreadyCached ? 'Loading Model...' : 'Downloading 40M Model...' });
 
       const [onnxBlobUrl, voicesBlobUrl] = await Promise.all([
-        fetchCached(ONNX_URL, 'kitten_tts_micro_v0_8.onnx', 'application/octet-stream'),
-        fetchCached(VOICES_URL, 'kitten_tts_micro_v0_8_voices.npz', 'application/octet-stream'),
+        fetchCached(db, ONNX_URL, 'kitten_tts_micro_v0_8.onnx', 'application/octet-stream'),
+        fetchCached(db, VOICES_URL, 'kitten_tts_micro_v0_8_voices.npz', 'application/octet-stream'),
       ]);
 
       // Both model files are now in cache — app is fully offline-capable

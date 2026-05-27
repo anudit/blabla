@@ -499,10 +499,9 @@ export default function App() {
     const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
     try {
-      const proxyUrl = "https://corsproxy.io/?url=";
       const fetchUrl = gdocMatch 
-        ? proxyUrl + encodeURIComponent(targetUrl)
-        : proxyUrl + encodeURIComponent(`https://markdown.new/${targetUrl}?method=auto&retain_images`);
+        ? targetUrl
+        : `https://urltomd.anudit.workers.dev/${targetUrl}`;
       
       const res = await fetch(fetchUrl, { signal: controller.signal });
       clearTimeout(timeoutId);

@@ -278,7 +278,11 @@ export const loadEPUB = async (
           state.allOutline.push({ id: headId, text: norm, level: 1 });
         }
       }
-      const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote')), elementsToProcess = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
+      const blockTags = 'h1, h2, h3, h4, h5, h6, p, li, blockquote, div, section, article, aside, main, figure, figcaption, td, th, dt, dd, pre, address, hr, fieldset, form, details, dialog, summary, dl, ol, ul, table, tr, tbody, thead, tfoot, caption, nav, header, footer';
+      const rawBlockEls = Array.from(doc.querySelectorAll(blockTags));
+      // Filter out containers that contain other block-level elements (keep only "leaf" blocks)
+      const blockEls = rawBlockEls.filter(el => !rawBlockEls.some(other => other !== el && el.contains(other)));
+      const elementsToProcess = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
       processElements(elementsToProcess, chapterTitle, state);
       
       const isFinal = i === spineIds.length - 1;
@@ -347,8 +351,11 @@ export const loadMOBI = async (
     if (!fullHtml) throw new Error("Could not extract content");
     const doc = new DOMParser().parseFromString(fullHtml, 'text/html');
     const state = { globalLineIdCounter: 0, lastAddedHeaderText: null as string | null, allSentences: [] as any[], allContent: [] as any[], allOutline: [] as any[] };
-    const blockEls = Array.from(doc.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, blockquote')), elementsToProcess = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
-    
+    const blockTags = 'h1, h2, h3, h4, h5, h6, p, li, blockquote, div, section, article, aside, main, figure, figcaption, td, th, dt, dd, pre, address, hr, fieldset, form, details, dialog, summary, dl, ol, ul, table, tr, tbody, thead, tfoot, caption, nav, header, footer';
+    const rawBlockEls = Array.from(doc.querySelectorAll(blockTags));
+    const blockEls = rawBlockEls.filter(el => !rawBlockEls.some(other => other !== el && el.contains(other)));
+    const elementsToProcess = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
+
     let _lastYield = performance.now();
     const chunkSize = 100;
     for (let i = 0; i < elementsToProcess.length; i += chunkSize) {
@@ -374,7 +381,9 @@ export const loadPDF = async (
   try {
     const pdfjsLib = await import('pdfjs-dist');
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
-    const doc = await pdfjsLib.getDocument(data).promise;
+    const loadingTask = pdfjsLib.getDocument({ data });
+    const doc = await loadingTask.promise;
+    (doc as any).destroy = () => loadingTask.destroy();
     const scale = Math.min(window.devicePixelRatio || 1, 2);
     
     const globalLineList: any[] = [];

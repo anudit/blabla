@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --hot index.ts",
+    "dev": "bunx portless blabla bun --hot index.ts",
     "build": "bun run build.ts",
     "serve": "bunx live-server ./dist",
     "start": "NODE_ENV=production bun index.ts",
@@ -12,11 +12,11 @@
     "outdated": "bunx npm-check-updates --interactive"
   },
   "dependencies": {
-    "@preact/signals": "^2.9.0",
+    "@preact/signals": "^2.9.1",
     "fflate": "^0.8.3",
     "kitten-tts-webgpu": "^0.1.1",
-    "lucide-preact": "^1.16.0",
-    "pdfjs-dist": "^5.7.284",
+    "lucide-preact": "^1.17.0",
+    "pdfjs-dist": "^6.0.227",
     "preact": "^10.29.2"
   },
   "devDependencies": {

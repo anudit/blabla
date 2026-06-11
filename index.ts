@@ -51,7 +51,7 @@ const server = serve({
   development: process.env.NODE_ENV !== "production" && {
     hmr: true,
   },
-  port: 3031,
+  port: process.env.PORT || 3031,
 });
 
 console.log("🚀 Server running at " + server.url);

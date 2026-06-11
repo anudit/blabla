@@ -197,7 +197,7 @@ export default function App() {
     }
 
     // 5. Smart Scroll
-    const target = document.getElementById(`line-${unit.lines[0]}`);
+    let target = document.getElementById(`line-${unit.lines[0]}`);
     if (target) {
       const rect = target.getBoundingClientRect();
       const vh = window.innerHeight || document.documentElement.clientHeight;
@@ -205,6 +205,22 @@ export default function App() {
       
       if (isOffScreen) {
         const instant = isResuming.current; if (instant) isResuming.current = false;
+
+        // When resuming, if the target line is inside a content-visibility: auto block
+        // that hasn't been rendered yet, its rect will be zero. Walk up to the nearest
+        // ancestor that is actually laid out (the LazyBlock wrapper) and scroll to it.
+        if (instant && rect.height === 0) {
+          let parent = target.parentElement;
+          while (parent) {
+            const parentRect = parent.getBoundingClientRect();
+            if (parentRect.height > 0) {
+              target = parent;
+              break;
+            }
+            parent = parent.parentElement;
+          }
+        }
+
         setTimeout(() => target.scrollIntoView({ 
           behavior: instant ? 'instant' : 'smooth', 
           block: fType === 'pdf' ? 'nearest' : 'center'

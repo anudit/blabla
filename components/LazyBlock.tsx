@@ -19,9 +19,9 @@ const lazyBlockStyle: JSX.CSSProperties = {
   margin: '0 0 1em 0',
 };
 
-const LazyBlock = ({ children }: LazyBlockProps) => {
+const LazyBlock = ({ id, children }: LazyBlockProps) => {
   return (
-    <div style={lazyBlockStyle}>
+    <div id={id} style={lazyBlockStyle}>
       {children}
     </div>
   );

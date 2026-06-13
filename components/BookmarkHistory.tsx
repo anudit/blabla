@@ -83,7 +83,6 @@ export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkM
       }}>
         {bookmarks.map((entry, idx) => {
           const pct = Math.min(100, Math.round((entry.sentenceIndex / Math.max(entry.totalSentences, 1)) * 100));
-          const Icon = ICON[entry.fileType] ?? FileText;
           const isUrl = entry.fileType === 'url';
           const isLast = idx === bookmarks.length - 1;
 

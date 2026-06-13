@@ -39,6 +39,27 @@ export default function LandingCard({
 
   return (
     <>
+      <style dangerouslySetInnerHTML={{ __html: `
+        .landing-url-input:focus {
+          border-color: #2563eb !important;
+          box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15) !important;
+        }
+        .landing-url-btn:not(:disabled):hover {
+          background-color: #1d4ed8 !important;
+          border-color: #1d4ed8 !important;
+        }
+        .landing-url-btn:not(:disabled):active {
+          transform: translateY(1px) !important;
+        }
+        .landing-ghost-btn:hover {
+          color: ${t.text} !important;
+          border-color: ${t.textMuted} !important;
+        }
+        .landing-bookmarklet:hover {
+          color: ${t.text} !important;
+          border-color: ${t.textMuted} !important;
+        }
+      `}} />
       {/* ── Landing card ───────────────────────────────────────────────── */}
       <div style={{
         width: '90%', maxWidth: '38rem', marginTop: '3.5rem',
@@ -93,6 +114,7 @@ export default function LandingCard({
             <div style={{ position: 'relative', flex: 1 }}>
               <Icon name="globe" size={13} color={t.textMuted} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
               <input
+                className="landing-url-input"
                 type="url"
                 value={urlInputValue}
                 onChange={(e) => { setUrlInputValue((e.target as HTMLInputElement).value); if (urlError) setUrlError(''); }}
@@ -104,11 +126,12 @@ export default function LandingCard({
                   backgroundColor: isDarkMode ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)',
                   border: `1px solid ${urlError ? '#ef4444' : t.inputBorder}`,
                   borderRadius: '0.625rem', boxSizing: 'border-box', outline: 'none',
-                  transition: 'border-color 0.15s',
+                  transition: 'border-color 0.15s, box-shadow 0.15s',
                 }}
               />
             </div>
             <button
+              className="landing-url-btn"
               onClick={() => onUrlLoad()}
               disabled={isUrlLoading || !urlInputValue.trim()}
               style={{
@@ -131,6 +154,7 @@ export default function LandingCard({
 
           {/* Clipboard button */}
           <button
+            className="landing-ghost-btn"
             onClick={onClipboardPaste}
             style={{
               width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem',
@@ -145,7 +169,8 @@ export default function LandingCard({
 
           {/* Bookmarklet — drag to bookmarks bar */}
           <a
-            href={`javascript:(function(){window.location='https://blabla.anudit.dev?url='+encodeURIComponent(window.location.href)})()`}
+            className="landing-bookmarklet"
+            href={`javascript:(function(){window.location='https://blabla.anudit.dev/url='+encodeURIComponent(window.location.href)})()`}
             onClick={(e) => e.preventDefault()}
             draggable
             title="Drag this to your bookmarks bar. Click it on any page to open it in blabla."
@@ -162,7 +187,7 @@ export default function LandingCard({
           >
             <Icon name="bookmark" size={13} />
             <span>Open in BlaBla</span>
-            <span style={{ fontSize: '0.68rem', opacity: 0.6, marginLeft: '0.15rem' }}>— Drag to bookmarks bar</span>
+            <span style={{ fontSize: '0.68rem', opacity: 0.6, marginLeft: '0.15rem' }}>- Drag to bookmarks bar</span>
           </a>
 
           {showTextInput && (

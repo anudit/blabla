@@ -3,7 +3,7 @@ import {
   sentencesSignal, fileTypeSignal, outlineSignal,
 } from './signals';
 import {
-  findTitleInToc, extractSentences, stripMd, isMarkdown, extractRuns,
+  findTitleInToc, extractSentences, stripMd, isMarkdown, extractRuns, isImageUrl,
 } from './utils';
 
 const sentRe = /[^.!?]+[.!?]+/g;
@@ -151,7 +151,11 @@ export const loadMarkdown = async (
       } else {
         if (tableLines.length) flushTable();
         const imgM = line.match(/^\s*!\[([^\]]*)\]\(([^)]+)\)\s*$/);
+        const linkImgM = line.match(/^\s*\[!\[([^\]]*)\]\(([^)]+)\)\]\(([^)]+)\)\s*$/);
+        const emptyLinkM = line.match(/^\s*\[\s*\]\(([^)]+)\)\s*$/);
         if (imgM) { flushPara(); contentData.push({ type: 'image', id: `img-${idCounter++}`, src: imgM[2], alt: imgM[1], headerId: currentHeaderId }); }
+        else if (linkImgM) { flushPara(); contentData.push({ type: 'image', id: `img-${idCounter++}`, src: linkImgM[2], alt: linkImgM[1], headerId: currentHeaderId }); }
+        else if (emptyLinkM && isImageUrl(emptyLinkM[1])) { flushPara(); contentData.push({ type: 'image', id: `img-${idCounter++}`, src: emptyLinkM[1], alt: '', headerId: currentHeaderId }); }
         else {
           const li = line.match(/^\s*(?:[-*+]|\d+[.)]) (.*)/);
           if (li) {

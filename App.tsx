@@ -114,7 +114,7 @@ export default function App() {
           triggerFallback();
         } else if (fetchFailed) {
           modelFetchFailedRef.current = true;
-          ttsStatusSignal.value = 'Offline — connect to download model';
+          ttsStatusSignal.value = 'Offline - connect to download model';
         }
       }
     };
@@ -522,7 +522,7 @@ export default function App() {
       targetUrl = `https://docs.google.com/document/d/${gdocMatch[1]}/export?format=md`;
     }
 
-    setIsUrlLoading(true); setUrlError('');
+    setIsUrlLoading(true); setIsDocLoading(true); setUrlError('');
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
@@ -573,6 +573,7 @@ export default function App() {
 
     } catch (err: any) { 
       clearTimeout(timeoutId);
+      setIsDocLoading(false);
       if (err.name === 'AbortError') {
         setUrlError('Request timed out. The document might be too large or the proxy is slow.');
       } else {
@@ -584,11 +585,15 @@ export default function App() {
     } finally { setIsUrlLoading(false); }
   };
 
-  // Auto-load from ?url= query param (used by the bookmarklet)
+  // Auto-load from ?url= query param or /url=<target> path (used by the bookmarklet)
   useEffect(() => {
-    const u = new URLSearchParams(window.location.search).get('url');
+    let u = new URLSearchParams(window.location.search).get('url');
+    const pathMatch = window.location.pathname.match(/^\/url=(.+)$/);
+    if (!u && pathMatch) {
+      try { u = decodeURIComponent(pathMatch[1]); } catch { u = pathMatch[1]; }
+    }
     if (u) {
-      history.replaceState(null, '', window.location.pathname);
+      history.replaceState(null, '', '/');
       handleUrlLoad(u);
     }
   }, []);
@@ -606,6 +611,7 @@ export default function App() {
         <Suspense fallback={null}><ContentViewer fileType={fileTypeSignal.peek()!} pages={pages} pdfDoc={pdfDoc} epubContent={epubContent} activeHeaderId={activeHeaderId} isDarkMode={isDarkMode} t={t} fontSize={fontSize} onLineClick={handleLineClick} /></Suspense>
       )}
       <style>{`
+        html, body { background-color: ${t.bg}; }
         .epub-highlight-active { background: rgba(250,204,21,0.45); border-radius:3px; }
         .word-highlight-active { background: #b47a32 !important; color: white !important; border-radius:3px; z-index: 30; }
         .pdf-highlight-active { background-color: rgba(250, 204, 21, 0.45) !important; box-shadow: 0 0 0 1px rgba(210, 170, 0, 0.4) !important; z-index:20 !important; }

@@ -39,7 +39,7 @@ export function extractSentences(text: string): string[] {
   // dots/! inside URLs or code (e.g. https://dev.to/... would otherwise
   // be treated as a sentence boundary).
   const saved: string[] = [];
-  const safe = text.replace(/!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\)|`[^`\n]+`/g, (m) => {
+  const safe = text.replace(/\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\)|`[^`\n]+`/g, (m) => {
     return `\x00${saved.push(m) - 1}\x00`;
   });
 
@@ -69,7 +69,7 @@ export function stripMd(s: string): string {
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/_([^_]+)_/g, '$1')
     .replace(/`([^`]+)`/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    .replace(/\[([^\]]*)\]\([^)]+\)/g, '$1');
 }
 
 /** True if the text looks like markdown (has at least one ATX heading). */
@@ -77,9 +77,13 @@ export function isMarkdown(text: string): boolean {
   return /^#{1,6} \S/m.test(text);
 }
 
-// Image must come before link pattern (both start with `[`)
-// Matches ![alt](src), **bold**, __bold__, ~~strike~~, *italic*, _italic_, `code`, [text](url)
-export const INLINE_MD_RE = /!\[[^\]]*\]\([^)]+\)|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/g;
+export function isImageUrl(url: string): boolean {
+  return /\.(jpeg|jpg|png|gif|webp|svg|bmp|avif|heic)([?#][^\s)]*)?$/i.test(url) || /^data:image\//i.test(url);
+}
+
+// Link-with-image first, then image, then link (all start with `[`)
+// Matches [![alt](src)](url), ![alt](src), **bold**, __bold__, ~~strike~~, *italic*, _italic_, `code`, [text](url) where text may be empty
+export const INLINE_MD_RE = /\[!\[[^\]]*\]\([^)]+\)\]\([^)]+\)|!\[[^\]]*\]\([^)]+\)|\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~|\*[^*\n]+\*|_[^_\n]+_|`[^`\n]+`|\[[^\]]*\]\([^)]+\)/g;
 
 /** Render inline markdown to React nodes for visual display. */
 export function renderMd(text: string, linkColor: string = '#3b82f6'): ComponentChildren {
@@ -100,11 +104,25 @@ export function renderMd(text: string, linkColor: string = '#3b82f6'): Component
     } else if (s.startsWith('`')) {
       parts.push(<code key={ki++} style={{ fontFamily: 'monospace', fontSize: '0.88em', padding: '0.1em 0.25em', backgroundColor: 'rgba(127,127,127,0.15)', borderRadius: '3px' }}>{s.slice(1, -1)}</code>);
     } else {
-      const lm = s.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      if (lm) {
-        parts.push(<a key={ki++} href={lm[2]} target="_blank" rel="noopener noreferrer" style={{ color: linkColor, textDecoration: 'none', textUnderlineOffset: '2px', textDecorationColor: linkColor + '80' }}>{lm[1]}</a>);
+      const imgLinkM = s.match(/^\[!\[([^\]]*)\]\(([^)]+)\)\]\(([^)]+)\)$/);
+      if (imgLinkM) {
+        // Link wraps an image: [![alt](src)](url) -> render the image
+        parts.push(<img key={ki++} src={imgLinkM[2]} alt={imgLinkM[1]} style={{ maxWidth: '100%', borderRadius: '4px', verticalAlign: 'middle', margin: '0 2px' }} />);
       } else {
-        parts.push(s);
+        const lm = s.match(/^\[([^\]]*)\]\(([^)]+)\)$/);
+        if (lm) {
+          const linkText = lm[1];
+          const linkUrl = lm[2];
+          if (!linkText.trim() && isImageUrl(linkUrl)) {
+            // Empty link text pointing to an image URL -> render as image
+            parts.push(<img key={ki++} src={linkUrl} alt={linkText} style={{ maxWidth: '100%', borderRadius: '4px', verticalAlign: 'middle', margin: '0 2px' }} />);
+          } else {
+            const label = linkText.trim() || linkUrl;
+            parts.push(<a key={ki++} href={linkUrl} target="_blank" rel="noopener noreferrer" style={{ color: linkColor, textDecoration: 'none', textUnderlineOffset: '2px', textDecorationColor: linkColor + '80' }}>{label}</a>);
+          }
+        } else {
+          parts.push(s);
+        }
       }
     }
     last = m.index! + s.length;

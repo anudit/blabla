@@ -311,11 +311,11 @@ function SettingsMenu({
       </div>
       <div style={{ ...row, justifyContent: 'space-between' }}>
         <span style={lbl}>CPU</span>
-        <span style={val}>{cpuPct !== null ? `${cpuPct}%` : '—'}</span>
+        <span style={val}>{cpuPct !== null ? `${cpuPct}%` : '-'}</span>
       </div>
       <div style={{ ...row, justifyContent: 'space-between', paddingBottom: '0.55rem' }}>
         <span style={lbl}>Memory</span>
-        <span style={val}>{memGb !== null ? `${memGb} GB` : '—'}</span>
+        <span style={val}>{memGb !== null ? `${memGb} GB` : '-'}</span>
       </div>
       <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />
       <div style={{ ...row, justifyContent: 'space-between', gap: '0.5rem' }}>

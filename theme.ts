@@ -249,3 +249,93 @@ export const THEMES: Record<ThemeName, ThemeTokens> = {
 
 /** Shared CSS transition applied to every themed element */
 export const TT = 'background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease';
+
+export interface OutlineTokens {
+  toggleBg: string;
+  toggleColor: string;
+  toggleBorder: string;
+  panelBg: string;
+  panelBorder: string;
+  label: string;
+  text: string;
+  textMuted: string;
+  activeColor: string;
+  activeBg: string;
+  hoverBg: string;
+  divider: string;
+}
+export const outlineTokens = (isDark: boolean): OutlineTokens => isDark ? {
+  toggleBg:     '#2a2015',
+  toggleColor:  '#c0b4a4',
+  toggleBorder: '#1a1510',
+  panelBg:      '#1e1c17',
+  panelBorder:  '#3a3428',
+  label:        '#6a6058',
+  text:         '#c8bfb0',
+  textMuted:    '#8a8070',
+  activeColor:  '#7eb8f0',
+  activeBg:     'rgba(126,184,240,0.10)',
+  hoverBg:      'rgba(255,255,255,0.05)',
+  divider:      '#3a3428',
+} : {
+  toggleBg:     '#2a2015',
+  toggleColor:  '#c0b4a4',
+  toggleBorder: '#1a1510',
+  panelBg:      '#faf6ef',
+  panelBorder:  '#d4c8b4',
+  label:        '#a09080',
+  text:         '#3a3028',
+  textMuted:    '#7a6e60',
+  activeColor:  '#2563eb',
+  activeBg:     'rgba(37,99,235,0.07)',
+  hoverBg:      'rgba(0,0,0,0.04)',
+  divider:      '#e0d8c8',
+};
+
+export interface BookmarkTokens {
+  label: string;
+  containerBg: string;
+  containerBorder: string;
+  divider: string;
+  text: string;
+  textMuted: string;
+  textFaint: string;
+  iconColor: string;
+  progressBg: string;
+  progressFill: string;
+  tagBg: string;
+  tagColor: string;
+  deleteFaint: string;
+  hoverBg: string;
+}
+export const bookmarkTokens = (isDark: boolean): BookmarkTokens => isDark ? {
+  label:           '#6a6058',
+  containerBg:     '#242018',
+  containerBorder: '#3a3428',
+  divider:         '#302c24',
+  text:            '#c8bfb0',
+  textMuted:       '#7a6e60',
+  textFaint:       '#5a5248',
+  iconColor:       '#6a6058',
+  progressBg:      '#3a3428',
+  progressFill:    '#d4a000',
+  tagBg:           '#302c24',
+  tagColor:        '#6a6058',
+  deleteFaint:     '#4a4238',
+  hoverBg:         '#2c2820',
+} : {
+  label:           '#9a8e80',
+  containerBg:     '#faf6ef',
+  containerBorder: '#e0d8c8',
+  divider:         '#ede8df',
+  text:            '#3a3028',
+  textMuted:       '#7a6e60',
+  textFaint:       '#b0a898',
+  iconColor:       '#b0a898',
+  progressBg:      '#e8e0d0',
+  progressFill:    '#c89800',
+  tagBg:           '#ede8df',
+  tagColor:        '#9a8e80',
+  deleteFaint:     '#c8bfb0',
+  hoverBg:         '#f5efe3',
+};

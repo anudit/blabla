@@ -372,6 +372,134 @@ export const loadMOBI = async (
   } catch (e) { console.error(e); alert("Could not load MOBI file"); } finally { setIsDocLoading(false); }
 };
 
+/** Convert DOCX (wordprocessingml) XML to a minimal HTML string the existing
+ *  EPUB pipeline (`processElements` + DOMParser) can ingest. */
+function docxXmlToHtml(xmlString: string): string {
+  const xmlDoc = new DOMParser().parseFromString(xmlString, 'text/xml');
+  const out: string[] = [];
+  const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  function walkChildren(parent: Element) {
+    for (const child of Array.from(parent.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        const t = child.textContent || '';
+        if (t) out.push(escape(t));
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        walk(child as Element);
+      }
+    }
+  }
+
+  function walk(el: Element) {
+    const tag = el.tagName;
+    if (tag === 'w:sectPr') return;
+
+    if (tag === 'w:p') {
+      const pStyle = el.getElementsByTagName('w:pStyle')[0];
+      const styleVal = pStyle?.getAttribute('w:val') || '';
+      let lvl = 0;
+      const hm = styleVal.match(/^(?:Heading|TOCHeading)(\d+)$/i);
+      if (hm) lvl = Math.min(6, Math.max(1, parseInt(hm[1])));
+      else if (/^Title$/i.test(styleVal)) lvl = 1;
+      else if (/^Subtitle$/i.test(styleVal)) lvl = 2;
+
+      if (lvl > 0) out.push(`<h${lvl}>`); else out.push('<p>');
+      walkChildren(el);
+      if (lvl > 0) out.push(`</h${lvl}>`); else out.push('</p>');
+      return;
+    }
+
+    if (tag === 'w:r') {
+      const rPr = el.getElementsByTagName('w:rPr')[0];
+      const isBold   = !!rPr && (rPr.getElementsByTagName('w:b').length   || rPr.getElementsByTagName('w:bCs').length);
+      const isItalic = !!rPr && (rPr.getElementsByTagName('w:i').length   || rPr.getElementsByTagName('w:iCs').length);
+      const isStrike = !!rPr &&  rPr.getElementsByTagName('w:strike').length;
+
+      const open: string[] = []; const close: string[] = [];
+      if (isBold)   { open.push('<strong>'); close.unshift('</strong>'); }
+      if (isItalic) { open.push('<em>');     close.unshift('</em>'); }
+      if (isStrike) { open.push('<s>');      close.unshift('</s>'); }
+      for (const t of open) out.push(t);
+      walkChildren(el);
+      for (const t of close) out.push(t);
+      return;
+    }
+
+    if (tag === 'w:t')    { if (el.textContent) out.push(escape(el.textContent)); return; }
+    if (tag === 'w:br')   { out.push('<br/>'); return; }
+    if (tag === 'w:tab')  { out.push(' '); return; }
+
+    if (tag === 'w:hyperlink' || tag === 'w:ins' || tag === 'w:del' ||
+        tag === 'w:smartTag' || tag === 'w:sdt'   || tag === 'w:proofErr' ||
+        tag === 'w:bookmarkStart' || tag === 'w:bookmarkEnd') {
+      walkChildren(el);
+      return;
+    }
+
+    if (tag === 'w:tbl') {
+      out.push('<table>');
+      for (const tr of Array.from(el.getElementsByTagName('w:tr'))) {
+        out.push('<tr>');
+        for (const tc of Array.from(tr.getElementsByTagName('w:tc'))) {
+          out.push('<td>');
+          for (const p of Array.from(tc.getElementsByTagName('w:p'))) walk(p);
+          out.push('</td>');
+        }
+        out.push('</tr>');
+      }
+      out.push('</table>');
+      return;
+    }
+
+    walkChildren(el);
+  }
+
+  const body = xmlDoc.getElementsByTagName('w:body')[0];
+  if (body) walkChildren(body);
+  return out.join('');
+}
+
+export const loadDOCX = async (
+  data: ArrayBuffer,
+  onChunk: (sentences: any[], content: any[], outline: any[], isFinal: boolean) => void,
+  setIsDocLoading: (loading: boolean) => void
+) => {
+  setIsDocLoading(true);
+  try {
+    const files = await new Promise<Record<string, Uint8Array>>((resolve, reject) => {
+      unzip(new Uint8Array(data), (err, result) => err ? reject(err) : resolve(result));
+    });
+    const docEntry = Object.keys(files).find(k => /word\/document\.xml$/i.test(k));
+    if (!docEntry) throw new Error('Not a valid DOCX file');
+
+    const html = docxXmlToHtml(new TextDecoder().decode(files[docEntry]));
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+
+    const state = { globalLineIdCounter: 0, lastAddedHeaderText: null as string | null, allSentences: [] as any[], allContent: [] as any[], allOutline: [] as any[] };
+    const blockTags = 'h1, h2, h3, h4, h5, h6, p, li, blockquote, div, section, article, aside, main, figure, figcaption, td, th, dt, dd, pre, address, hr, fieldset, form, details, dialog, summary, dl, ol, ul, table, tr, tbody, thead, tfoot, caption, nav, header, footer';
+    const rawBlockEls = Array.from(doc.querySelectorAll(blockTags));
+    const blockEls = rawBlockEls.filter(el => !rawBlockEls.some(other => other !== el && el.contains(other)));
+    const elementsToProcess = blockEls.length > 0 ? blockEls : (doc.body ? [doc.body] : []);
+
+    let _lastYield = performance.now();
+    let hasYieldedInitial = false;
+    const chunkSize = 100;
+    for (let i = 0; i < elementsToProcess.length; i += chunkSize) {
+      const chunk = elementsToProcess.slice(i, i + chunkSize);
+      processElements(chunk, null, state);
+
+      const isFinal = i + chunkSize >= elementsToProcess.length;
+      if (isFinal || performance.now() - _lastYield > 50 || !hasYieldedInitial) {
+        onChunk([...state.allSentences], [...state.allContent], [...state.allOutline], isFinal);
+        hasYieldedInitial = true;
+        _lastYield = performance.now();
+        await new Promise<void>(r => setTimeout(r, 0));
+      }
+    }
+  } catch (e) { console.error(e); alert('Could not load DOCX file'); }
+  finally { setIsDocLoading(false); }
+};
+
 export const loadPDF = async (
   data: ArrayBuffer,
   onChunk: (sentences: any[], pages: any[], pdfDoc: any, isFinal: boolean) => void,
@@ -379,7 +507,7 @@ export const loadPDF = async (
 ) => {
   setIsDocLoading(true);
   try {
-    const pdfjsLib = await import('pdfjs-dist');
+    const pdfjsLib = await import('pdfjs-dist/build/pdf.min.mjs');
     pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
     const loadingTask = pdfjsLib.getDocument({ data });
     const doc = await loadingTask.promise;

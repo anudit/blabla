@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { AlignJustify, X } from 'lucide-preact';
+import Icon from './icons';
 import type { Signal } from '@preact/signals';
+import { outlineTokens } from '../theme';
 
 export interface OutlineEntry {
   id: string;
@@ -52,33 +53,7 @@ export default function BookOutline({ entries, activeId, isDarkMode }: Props) {
 
   if (entries.length === 0) return null;
 
-  const t = isDarkMode ? {
-    toggleBg:      '#2a2015',
-    toggleColor:   '#c0b4a4',
-    toggleBorder:  '#1a1510',
-    panelBg:       '#1e1c17',
-    panelBorder:   '#3a3428',
-    label:         '#6a6058',
-    text:          '#c8bfb0',
-    textMuted:     '#8a8070',
-    activeColor:   '#7eb8f0',
-    activeBg:      'rgba(126,184,240,0.10)',
-    hoverBg:       'rgba(255,255,255,0.05)',
-    divider:       '#3a3428',
-  } : {
-    toggleBg:      '#2a2015',
-    toggleColor:   '#c0b4a4',
-    toggleBorder:  '#1a1510',
-    panelBg:       '#faf6ef',
-    panelBorder:   '#d4c8b4',
-    label:         '#a09080',
-    text:          '#3a3028',
-    textMuted:     '#7a6e60',
-    activeColor:   '#2563eb',
-    activeBg:      'rgba(37,99,235,0.07)',
-    hoverBg:       'rgba(0,0,0,0.04)',
-    divider:       '#e0d8c8',
-  };
+  const t = outlineTokens(isDarkMode);
 
   // Panel width: on mobile cap to viewport, on desktop fixed 252px
   const panelW = isMobile ? `min(85vw, 320px)` : '252px';
@@ -107,7 +82,7 @@ export default function BookOutline({ entries, activeId, isDarkMode }: Props) {
           transition: 'opacity 0.15s',
         }}
       >
-        {isOpen ? <X size={13} /> : <AlignJustify size={13} />}
+        {isOpen ? <Icon name="x" size={13} /> : <Icon name="text-align-justify" size={13} />}
       </button>
 
       {/* ── Collapsible panel ── */}

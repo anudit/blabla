@@ -1,6 +1,6 @@
 import { useRef } from 'preact/hooks';
 import type { JSX } from 'preact';
-import { Upload, Globe, Loader2, Clipboard, Bookmark } from 'lucide-preact';
+import Icon from './icons';
 import type { ThemeTokens } from '../theme';
 import BookmarkHistory from './BookmarkHistory';
 import type { BookmarkEntry } from './BookmarkHistory';
@@ -65,19 +65,19 @@ export default function LandingCard({
             backgroundColor: isDarkMode ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.05)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
-            <Upload size={18} color={t.textMuted} />
+            <Icon name="upload" size={18} color={t.textMuted} />
           </div>
           <p style={{ fontSize: '0.95rem', fontWeight: 500, color: t.text, margin: '0 0 0.3rem', letterSpacing: '-0.01em' }}>
             Drop a file to start reading
           </p>
           <p style={{ fontSize: '0.75rem', color: t.textMuted, margin: 0, letterSpacing: '0.02em' }}>
-            PDF · EPUB · MOBI · Markdown · TXT
+            PDF · EPUB · MOBI · DOCX · Markdown · TXT
           </p>
           <input
             type="file"
             ref={fileInputRef}
             onChange={onFileDrop as any}
-            accept="application/pdf,.epub,.mobi,.azw,.azw3,.md,.markdown,.txt,text/plain"
+            accept="application/pdf,.epub,.mobi,.azw,.azw3,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.markdown,.txt,text/plain"
             style={{ display: 'none' }}
           />
         </div>
@@ -91,7 +91,7 @@ export default function LandingCard({
           {/* URL row */}
           <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
             <div style={{ position: 'relative', flex: 1 }}>
-              <Globe size={13} color={t.textMuted} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
+              <Icon name="globe" size={13} color={t.textMuted} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
               <input
                 type="url"
                 value={urlInputValue}
@@ -123,7 +123,7 @@ export default function LandingCard({
               }}
             >
               {isUrlLoading
-                ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> Fetching…</>
+                ? <><Icon name="loader-circle" size={12} style={{ animation: 'spin 1s linear infinite' }} /> Fetching…</>
                 : 'Load URL'}
             </button>
           </div>
@@ -140,7 +140,7 @@ export default function LandingCard({
               borderRadius: '0.625rem', cursor: 'pointer', transition: 'color 0.15s, border-color 0.15s',
             }}
           >
-            <Clipboard size={13} /> Paste from Clipboard
+            <Icon name="clipboard" size={13} /> Paste from Clipboard
           </button>
 
           {/* Bookmarklet — drag to bookmarks bar */}
@@ -160,7 +160,7 @@ export default function LandingCard({
               userSelect: 'none',
             }}
           >
-            <Bookmark size={13} />
+            <Icon name="bookmark" size={13} />
             <span>Open in BlaBla</span>
             <span style={{ fontSize: '0.68rem', opacity: 0.6, marginLeft: '0.15rem' }}>— Drag to bookmarks bar</span>
           </a>

@@ -1,4 +1,5 @@
-import { Clock, Trash2, BookOpen, FileText, Globe } from 'lucide-preact';
+import Icon from './icons';
+import { bookmarkTokens } from '../theme';
 
 export interface BookmarkEntry {
   id: string;
@@ -49,42 +50,16 @@ interface Props {
   isDarkMode: boolean;
 }
 
-const ICON = { epub: BookOpen, pdf: FileText, url: Globe } as const;
+const TYPE_ICON: Record<BookmarkEntry['fileType'], 'book-open' | 'file-text' | 'globe'> = {
+  epub: 'book-open',
+  pdf: 'file-text',
+  url: 'globe',
+};
 
 export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkMode }: Props) {
   if (bookmarks.length === 0) return null;
 
-  const c = isDarkMode ? {
-    label:        '#6a6058',
-    containerBg:  '#242018',
-    containerBorder: '#3a3428',
-    divider:      '#302c24',
-    text:         '#c8bfb0',
-    textMuted:    '#7a6e60',
-    textFaint:    '#5a5248',
-    iconColor:    '#6a6058',
-    progressBg:   '#3a3428',
-    progressFill: '#d4a000',
-    tagBg:        '#302c24',
-    tagColor:     '#6a6058',
-    deleteFaint:  '#4a4238',
-    hoverBg:      '#2c2820',
-  } : {
-    label:        '#9a8e80',
-    containerBg:  '#faf6ef',
-    containerBorder: '#e0d8c8',
-    divider:      '#ede8df',
-    text:         '#3a3028',
-    textMuted:    '#7a6e60',
-    textFaint:    '#b0a898',
-    iconColor:    '#b0a898',
-    progressBg:   '#e8e0d0',
-    progressFill: '#c89800',
-    tagBg:        '#ede8df',
-    tagColor:     '#9a8e80',
-    deleteFaint:  '#c8bfb0',
-    hoverBg:      '#f5efe3',
-  };
+  const c = bookmarkTokens(isDarkMode);
 
   const hasLocalFiles = bookmarks.some(b => b.fileType !== 'url');
 
@@ -93,7 +68,7 @@ export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkM
 
       {/* Section label */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginBottom: '0.5rem', paddingLeft: '0.1rem' }}>
-        <Clock size={11} color={c.label} />
+        <Icon name="clock" size={11} color={c.label} />
         <span style={{ fontSize: '0.68rem', fontWeight: 600, color: c.label, letterSpacing: '0.06em', textTransform: 'uppercase' as const }}>
           Continue Reading
         </span>
@@ -128,7 +103,7 @@ export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkM
                 onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.backgroundColor = 'transparent'; }}
               >
                 {/* Icon */}
-                <Icon size={15} color={c.iconColor} style={{ flexShrink: 0, marginTop: '1px' }} />
+                <Icon name={TYPE_ICON[entry.fileType]} size={15} color={c.iconColor} style={{ flexShrink: 0, marginTop: '1px' }} />
 
                 {/* Content */}
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -194,7 +169,7 @@ export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkM
                   onMouseEnter={e => (e.currentTarget.style.color = '#ef4444')}
                   onMouseLeave={e => (e.currentTarget.style.color = c.deleteFaint)}
                 >
-                  <Trash2 size={13} />
+                  <Icon name="trash-2" size={13} />
                 </button>
               </div>
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'preact/hooks';
 import type { JSX } from 'preact';
-import { Play, Pause, Loader2, Menu, Palette, Beaker } from 'lucide-preact';
+import Icon from './icons';
 import type { ThemeTokens, ThemeName } from '../theme';
 import { TT, staticStyles, VOICES, THEMES, THEME_META } from '../theme';
 import {
@@ -99,15 +99,15 @@ export default function BottomBar({
         disabled={!hasSentences || !isModelReady}
         style={{ ...staticStyles.playButton, ...(!hasSentences || !isModelReady ? staticStyles.buttonDisabled : {}) }}
       >
-        {playbackState === 'Buffering' ? <Loader2 size={20} color="white" style={{ animation: 'spin 0.8s linear infinite' }} /> : isPlaying ? <Pause size={20} fill="white" /> : <Play size={20} fill="white" style={{ marginLeft: '2px' }} />}
+        {playbackState === 'Buffering' ? <Icon name="loader-circle" size={20} color="white" style={{ animation: 'spin 0.8s linear infinite' }} /> : isPlaying ? <Icon name="pause" size={20} fill="white" /> : <Icon name="play" size={20} fill="white" style={{ marginLeft: '2px' }} />}
       </button>
 
       <button onClick={() => { const next = !isMenuOpen; closeAll(); setIsMenuOpen(next); }} style={iconButtonStyle}>
-        <Menu size={24} />
+        <Icon name="menu" size={24} />
       </button>
 
       <button onClick={() => { const next = !isThemePickerOpen; closeAll(); setIsThemePickerOpen(next); }} style={iconButtonStyle} title="Choose theme">
-        <Palette size={20} />
+        <Icon name="palette" size={20} />
       </button>
 
       {isSpeedMenuOpen && (
@@ -274,7 +274,7 @@ function SettingsMenu({
       <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />
       <div style={{ padding: '0.6rem 1rem', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
         <button onClick={onTestAudio} disabled={!isModelReady} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem', padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500, backgroundColor: 'transparent', color: !isModelReady ? t.textMuted : t.text, border: `1px solid ${t.menuBorder}`, borderRadius: '0.5rem', cursor: !isModelReady ? 'not-allowed' : 'pointer', opacity: !isModelReady ? 0.5 : 1 }}>
-          <Beaker size={13} /> Test Voice
+          <Icon name="beaker" size={13} /> Test Voice
         </button>
         <button onClick={() => { onClose(); onReset(); }} style={{ padding: '0.45rem', fontSize: '0.78rem', fontWeight: 500, backgroundColor: 'transparent', color: '#ef4444', border: '1px solid rgba(239,68,68,0.25)', borderRadius: '0.5rem', cursor: 'pointer' }}>Reset Document</button>
       </div>

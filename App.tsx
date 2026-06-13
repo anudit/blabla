@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense } from 'preact/compat';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'preact/hooks';
+import { lazy, Suspense } from 'preact/compat';
 import { useSignalEffect, useComputed } from '@preact/signals';
 import type { JSX } from 'preact';
-import { Target, Loader2, Check } from 'lucide-preact';
+import Icon from './components/icons';
 import {
   isPlayingSignal, playbackStateSignal, ttsStatusSignal,
   isModelReadySignal, currentSentenceIndexSignal, restartSignal,
@@ -13,7 +14,7 @@ import { THEMES, TT } from './theme';
 import type { ThemeName } from './theme';
 import { calculateWordTimings, extractWords } from './utils';
 import {
-  loadMarkdown, loadText, loadEPUB, loadPDF, loadMOBI
+  loadMarkdown, loadText, loadEPUB, loadPDF, loadMOBI, loadDOCX
 } from './loaders';
 import { getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
 import type { BookmarkEntry } from './components/BookmarkHistory';
@@ -61,6 +62,7 @@ export default function App() {
   const audioResolvers = useRef(new Map<number, (buffer: AudioBuffer) => void>());
   const isWaitingForAudio = useRef(false);
   const eggTimerRef = useRef<any>(null);
+  const eggTimersRef = useRef<number[]>([]);
   const pendingResumeRef = useRef<number>(-1);
   const isResuming = useRef(false);
   const nextStartTimeRef = useRef(0);
@@ -134,6 +136,9 @@ export default function App() {
       workerRef.current?.terminate();
       if (audioContext.current) audioContext.current.close();
       window.removeEventListener('online', onOnline);
+      eggTimersRef.current.forEach(id => clearTimeout(id));
+      eggTimersRef.current = [];
+      if (bookmarkDebounceRef.current) { clearTimeout(bookmarkDebounceRef.current); bookmarkDebounceRef.current = null; }
     };
   }, []);
 
@@ -143,22 +148,20 @@ export default function App() {
     }
   });
 
-  // MASTER OBSERVER: Centralized highlight + DOM swap + scroll
+  // Effect A (highlight + scroll): subscribes ONLY to currentSentenceIndexSignal.
+  // Peek() on the other signals so loader chunk-emissions don't re-fire this.
   useSignalEffect(() => {
-    const idx = currentSentenceIndexSignal.value, sents = sentencesSignal.value, fType = fileTypeSignal.value;
+    const idx = currentSentenceIndexSignal.value;
+    const sents = sentencesSignal.peek();
+    const fType = fileTypeSignal.peek();
     const prevIdx = prevIndexRef.current;
-    
-    // 1. Cleanup previous highlight (Targeted instead of querySelectorAll)
+
     if (prevIdx >= 0 && sents[prevIdx]) {
       const prevUnit = sents[prevIdx];
       prevUnit.lines.forEach((id: number) => {
         const el = document.getElementById(`line-${id}`);
-        if (el) {
-          el.classList.remove('epub-highlight-active', 'pdf-highlight-active');
-          // Note: Text restoration is now handled automatically by SentenceItem re-rendering
-        }
+        if (el) el.classList.remove('epub-highlight-active', 'pdf-highlight-active');
       });
-      // Also cleanup word highlights + restore word spans to plain text
       clearWordHighlight();
       restoreWordSpans();
     }
@@ -167,7 +170,6 @@ export default function App() {
     prevIndexRef.current = idx;
     if (idx < 0 || !unit) return;
 
-    // 3. Apply highlight
     if (fType === 'pdf') {
       unit.lines.forEach((id: number) => {
         document.getElementById(`line-${id}`)?.classList.add('pdf-highlight-active');
@@ -177,9 +179,6 @@ export default function App() {
         const el = document.getElementById(`line-${id}`);
         if (!el) return;
         (el.textContent === '' && el.closest('p') ? el.closest('p')! : el).classList.add('epub-highlight-active');
-        
-        // 4. EPUB Special: Inject word spans for granular highlighting
-        // We only do this for the first line of the active sentence
         if (id === unit.lines[0]) {
           lastActiveSentenceRef.current = { id, text: unit.text };
           const words = extractWords(unit.text);
@@ -196,37 +195,33 @@ export default function App() {
       });
     }
 
-    // 5. Smart Scroll
     let target = document.getElementById(`line-${unit.lines[0]}`);
     if (target) {
       const rect = target.getBoundingClientRect();
       const vh = window.innerHeight || document.documentElement.clientHeight;
       const isOffScreen = rect.top < 80 || rect.bottom > vh - 140;
-      
       if (isOffScreen) {
         const instant = isResuming.current; if (instant) isResuming.current = false;
-
-        // When resuming, if the target line is inside a content-visibility: auto block
-        // that hasn't been rendered yet, its rect will be zero. Walk up to the nearest
-        // ancestor that is actually laid out (the LazyBlock wrapper) and scroll to it.
         if (instant && rect.height === 0) {
           let parent = target.parentElement;
           while (parent) {
             const parentRect = parent.getBoundingClientRect();
-            if (parentRect.height > 0) {
-              target = parent;
-              break;
-            }
+            if (parentRect.height > 0) { target = parent; break; }
             parent = parent.parentElement;
           }
         }
-
-        setTimeout(() => target.scrollIntoView({ 
-          behavior: instant ? 'instant' : 'smooth', 
-          block: fType === 'pdf' ? 'nearest' : 'center'
-        }), 0);
+        setTimeout(() => target!.scrollIntoView({ behavior: instant ? 'instant' : 'smooth', block: fType === 'pdf' ? 'nearest' : 'center' }), 0);
       }
     }
+  });
+
+  // Effect B (cleanup-on-swap): runs only when sentencesSignal replaces (file load).
+  useSignalEffect(() => {
+    sentencesSignal.value;
+    const prevIdx = prevIndexRef.current;
+    if (prevIdx < 0) return;
+    clearWordHighlight();
+    restoreWordSpans();
   });
 
   const bookmarkDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -240,6 +235,7 @@ export default function App() {
         setBookmarks(getBookmarks());
       }, 2000);
     }
+    return () => { if (bookmarkDebounceRef.current) { clearTimeout(bookmarkDebounceRef.current); bookmarkDebounceRef.current = null; } };
   });
 
   useEffect(() => {
@@ -458,10 +454,26 @@ export default function App() {
           sentencesSignal.value = sents;
           setEpubContent(content);
           outlineSignal.value = outline;
-          
+
           const resumeIdx = pendingResumeRef.current;
           const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
-          
+
+          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+            fileTypeSignal.value = 'epub';
+            setIsDocLoading(false);
+          }
+        }, setIsDocLoading);
+        r.readAsArrayBuffer(file);
+      }
+      else if (file.name.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        r.onload = (ev) => loadDOCX(ev.target?.result as ArrayBuffer, (sents, content, outline, isFinal) => {
+          sentencesSignal.value = sents;
+          setEpubContent(content);
+          outlineSignal.value = outline;
+
+          const resumeIdx = pendingResumeRef.current;
+          const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
+
           if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
             fileTypeSignal.value = 'epub';
             setIsDocLoading(false);
@@ -585,7 +597,7 @@ export default function App() {
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', backgroundColor: t.bg, fontFamily: 'system-ui, sans-serif', color: t.text, paddingTop: '1rem', transition: TT }}>
       {isDocLoading ? (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', gap: '0.85rem', color: t.textMuted }}>
-          <Loader2 size={28} color={t.textMuted} style={{ animation: 'spin 0.8s linear infinite' }} />
+          <Icon name="loader-circle" size={28} color={t.textMuted} style={{ animation: 'spin 0.8s linear infinite' }} />
           <span>{currentFileNameSignal.value ? `Loading ${currentFileNameSignal.value}…` : 'Loading…'}</span>
         </div>
       ) : !hasSentences.value ? (
@@ -604,7 +616,7 @@ export default function App() {
       <OfflineToast />
       {eggPhase && <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ width: '300px', height: '300px', borderRadius: '50%', backgroundColor: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: eggPhase === 'in' ? 'eggBounceIn 0.55s forwards' : 'eggFadeOut 0.6s forwards' }}><img src="./180.png" style={{ width: '250px', height: '250px' }} /></div></div>}
       <ScrollToCurrentButton />
-      <Suspense fallback={null}><BottomBar t={t} isDarkMode={isDarkMode} themeName={themeName} onThemeChange={(name: ThemeName) => { setThemeName(name); localStorage.setItem('theme', name); }} playbackSpeed={playbackSpeedSignal.value} hasSentences={hasSentences.value} onTogglePlay={togglePlay} onSpeedChange={(s: number) => { playbackSpeedSignal.value = s; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} usingFallback={usingFallback.current} selectedVoice={selectedVoiceSignal.value} onVoiceChange={(e: any) => { selectedVoiceSignal.value = e.target.value; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} sentencesLength={sentencesSignal.value.length} fontSize={fontSize} onFontSizeChange={(d: number) => { const n = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + d)).toFixed(2)); setFontSize(n); localStorage.setItem('fontSize', String(n)); }} onTestAudio={handleTestAudio} onReset={resetReader} onLogoClick={() => { if (!eggPhase) { setEggPhase('in'); setTimeout(() => { setEggPhase('out'); setTimeout(() => setEggPhase(null), 600); }, 2400); } }} /></Suspense>
+      <Suspense fallback={null}><BottomBar t={t} isDarkMode={isDarkMode} themeName={themeName} onThemeChange={(name: ThemeName) => { setThemeName(name); localStorage.setItem('theme', name); }} playbackSpeed={playbackSpeedSignal.value} hasSentences={hasSentences.value} onTogglePlay={togglePlay} onSpeedChange={(s: number) => { playbackSpeedSignal.value = s; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} usingFallback={usingFallback.current} selectedVoice={selectedVoiceSignal.value} onVoiceChange={(e: any) => { selectedVoiceSignal.value = e.target.value; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} sentencesLength={sentencesSignal.value.length} fontSize={fontSize} onFontSizeChange={(d: number) => { const n = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + d)).toFixed(2)); setFontSize(n); localStorage.setItem('fontSize', String(n)); }} onTestAudio={handleTestAudio} onReset={resetReader}           onLogoClick={() => { if (!eggPhase) { setEggPhase('in'); const t1 = window.setTimeout(() => { setEggPhase('out'); const t2 = window.setTimeout(() => setEggPhase(null), 600); eggTimersRef.current.push(t2); }, 2400); eggTimersRef.current.push(t1); } }} /></Suspense>
     </div>
   );
 }
@@ -641,7 +653,7 @@ function OfflineToast() {
       pointerEvents: 'none',
       whiteSpace: 'nowrap',
     }}>
-      <Check size={13} color="#4ade80" strokeWidth={2.5} />
+      <Icon name="check" size={13} color="#4ade80" strokeWidth={2.5} />
       Offline ready
     </div>
   );
@@ -650,5 +662,5 @@ function OfflineToast() {
 function ScrollToCurrentButton() {
   const isPlaying = isPlayingSignal.value, idx = currentSentenceIndexSignal.value, sents = sentencesSignal.value;
   if (sents.length === 0 || isPlaying || idx < 0) return null;
-  return <button onClick={() => { const u = sents[idx]; if (u) document.getElementById(`line-${u.lines[0]}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }} style={{ position: 'fixed', bottom: '1rem', right: '1rem', zIndex: 200, display: 'flex', alignItems: 'center', padding: '0.4rem 0.7rem', backgroundColor: '#2a2015', color: '#c0b4a4', border: '1px solid #1a1510', borderRadius: '999px', cursor: 'pointer', fontSize: '0.72rem', boxShadow: '0 2px 10px rgba(0,0,0,0.25)' }}><Target size={13} /></button>;
+  return <button onClick={() => { const u = sents[idx]; if (u) document.getElementById(`line-${u.lines[0]}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }} style={{ position: 'fixed', bottom: '1rem', right: '1rem', zIndex: 200, display: 'flex', alignItems: 'center', padding: '0.4rem 0.7rem', backgroundColor: '#2a2015', color: '#c0b4a4', border: '1px solid #1a1510', borderRadius: '999px', cursor: 'pointer', fontSize: '0.72rem', boxShadow: '0 2px 10px rgba(0,0,0,0.25)' }}><Icon name="target" size={13} /></button>;
 }

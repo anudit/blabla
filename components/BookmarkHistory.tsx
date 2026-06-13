@@ -1,5 +1,6 @@
 import Icon from './icons';
 import { bookmarkTokens } from '../theme';
+import type { ThemeTokens } from '../theme';
 
 export interface BookmarkEntry {
   id: string;
@@ -47,7 +48,7 @@ interface Props {
   bookmarks: BookmarkEntry[];
   onSelect: (entry: BookmarkEntry) => void;
   onDelete: (id: string) => void;
-  isDarkMode: boolean;
+  t: ThemeTokens;
 }
 
 const TYPE_ICON: Record<BookmarkEntry['fileType'], 'book-open' | 'file-text' | 'globe'> = {
@@ -56,10 +57,10 @@ const TYPE_ICON: Record<BookmarkEntry['fileType'], 'book-open' | 'file-text' | '
   url: 'globe',
 };
 
-export default function BookmarkHistory({ bookmarks, onSelect, onDelete, isDarkMode }: Props) {
+export default function BookmarkHistory({ bookmarks, onSelect, onDelete, t }: Props) {
   if (bookmarks.length === 0) return null;
 
-  const c = bookmarkTokens(isDarkMode);
+  const c = bookmarkTokens(t);
 
   const hasLocalFiles = bookmarks.some(b => b.fileType !== 'url');
 

@@ -8,6 +8,13 @@ import {
   isModelReadySignal, currentSentenceIndexSignal,
 } from '../signals';
 
+const hexToRgba = (hex: string, alpha: number) => {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
 interface BottomBarProps {
   t: ThemeTokens;
   isDarkMode: boolean;
@@ -66,25 +73,74 @@ export default function BottomBar({
 
   const iconButtonStyle: JSX.CSSProperties = {
     padding: '0.5rem', borderRadius: '0.375rem', border: 'none', cursor: 'pointer',
-    backgroundColor: 'transparent', color: t.barIconColor, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: TT,
+    backgroundColor: 'transparent', color: t.barSpeedBg, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: TT,
   };
 
   const speedButtonStyle: JSX.CSSProperties = {
-    fontSize: '0.8rem', fontWeight: 700, color: t.barSpeedColor, backgroundColor: t.barSpeedBg,
-    padding: '0.25rem 0.5rem', borderRadius: '0.25rem', border: 'none', minWidth: '2.5rem', cursor: 'pointer', transition: TT,
+    fontSize: '0.8rem', fontWeight: 700, color: t.barSpeedColor,
+    background: `linear-gradient(180deg, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 50%), ${hexToRgba(t.barSpeedBg, 0.38)}`,
+    padding: '0.25rem 0.5rem', borderRadius: '0.375rem', border: `1px solid ${hexToRgba(t.barSpeedColor, 0.25)}`, minWidth: '2.5rem', cursor: 'pointer', transition: TT,
+    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.2)',
   };
 
+  const lensSheen = (strength: number) => `
+    radial-gradient(ellipse 140% 60% at 50% 0%, rgba(255,255,255,${strength}) 0%, rgba(255,255,255,0) 50%),
+    radial-gradient(ellipse 100% 50% at 50% 50%, rgba(255,255,255,${strength * 0.3}) 0%, rgba(0,0,0,${isDarkMode ? 0.08 : 0.04}) 100%),
+    linear-gradient(135deg, rgba(255,255,255,0.06) 0%, rgba(0,0,0,0.04) 100%)
+  `;
+  const glassBorder = hexToRgba(t.text, 0.14);
+  const glassShadow = (spread: number) => `
+    0 ${spread}px 52px rgba(0,0,0,${isDarkMode ? 0.55 : 0.22}),
+    inset 0 2px 0 rgba(255,255,255,${isDarkMode ? 0.35 : 0.55}),
+    inset 0 -1px 0 rgba(0,0,0,${isDarkMode ? 0.22 : 0.08}),
+    0 0 0 1px rgba(255,255,255,${isDarkMode ? 0.1 : 0.18}),
+    0 0 0 1px rgba(255,0,0,0.1),
+    0 0 0 2px rgba(0,255,255,0.06)
+  `;
+
   const popoverBase: JSX.CSSProperties = {
-    position: 'absolute', bottom: 'calc(100% + 10px)', overflow: 'hidden', backgroundColor: t.menuBg,
-    borderRadius: '0.875rem', border: `1px solid ${t.menuBorder}`,
+    position: 'absolute', bottom: 'calc(100% + 10px)', overflow: 'hidden',
+    borderRadius: '0.875rem', backgroundColor: t.menuBg,
+    border: `1px solid ${t.menuBorder}`,
     boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)' : '0 8px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)',
+  };
+
+  const playButtonStyle: JSX.CSSProperties = {
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    width: '44px', height: '44px', borderRadius: '50%', border: 'none', cursor: 'pointer', flexShrink: 0,
+    color: 'white',
+    background: `
+      radial-gradient(ellipse 120% 60% at 50% 0%, rgba(147,197,253,0.65) 0%, rgba(147,197,253,0) 50%),
+      radial-gradient(ellipse 90% 45% at 50% 50%, rgba(255,255,255,0.15) 0%, rgba(0,0,0,0.08) 100%),
+      linear-gradient(135deg, rgba(59,130,246,0.45) 0%, rgba(37,99,235,0.18) 100%),
+      rgba(255,255,255,0.06)
+    `,
+    backdropFilter: 'blur(14px) saturate(180%) brightness(1.1)',
+    WebkitBackdropFilter: 'blur(14px) saturate(180%) brightness(1.1)',
+    boxShadow: `
+      0 0 0 1px rgba(147,197,253,0.55),
+      0 0 0 2px rgba(0,255,255,0.1),
+      0 10px 30px rgba(37,99,235,0.4),
+      inset 0 2px 0 rgba(255,255,255,0.45)
+    `,
+    transition: 'transform 0.1s, box-shadow 0.2s',
+  };
+  const playButtonDisabledStyle: JSX.CSSProperties = {
+    ...playButtonStyle,
+    opacity: 0.4, cursor: 'not-allowed', filter: 'grayscale(0.7)',
+    boxShadow: '0 0 0 1px rgba(147,197,253,0.18), 0 2px 10px rgba(37,99,235,0.12), inset 0 1px 0 rgba(255,255,255,0.15)',
   };
 
   return (
     <div style={{
       position: 'fixed', bottom: '1.5rem', left: '50%', transform: 'translateX(-50%)',
-      backgroundColor: t.barBg, padding: '0.4rem 0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem',
-      boxShadow: '0 4px 20px rgba(0,0,0,0.28)', zIndex: 50, borderRadius: '999px', border: `1px solid ${t.barBorder}`, whiteSpace: 'nowrap', transition: TT,
+      padding: '0.45rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.45rem',
+      zIndex: 50, borderRadius: '999px', whiteSpace: 'nowrap', transition: TT,
+      background: `${lensSheen(isDarkMode ? 0.3 : 0.48)}, ${hexToRgba(t.barBg, 0.22)}`,
+      backdropFilter: 'blur(32px) saturate(220%) brightness(1.08)',
+      WebkitBackdropFilter: 'blur(32px) saturate(220%) brightness(1.08)',
+      border: `1px solid ${glassBorder}`,
+      boxShadow: glassShadow(12),
     }}>
       <button onClick={onLogoClick} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}>
         <img src="./180.png" style={{ width: '32px', height: '32px' }} alt="logo" />
@@ -97,7 +153,7 @@ export default function BottomBar({
       <button
         onClick={onTogglePlay}
         disabled={!hasSentences || !isModelReady}
-        style={{ ...staticStyles.playButton, ...(!hasSentences || !isModelReady ? staticStyles.buttonDisabled : {}) }}
+        style={!hasSentences || !isModelReady ? playButtonDisabledStyle : playButtonStyle}
       >
         {playbackState === 'Buffering' ? <Icon name="loader-circle" size={20} color="white" style={{ animation: 'spin 0.8s linear infinite' }} /> : isPlaying ? <Icon name="pause" size={20} fill="white" /> : <Icon name="play" size={20} fill="white" style={{ marginLeft: '2px' }} />}
       </button>

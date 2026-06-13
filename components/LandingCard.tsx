@@ -197,7 +197,7 @@ export default function LandingCard({
         bookmarks={bookmarks}
         onSelect={onSelectBookmark}
         onDelete={onDeleteBookmark}
-        isDarkMode={isDarkMode}
+        t={t}
       />
     </>
   );

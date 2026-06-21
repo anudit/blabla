@@ -40,7 +40,10 @@ export function extractSentences(text: string): string[] {
   // dots/! inside URLs or code (e.g. https://dev.to/... would otherwise
   // be treated as a sentence boundary).
   const saved: string[] = [];
-  const safe = text.replace(/\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\)|`[^`\n]+`/g, (m) => {
+  // Also protect decimal numbers (e.g. 1.2, 112.23) and version numbers (e.g. 1.2.3)
+  // so the sentence-split regex doesn't treat the dot as a sentence boundary.
+  const savePattern = /\[!\[[^\]]*\]\([^)]*\)\]\([^)]*\)|!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\)|`[^`\n]+`|\d+\.\d+\.\d+|\d+\.\d+/g;
+  const safe = text.replace(savePattern, (m) => {
     return `\x00${saved.push(m) - 1}\x00`;
   });
 

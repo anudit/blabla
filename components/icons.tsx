@@ -3,7 +3,7 @@
 
 import type { JSX } from "preact";
 
-type IconName = "target"|"loader-circle"|"check"|"play"|"pause"|"menu"|"palette"|"beaker"|"clock"|"trash-2"|"book-open"|"file-text"|"globe"|"text-align-justify"|"x"|"upload"|"clipboard"|"bookmark"|"chevron-left"|"chevron-right";
+type IconName = "target"|"loader-circle"|"check"|"play"|"pause"|"menu"|"palette"|"beaker"|"clock"|"trash-2"|"book-open"|"file-text"|"globe"|"text-align-justify"|"x"|"upload"|"clipboard"|"bookmark"|"chevron-left"|"chevron-right"|"volume";
 type IconTuple = [string, Record<string, string | number>];
 const ICONS: Record<IconName, IconTuple[]> = {
   target: [
@@ -94,6 +94,11 @@ const ICONS: Record<IconName, IconTuple[]> = {
   ],
   "chevron-right": [
     ["path",{d:"m9 18 6-6-6-6", key:"chevron-right"}],
+  ],
+  volume: [
+    ["path",{d:"M11 5 6 9H2v6h4l5 4V5z", key:"1ytikj"}],
+    ["path",{d:"M19.07 4.93a10 10 0 0 1 0 14.14", key:"1d5fby"}],
+    ["path",{d:"M15.54 8.46a5 5 0 0 1 0 7.07", key:"1rc4g9"}],
   ],
 };
 

@@ -6,6 +6,7 @@ import { TT, staticStyles, VOICES, THEMES, THEME_META } from '../theme';
 import {
   isPlayingSignal, playbackStateSignal, ttsStatusSignal,
   isModelReadySignal, currentSentenceIndexSignal,
+  volumeSignal,
 } from '../signals';
 
 const hexToRgba = (hex: string, alpha: number) => {
@@ -280,6 +281,7 @@ function SettingsMenu({
   const ttsStatus          = ttsStatusSignal.value;
   const isModelReady       = isModelReadySignal.value;
   const playbackState      = playbackStateSignal.value;
+  const volume             = volumeSignal.value;
 
   const row: JSX.CSSProperties = { padding: '0.55rem 1rem', display: 'flex', alignItems: 'center' };
   const lbl: JSX.CSSProperties = { fontSize: '0.75rem', color: t.textMuted, minWidth: '62px' };
@@ -324,6 +326,27 @@ function SettingsMenu({
             <button key={label} onClick={() => onFontSizeChange(delta)} style={{ width: '24px', height: '24px', borderRadius: '0.375rem', border: `1px solid ${t.menuBorder}`, background: 'none', cursor: 'pointer', color: t.text, fontSize: '1rem', lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{label}</button>
           ))}
           <span style={{ ...val, minWidth: '34px', textAlign: 'center' }}>{fontSize.toFixed(2)}x</span>
+        </div>
+      </div>
+      <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />
+      <div style={{ ...row, gap: '0.6rem' }}>
+        <span style={lbl}>Volume</span>
+        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+          <Icon name="volume" size={14} color={t.textMuted} />
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={volume}
+            onInput={(e) => { volumeSignal.value = parseFloat((e.target as HTMLInputElement).value); }}
+            style={{
+              flex: 1, height: '4px', cursor: 'pointer', accentColor: '#3b82f6',
+              appearance: 'none', outline: 'none', borderRadius: '2px',
+              background: `linear-gradient(to right, #3b82f6 ${volume * 100}%, ${t.menuBorder} ${volume * 100}%)`,
+            }}
+          />
+          <span style={{ ...val, minWidth: '28px', textAlign: 'right' }}>{Math.round(volume * 100)}%</span>
         </div>
       </div>
       <div style={{ height: '1px', backgroundColor: t.menuBorder, opacity: 0.5 }} />

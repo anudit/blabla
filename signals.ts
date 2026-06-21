@@ -12,6 +12,7 @@ export const sentencesSignal            = signal<any[]>([]);
 export const fileTypeSignal             = signal<'pdf' | 'epub' | 'text' | null>(null);
 export const playbackSpeedSignal        = signal(1.0);
 export const selectedVoiceSignal        = signal('Bella');
+export const volumeSignal                = signal(0.8);
 export const currentFileIdSignal        = signal<string | null>(null);
 export const currentFileNameSignal      = signal<string | null>(null);
 export const outlineSignal              = signal<any[]>([]);

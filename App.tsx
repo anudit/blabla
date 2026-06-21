@@ -9,6 +9,7 @@ import {
   sentencesSignal, fileTypeSignal, playbackSpeedSignal,
   selectedVoiceSignal, currentFileIdSignal, currentFileNameSignal,
   outlineSignal, offlineReadySignal,
+  volumeSignal,
 } from './signals';
 import { THEMES, TT } from './theme';
 import type { ThemeName } from './theme';
@@ -309,7 +310,11 @@ export default function App() {
 
   const playBufferDirectly = (buffer: AudioBuffer) => {
     const ctx = getAudioContext(), source = ctx.createBufferSource();
-    source.buffer = buffer; source.connect(ctx.destination); source.start(0);
+    source.buffer = buffer;
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = volumeSignal.value;
+    source.connect(gainNode); gainNode.connect(ctx.destination);
+    source.start(0);
     playbackStateSignal.value = "Playing"; source.onended = () => { playbackStateSignal.value = "Ready"; };
   };
 
@@ -387,7 +392,9 @@ export default function App() {
     }
     if (currentSession !== playbackSessionId.current || !isPlayingSignal.peek() || !buffer) return;
 
-    const source = ctx.createBufferSource(); source.buffer = buffer; source.connect(ctx.destination);
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = volumeSignal.value;
+    const source = ctx.createBufferSource(); source.buffer = buffer; source.connect(gainNode); gainNode.connect(ctx.destination);
     source.onended = () => { if (wordRafRef.current) cancelAnimationFrame(wordRafRef.current); clearWordHighlight(); restoreWordSpans(); currentSource.current = null; if (isPlayingSignal.peek() && currentSession === playbackSessionId.current) advanceSentence(); };
     currentSource.current = source; playbackStateSignal.value = "Playing";
     wordTimingsRef.current = calculateWordTimings(text, buffer.duration);

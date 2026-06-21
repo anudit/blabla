@@ -29,6 +29,9 @@ const server = serve({
     // 2. Build the TTS Worker
     "/tts.worker.js": () => buildAndGzip("./tts.worker.ts"),
 
+    // 2b. Build the OCR Worker (detection + recognition off the main thread)
+    "/ocr.worker.js": () => buildAndGzip("./ocr.worker.ts"),
+
     // 3. Serve Static Assets
     "/pdf.worker.min.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.min.mjs"),
     "/manifest.json": Bun.file("./manifest.json"),

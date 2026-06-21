@@ -34,6 +34,17 @@ await build({
   },
 });
 
+console.log("⚙️ Building OCR Worker...");
+await build({
+  entrypoints: ["./ocr.worker.ts"],
+  outdir: "./dist",
+  target: "browser",
+  minify: true,
+  define: {
+    "process.env.NODE_ENV": JSON.stringify("production"),
+  },
+});
+
 console.log("📂 Copying Static Assets...");
 await cp("./index.html", "./dist/index.html");
 await cp("./manifest.json", "./dist/manifest.json");

@@ -12,7 +12,7 @@ import {
 } from './signals';
 import { THEMES, TT } from './theme';
 import type { ThemeName } from './theme';
-import { calculateWordTimings, extractWords, segmentTextLines, parseOcrPageText, loadWithCache } from './utils';
+import { calculateWordTimings, extractWords, parseOcrPageText } from './utils';
 import {
   loadMarkdown, loadText, loadEPUB, loadPDF, loadMOBI, loadDOCX
 } from './loaders';
@@ -54,10 +54,14 @@ export default function App() {
   const [ocrProgress, setOcrProgress] = useState<number | null>(null);
   const [ocrPageLoading, setOcrPageLoading] = useState(false);
   const ocrPagesCacheRef = useRef<Map<number, { sentences: any[], content: any[] }>>(new Map());
-  const ocrEngineRef = useRef<any>(null);
-  const ocrDetEngineRef = useRef<any>(null);
   const ocrRequestIdRef = useRef(0);
-  const ocrInitializingRef = useRef<Promise<any> | null>(null);
+  // OCR runs entirely in a Web Worker so detection/recognition never block the UI.
+  const ocrWorkerRef = useRef<Worker | null>(null);
+  const ocrWorkerReadyRef = useRef<Promise<void> | null>(null);
+  const ocrEngineReadyRef = useRef(false);
+  const ocrReadyResolveRef = useRef<(() => void) | null>(null);
+  const ocrReadyRejectRef = useRef<((e: any) => void) | null>(null);
+  const ocrPendingRef = useRef<Map<number, { resolve: (text: string) => void; reject: (e: any) => void }>>(new Map());
 
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
@@ -145,6 +149,7 @@ export default function App() {
     return () => {
       stopAllAudio();
       workerRef.current?.terminate();
+      ocrWorkerRef.current?.terminate();
       if (audioContext.current) audioContext.current.close();
       window.removeEventListener('online', onOnline);
       eggTimersRef.current.forEach(id => clearTimeout(id));
@@ -564,6 +569,67 @@ export default function App() {
     setOcrCurrentPage(p);
   }, []);
 
+  const ensureOcrWorker = (): Worker => {
+    if (ocrWorkerRef.current) return ocrWorkerRef.current;
+    const w = new Worker('/ocr.worker.js', { type: 'module' });
+    w.onmessage = (e: MessageEvent) => {
+      const msg = e.data;
+      if (msg.type === 'progress') {
+        if (msg.stage) setOcrLoadingStage(msg.stage);
+        if (typeof msg.pct === 'number') setOcrProgress(msg.pct);
+      } else if (msg.type === 'ready') {
+        ocrEngineReadyRef.current = true;
+        ocrReadyResolveRef.current?.();
+      } else if (msg.type === 'result') {
+        const pending = ocrPendingRef.current.get(msg.reqId);
+        if (pending) { ocrPendingRef.current.delete(msg.reqId); pending.resolve(msg.pageText); }
+      } else if (msg.type === 'error') {
+        if (msg.reqId != null) {
+          const pending = ocrPendingRef.current.get(msg.reqId);
+          if (pending) { ocrPendingRef.current.delete(msg.reqId); pending.reject(new Error(msg.message)); }
+        } else {
+          ocrWorkerReadyRef.current = null;
+          ocrReadyRejectRef.current?.(new Error(msg.message));
+        }
+      }
+    };
+    w.onerror = (e) => {
+      const ev = e as ErrorEvent;
+      const detail = [ev.message, ev.filename && `${ev.filename}:${ev.lineno}:${ev.colno}`]
+        .filter(Boolean).join(' @ ');
+      console.error('[OCR worker] onerror:', detail || ev, ev);
+      const err = new Error(detail || 'OCR worker failed to load (check that /ocr.worker.js is served as JavaScript)');
+      ocrWorkerReadyRef.current = null;
+      ocrReadyRejectRef.current?.(err);
+      ocrPendingRef.current.forEach(p => p.reject(err));
+      ocrPendingRef.current.clear();
+    };
+    w.onmessageerror = (e) => {
+      console.error('[OCR worker] messageerror:', e);
+    };
+    ocrWorkerRef.current = w;
+    return w;
+  };
+
+  const initOcrWorker = (): Promise<void> => {
+    if (ocrWorkerReadyRef.current) return ocrWorkerReadyRef.current;
+    const w = ensureOcrWorker();
+    ocrWorkerReadyRef.current = new Promise<void>((resolve, reject) => {
+      ocrReadyResolveRef.current = resolve;
+      ocrReadyRejectRef.current = reject;
+    });
+    w.postMessage({ type: 'init' });
+    return ocrWorkerReadyRef.current;
+  };
+
+  const processPageInWorker = (reqId: number, pageNum: number, bitmap: ImageBitmap): Promise<string> => {
+    const w = ensureOcrWorker();
+    return new Promise<string>((resolve, reject) => {
+      ocrPendingRef.current.set(reqId, { resolve, reject });
+      w.postMessage({ type: 'process', reqId, pageNum, bitmap }, [bitmap]);
+    });
+  };
+
   const startOcrFlow = async (docObj: any, pdfPages: any[], targetPage: number) => {
     if (!docObj) return;
 
@@ -584,8 +650,7 @@ export default function App() {
     sentencesSignal.value = [];
     setEpubContent([]);
 
-    const isEngineReady = !!ocrEngineRef.current && !!ocrDetEngineRef.current;
-    if (!isEngineReady) {
+    if (!ocrEngineReadyRef.current) {
       setOcrLoadingStage('Initializing OCR engine...');
     } else {
       setOcrPageLoading(true);
@@ -593,64 +658,10 @@ export default function App() {
     setOcrProgress(null);
 
     try {
-      if (!ocrEngineRef.current || !ocrDetEngineRef.current) {
-        if (!ocrInitializingRef.current) {
-          ocrInitializingRef.current = (async () => {
-            setOcrLoadingStage('Downloading OCR recognition model (20MB)...');
-
-            const REC_BASE = 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/main';
-            const DET_BASE = 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/main';
-            const modelUrl = `${REC_BASE}/inference.onnx`;
-            const vocabUrl = `${REC_BASE}/inference.yml`;
-            const detModelUrl = `${DET_BASE}/inference.onnx`;
-
-            const cachedModelBlobUrl = await loadWithCache(modelUrl, (pct) => {
-              if (reqId === ocrRequestIdRef.current) {
-                setOcrProgress(pct * 0.25);
-              }
-            });
-
-            if (reqId === ocrRequestIdRef.current) {
-              setOcrLoadingStage('Downloading OCR detection model...');
-            }
-            const cachedDetModelBlobUrl = await loadWithCache(detModelUrl, (pct) => {
-              if (reqId === ocrRequestIdRef.current) {
-                setOcrProgress(0.25 + pct * 0.70);
-              }
-            });
-
-            if (reqId === ocrRequestIdRef.current) {
-              setOcrLoadingStage('Downloading OCR character dictionary...');
-            }
-            const cachedVocabBlobUrl = await loadWithCache(vocabUrl, () => {});
-
-            if (reqId === ocrRequestIdRef.current) {
-              setOcrLoadingStage('Initializing WebGPU pipeline and compiling WGSL shaders...');
-              setOcrProgress(0.95);
-            }
-
-            const { PaddleOcrEngine, TextDetectionEngine } = await import('paddleocr-webgpu');
-            const engine = new PaddleOcrEngine();
-            await engine.init({
-              modelUrl: cachedModelBlobUrl,
-              vocabUrl: cachedVocabBlobUrl,
-              channelOrder: 'bgr',
-              maxWidth: 2048,
-            });
-            ocrEngineRef.current = engine;
-
-            const detEngine = new TextDetectionEngine();
-            await detEngine.init({
-              modelUrl: cachedDetModelBlobUrl,
-            });
-            ocrDetEngineRef.current = detEngine;
-          })().catch(err => {
-            ocrInitializingRef.current = null;
-            throw err;
-          });
-        }
-        await ocrInitializingRef.current;
-      }
+      // Spin up / await the OCR worker. First call downloads the models and
+      // compiles the WebGPU pipeline (progress reported via worker messages);
+      // subsequent calls resolve immediately.
+      await initOcrWorker();
 
       if (reqId !== ocrRequestIdRef.current) return;
 
@@ -668,69 +679,16 @@ export default function App() {
       await page.render({ canvasContext: ctx, viewport }).promise;
       page.cleanup();
 
-      let lines = [];
-      try {
-        console.log(`[OCR] Running WebGPU detection model on page ${targetPage}...`);
-        const detResult = await ocrDetEngineRef.current.detect(canvas);
-        // v1.3 TextDetectionEngine returns { boxes: [{ points, score }], shape, inferenceTimeMs }.
-        // Convert each polygon to an axis-aligned line box for cropping/recognition.
-        lines = detResult.boxes.map((box) => {
-          const xs = box.points.map((p) => p[0]);
-          const ys = box.points.map((p) => p[1]);
-          return {
-            x0: Math.max(0, Math.floor(Math.min(...xs))),
-            x1: Math.min(canvas.width, Math.ceil(Math.max(...xs))),
-            y0: Math.max(0, Math.floor(Math.min(...ys))),
-            y1: Math.min(canvas.height, Math.ceil(Math.max(...ys))),
-          };
-        });
-        console.log(`[OCR] Detection found ${lines.length} boxes in ${detResult.inferenceTimeMs.toFixed(1)}ms`);
-      } catch (detErr) {
-        console.warn('WebGPU text detection failed, falling back to manual segmentTextLines:', detErr);
-        lines = segmentTextLines(canvas);
-      }
+      if (reqId !== ocrRequestIdRef.current) return;
 
-      let pageText = '';
+      // Hand the rasterised page to the worker as a transferable ImageBitmap so
+      // detection + recognition run off the main thread.
+      const bitmap = await createImageBitmap(canvas);
+      if (reqId !== ocrRequestIdRef.current) { bitmap.close(); return; }
 
-      if (lines.length === 0) {
-        const res = await ocrEngineRef.current.recognize(canvas);
-        pageText = res.text || '';
-      } else {
-        // Crop each detected region exactly as the demo does: no padding, no
-        // ruled-line erasing (which destroys printed glyphs), source clamped to
-        // canvas bounds so drawImage never samples outside the page.
-        const lineCanvases = lines.map(({ y0, y1, x0, x1 }) => {
-          const lc = document.createElement('canvas');
-          const clW = Math.max(1, x1 - x0);
-          const chH = Math.max(1, y1 - y0);
-          lc.width = clW;
-          lc.height = chH;
-          const lctx = lc.getContext('2d')!;
-          lctx.fillStyle = '#FFFFFF';
-          lctx.fillRect(0, 0, clW, chH);
-          const srcW = Math.min(clW, canvas.width - x0);
-          const srcH = Math.min(chH, canvas.height - y0);
-          if (srcW > 0 && srcH > 0) {
-            lctx.drawImage(canvas, x0, y0, srcW, srcH, 0, 0, srcW, srcH);
-          }
-          return lc;
-        });
+      const pageText = await processPageInWorker(reqId, targetPage, bitmap);
 
-        if (reqId !== ocrRequestIdRef.current) return;
-
-        const results = await ocrEngineRef.current.recognizePipelined(lineCanvases);
-        const mappedResults = results.map((r, idx) => {
-          const line = lines[idx];
-          return {
-            text: r.text.trim(),
-            y0: line ? line.y0 : 0
-          };
-        }).filter(item => item.text);
-        mappedResults.sort((a, b) => a.y0 - b.y0);
-        pageText = mappedResults.map(item => item.text).join('\n');
-      }
-
-      console.log(`[OCR] Target Page: ${targetPage}, lines recognized: ${lines.length}, raw text length: ${pageText.length}`);
+      console.log(`[OCR] Target Page: ${targetPage}, raw text length: ${pageText.length}`);
       console.log(`[OCR] Text Preview:`, pageText.slice(0, 300));
 
       if (reqId !== ocrRequestIdRef.current) return;
@@ -955,22 +913,3 @@ function ScrollToCurrentButton() {
   return <button onClick={() => { const u = sents[idx]; if (u) document.getElementById(`line-${u.lines[0]}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }} style={{ position: 'fixed', bottom: '1rem', right: '1rem', zIndex: 200, display: 'flex', alignItems: 'center', padding: '0.4rem 0.7rem', backgroundColor: '#2a2015', color: '#c0b4a4', border: '1px solid #1a1510', borderRadius: '999px', cursor: 'pointer', fontSize: '0.72rem', boxShadow: '0 2px 10px rgba(0,0,0,0.25)' }}><Icon name="target" size={13} /></button>;
 }
 
-function eraseRuledRowsFromCanvas(lctx: CanvasRenderingContext2D, W: number, H: number) {
-  const idata = lctx.getImageData(0, 0, W, H);
-  const d = idata.data;
-  const thresh = Math.floor(W * 0.55);
-  for (let y = 0; y < H; y++) {
-    let cnt = 0;
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      if (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 180) cnt++;
-    }
-    if (cnt > thresh) {
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 4;
-        d[i] = d[i + 1] = d[i + 2] = d[i + 3] = 255;
-      }
-    }
-  }
-  lctx.putImageData(idata, 0, 0);
-}

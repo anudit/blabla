@@ -8,9 +8,10 @@ export interface BookmarkEntry {
   sentenceIndex: number;
   totalSentences: number;
   timestamp: number;
-  fileType: 'pdf' | 'epub' | 'url';
+  fileType: 'pdf' | 'epub' | 'url' | 'ocr';
   preview: string;
   url?: string;
+  ocrPage?: number;
 }
 
 // ── LocalStorage helpers ───────────────────────────────────────────────
@@ -51,10 +52,11 @@ interface Props {
   t: ThemeTokens;
 }
 
-const TYPE_ICON: Record<BookmarkEntry['fileType'], 'book-open' | 'file-text' | 'globe'> = {
+const TYPE_ICON: Record<BookmarkEntry['fileType'], 'book-open' | 'file-text' | 'globe' | 'target'> = {
   epub: 'book-open',
   pdf: 'file-text',
   url: 'globe',
+  ocr: 'target',
 };
 
 export default function BookmarkHistory({ bookmarks, onSelect, onDelete, t }: Props) {

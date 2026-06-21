@@ -77,10 +77,9 @@ export default function BottomBar({
   };
 
   const speedButtonStyle: JSX.CSSProperties = {
-    fontSize: '0.8rem', fontWeight: 700, color: t.barSpeedColor,
-    background: `linear-gradient(180deg, rgba(255,255,255,0.18) 0%, rgba(255,255,255,0) 50%), ${hexToRgba(t.barSpeedBg, 0.38)}`,
-    padding: '0.25rem 0.5rem', borderRadius: '0.375rem', border: `1px solid ${hexToRgba(t.barSpeedColor, 0.25)}`, minWidth: '2.5rem', cursor: 'pointer', transition: TT,
-    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.2)',
+    fontSize: '0.8rem', fontWeight: 700, color: t.barSpeedBg,
+    background: 'transparent', border: 'none',
+    padding: '0.25rem 0.5rem', borderRadius: '0.375rem', minWidth: '2.5rem', cursor: 'pointer', transition: TT,
   };
 
   const lensSheen = (strength: number) => `

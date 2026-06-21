@@ -12,7 +12,7 @@ import {
 } from './signals';
 import { THEMES, TT } from './theme';
 import type { ThemeName } from './theme';
-import { calculateWordTimings, extractWords } from './utils';
+import { calculateWordTimings, extractWords, segmentTextLines, parseOcrPageText, loadWithCache } from './utils';
 import {
   loadMarkdown, loadText, loadEPUB, loadPDF, loadMOBI, loadDOCX
 } from './loaders';
@@ -48,6 +48,17 @@ export default function App() {
   const [bookmarks, setBookmarks] = useState<BookmarkEntry[]>(() => getBookmarks());
   const [isDocLoading, setIsDocLoading] = useState(false);
 
+  const [isOcrMode, setIsOcrMode] = useState(false);
+  const [ocrCurrentPage, setOcrCurrentPage] = useState(1);
+  const [ocrLoadingStage, setOcrLoadingStage] = useState<string | null>(null);
+  const [ocrProgress, setOcrProgress] = useState<number | null>(null);
+  const [ocrPageLoading, setOcrPageLoading] = useState(false);
+  const ocrPagesCacheRef = useRef<Map<number, { sentences: any[], content: any[] }>>(new Map());
+  const ocrEngineRef = useRef<any>(null);
+  const ocrDetEngineRef = useRef<any>(null);
+  const ocrRequestIdRef = useRef(0);
+  const ocrInitializingRef = useRef<Promise<any> | null>(null);
+
   const workerRef = useRef<Worker | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioCache = useRef(new Map());
@@ -72,7 +83,7 @@ export default function App() {
 
   const t = THEMES[themeName];
   const isDarkMode = t.isDark;
-  
+
   const activeHeaderId = useComputed(() => {
     const idx = currentSentenceIndexSignal.value;
     const sents = sentencesSignal.value;
@@ -231,7 +242,18 @@ export default function App() {
       if (bookmarkDebounceRef.current) clearTimeout(bookmarkDebounceRef.current);
       bookmarkDebounceRef.current = setTimeout(() => {
         const isUrl = fType === 'text' && cFileId.startsWith('http');
-        saveBookmark({ id: cFileId, fileName: cFileName, sentenceIndex: idx, totalSentences: sents.length, timestamp: Date.now(), fileType: isUrl ? 'url' : fType as 'pdf' | 'epub', preview: (sents[idx]?.text || '').slice(0, 80), ...(isUrl ? { url: cFileId } : {}) });
+        const bFileType = fType === 'ocr' ? 'ocr' : (isUrl ? 'url' : fType);
+        saveBookmark({
+          id: cFileId,
+          fileName: cFileName,
+          sentenceIndex: idx,
+          totalSentences: sents.length,
+          timestamp: Date.now(),
+          fileType: bFileType as any,
+          preview: fType === 'ocr' ? `[Page ${ocrCurrentPage}] ${(sents[idx]?.text || '').slice(0, 70)}` : (sents[idx]?.text || '').slice(0, 80),
+          ...(isUrl ? { url: cFileId } : {}),
+          ...(fType === 'ocr' ? { ocrPage: ocrCurrentPage } : {})
+        });
         setBookmarks(getBookmarks());
       }, 2000);
     }
@@ -313,7 +335,15 @@ export default function App() {
   const playCurrentSentence = async () => {
     const isPlaying = isPlayingSignal.peek(), idx = currentSentenceIndexSignal.peek(), sents = sentencesSignal.peek(), sVoice = selectedVoiceSignal.peek(), pSpeed = playbackSpeedSignal.peek();
     if (!isPlaying || idx === -1) return;
-    if (idx >= sents.length) { isPlayingSignal.value = false; playbackStateSignal.value = "Completed"; return; }
+    if (idx >= sents.length) {
+      if (fileTypeSignal.peek() === 'ocr' && ocrCurrentPage < (pdfDoc?.numPages || 1)) {
+        stopAllAudio();
+        const nextPage = ocrCurrentPage + 1;
+        setOcrCurrentPage(nextPage);
+        return;
+      }
+      isPlayingSignal.value = false; playbackStateSignal.value = "Completed"; return;
+    }
     const currentSession = playbackSessionId.current, unit = sents[idx], text = unit.text;
     if (text.trim().length <= 1) { advanceSentence(); return; }
 
@@ -406,6 +436,13 @@ export default function App() {
     setPdfDoc(null); setPages([]); sentencesSignal.value = []; fileTypeSignal.value = null; setEpubContent([]); currentSentenceIndexSignal.value = -1;
     playbackStateSignal.value = "Idle"; setShowTextInput(false); setTextInputValue(''); currentFileIdSignal.value = null; currentFileNameSignal.value = null; pendingResumeRef.current = -1;
     outlineSignal.value = [];
+    setIsOcrMode(false);
+    setOcrCurrentPage(1);
+    ocrPagesCacheRef.current.clear();
+    setOcrLoadingStage(null);
+    setOcrProgress(null);
+    setOcrPageLoading(false);
+    ocrRequestIdRef.current++;
   }, [pdfDoc]);
 
   const triggerFallback = useCallback(() => { if (!usingFallback.current) { usingFallback.current = true; ttsStatusSignal.value = "Fallback (Native)"; isWaitingForAudio.current = false; audioResolvers.current.forEach(r => r(null as any)); audioResolvers.current.clear(); } }, []);
@@ -417,37 +454,47 @@ export default function App() {
       const fid = `${file.name}:${file.size}`; currentFileIdSignal.value = fid; currentFileNameSignal.value = file.name;
       const exist = getBookmarks().find(b => b.id === fid); if (exist) pendingResumeRef.current = exist.sentenceIndex;
       const r = new FileReader();
-      if (file.type === 'application/pdf') { 
-        r.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer, (sents, pdfPages, pdfDocObj, isFinal) => {
+      if (file.type === 'application/pdf') {
+        r.onload = (ev) => loadPDF(ev.target?.result as ArrayBuffer, async (sents, pdfPages, pdfDocObj, isFinal) => {
+          if (isFinal && sents.length === 0) {
+            setPdfDoc(pdfDocObj);
+            setPages(pdfPages);
+            setIsOcrMode(true);
+            setIsDocLoading(false);
+            const targetPage = exist && exist.fileType === 'ocr' && exist.ocrPage ? exist.ocrPage : 1;
+            setOcrCurrentPage(targetPage);
+            return;
+          }
+
           sentencesSignal.value = sents;
           setPages(pdfPages);
           setPdfDoc(pdfDocObj);
           const resumeIdx = pendingResumeRef.current;
           const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
-          if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
+          if (!fileTypeSignal.value && sents.length > 0 && (hasReachedResume || isFinal)) {
             fileTypeSignal.value = 'pdf';
             setIsDocLoading(false);
           }
-        }, setIsDocLoading); 
-        r.readAsArrayBuffer(file); 
+        }, setIsDocLoading);
+        r.readAsArrayBuffer(file);
       }
-      else if (file.type === 'application/epub+zip' || file.name.endsWith('.epub')) { 
+      else if (file.type === 'application/epub+zip' || file.name.endsWith('.epub')) {
         r.onload = (ev) => loadEPUB(ev.target?.result as ArrayBuffer, (sents, content, outline, isFinal) => {
           sentencesSignal.value = sents;
           setEpubContent(content);
           outlineSignal.value = outline;
-          
+
           // CRITICAL: First chunk received, or we've reached the pending resume index.
           // Activate UI immediately and keep parsing in background.
           const resumeIdx = pendingResumeRef.current;
           const hasReachedResume = resumeIdx === -1 || sents.length > resumeIdx;
-          
+
           if (!fileTypeSignal.value && (hasReachedResume || isFinal)) {
             fileTypeSignal.value = 'epub';
             setIsDocLoading(false);
           }
-        }, setIsDocLoading); 
-        r.readAsArrayBuffer(file); 
+        }, setIsDocLoading);
+        r.readAsArrayBuffer(file);
       }
       else if (file.name.endsWith('.mobi') || file.name.endsWith('.azw') || file.name.endsWith('.azw3')) {
         r.onload = (ev) => loadMOBI(ev.target?.result as ArrayBuffer, (sents, content, outline, isFinal) => {
@@ -481,7 +528,7 @@ export default function App() {
         }, setIsDocLoading);
         r.readAsArrayBuffer(file);
       }
-      else if (file.name.endsWith('.md') || file.name.endsWith('.markdown')) { 
+      else if (file.name.endsWith('.md') || file.name.endsWith('.markdown')) {
         r.onload = (ev) => loadMarkdown(ev.target?.result as string, (sents, content, outline, isFinal) => {
           sentencesSignal.value = sents;
           setEpubContent(content);
@@ -492,10 +539,10 @@ export default function App() {
             fileTypeSignal.value = 'text';
             setIsDocLoading(false);
           }
-        }, setShowTextInput, setTextInputValue); 
-        r.readAsText(file); 
+        }, setShowTextInput, setTextInputValue);
+        r.readAsText(file);
       }
-      else { 
+      else {
         r.onload = (ev) => loadText(ev.target?.result as string, (sents, content, outline, isFinal) => {
           sentencesSignal.value = sents;
           setEpubContent(content);
@@ -506,16 +553,225 @@ export default function App() {
             fileTypeSignal.value = 'text';
             setIsDocLoading(false);
           }
-        }, setShowTextInput, setTextInputValue); 
-        r.readAsText(file); 
+        }, setShowTextInput, setTextInputValue);
+        r.readAsText(file);
       }
     }
   };
 
+  const changeOcrPage = useCallback((p: number) => {
+    stopAllAudio();
+    setOcrCurrentPage(p);
+  }, []);
+
+  const startOcrFlow = async (docObj: any, pdfPages: any[], targetPage: number) => {
+    if (!docObj) return;
+
+    const reqId = ++ocrRequestIdRef.current;
+
+    if (ocrPagesCacheRef.current.has(targetPage)) {
+      const cached = ocrPagesCacheRef.current.get(targetPage)!;
+      sentencesSignal.value = cached.sentences;
+      setEpubContent(cached.content);
+      fileTypeSignal.value = 'ocr';
+      const resumeIdx = pendingResumeRef.current;
+      currentSentenceIndexSignal.value = resumeIdx !== -1 ? resumeIdx : 0;
+      pendingResumeRef.current = -1;
+      return;
+    }
+
+    // Clear previous page text immediately when navigating to a non-cached page
+    sentencesSignal.value = [];
+    setEpubContent([]);
+
+    const isEngineReady = !!ocrEngineRef.current && !!ocrDetEngineRef.current;
+    if (!isEngineReady) {
+      setOcrLoadingStage('Initializing OCR engine...');
+    } else {
+      setOcrPageLoading(true);
+    }
+    setOcrProgress(null);
+
+    try {
+      if (!ocrEngineRef.current || !ocrDetEngineRef.current) {
+        if (!ocrInitializingRef.current) {
+          ocrInitializingRef.current = (async () => {
+            setOcrLoadingStage('Downloading OCR recognition model (20MB)...');
+
+            const REC_BASE = 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/main';
+            const DET_BASE = 'https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/main';
+            const modelUrl = `${REC_BASE}/inference.onnx`;
+            const vocabUrl = `${REC_BASE}/inference.yml`;
+            const detModelUrl = `${DET_BASE}/inference.onnx`;
+
+            const cachedModelBlobUrl = await loadWithCache(modelUrl, (pct) => {
+              if (reqId === ocrRequestIdRef.current) {
+                setOcrProgress(pct * 0.25);
+              }
+            });
+
+            if (reqId === ocrRequestIdRef.current) {
+              setOcrLoadingStage('Downloading OCR detection model...');
+            }
+            const cachedDetModelBlobUrl = await loadWithCache(detModelUrl, (pct) => {
+              if (reqId === ocrRequestIdRef.current) {
+                setOcrProgress(0.25 + pct * 0.70);
+              }
+            });
+
+            if (reqId === ocrRequestIdRef.current) {
+              setOcrLoadingStage('Downloading OCR character dictionary...');
+            }
+            const cachedVocabBlobUrl = await loadWithCache(vocabUrl, () => {});
+
+            if (reqId === ocrRequestIdRef.current) {
+              setOcrLoadingStage('Initializing WebGPU pipeline and compiling WGSL shaders...');
+              setOcrProgress(0.95);
+            }
+
+            const { PaddleOcrEngine, TextDetectionEngine } = await import('paddleocr-webgpu');
+            const engine = new PaddleOcrEngine();
+            await engine.init({
+              modelUrl: cachedModelBlobUrl,
+              vocabUrl: cachedVocabBlobUrl,
+              channelOrder: 'bgr',
+              maxWidth: 2048,
+            });
+            ocrEngineRef.current = engine;
+
+            const detEngine = new TextDetectionEngine();
+            await detEngine.init({
+              modelUrl: cachedDetModelBlobUrl,
+            });
+            ocrDetEngineRef.current = detEngine;
+          })().catch(err => {
+            ocrInitializingRef.current = null;
+            throw err;
+          });
+        }
+        await ocrInitializingRef.current;
+      }
+
+      if (reqId !== ocrRequestIdRef.current) return;
+
+      // Ensure that we clear global overlay (since engine is ready now), and show local loading
+      setOcrLoadingStage(null);
+      setOcrProgress(null);
+      setOcrPageLoading(true);
+
+      const page = await docObj.getPage(targetPage);
+      const canvas = document.createElement('canvas');
+      const viewport = page.getViewport({ scale: 2.7778 });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d')!;
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      page.cleanup();
+
+      let lines = [];
+      try {
+        console.log(`[OCR] Running WebGPU detection model on page ${targetPage}...`);
+        const detResult = await ocrDetEngineRef.current.detect(canvas);
+        // v1.3 TextDetectionEngine returns { boxes: [{ points, score }], shape, inferenceTimeMs }.
+        // Convert each polygon to an axis-aligned line box for cropping/recognition.
+        lines = detResult.boxes.map((box) => {
+          const xs = box.points.map((p) => p[0]);
+          const ys = box.points.map((p) => p[1]);
+          return {
+            x0: Math.max(0, Math.floor(Math.min(...xs))),
+            x1: Math.min(canvas.width, Math.ceil(Math.max(...xs))),
+            y0: Math.max(0, Math.floor(Math.min(...ys))),
+            y1: Math.min(canvas.height, Math.ceil(Math.max(...ys))),
+          };
+        });
+        console.log(`[OCR] Detection found ${lines.length} boxes in ${detResult.inferenceTimeMs.toFixed(1)}ms`);
+      } catch (detErr) {
+        console.warn('WebGPU text detection failed, falling back to manual segmentTextLines:', detErr);
+        lines = segmentTextLines(canvas);
+      }
+
+      let pageText = '';
+
+      if (lines.length === 0) {
+        const res = await ocrEngineRef.current.recognize(canvas);
+        pageText = res.text || '';
+      } else {
+        // Crop each detected region exactly as the demo does: no padding, no
+        // ruled-line erasing (which destroys printed glyphs), source clamped to
+        // canvas bounds so drawImage never samples outside the page.
+        const lineCanvases = lines.map(({ y0, y1, x0, x1 }) => {
+          const lc = document.createElement('canvas');
+          const clW = Math.max(1, x1 - x0);
+          const chH = Math.max(1, y1 - y0);
+          lc.width = clW;
+          lc.height = chH;
+          const lctx = lc.getContext('2d')!;
+          lctx.fillStyle = '#FFFFFF';
+          lctx.fillRect(0, 0, clW, chH);
+          const srcW = Math.min(clW, canvas.width - x0);
+          const srcH = Math.min(chH, canvas.height - y0);
+          if (srcW > 0 && srcH > 0) {
+            lctx.drawImage(canvas, x0, y0, srcW, srcH, 0, 0, srcW, srcH);
+          }
+          return lc;
+        });
+
+        if (reqId !== ocrRequestIdRef.current) return;
+
+        const results = await ocrEngineRef.current.recognizePipelined(lineCanvases);
+        const mappedResults = results.map((r, idx) => {
+          const line = lines[idx];
+          return {
+            text: r.text.trim(),
+            y0: line ? line.y0 : 0
+          };
+        }).filter(item => item.text);
+        mappedResults.sort((a, b) => a.y0 - b.y0);
+        pageText = mappedResults.map(item => item.text).join('\n');
+      }
+
+      console.log(`[OCR] Target Page: ${targetPage}, lines recognized: ${lines.length}, raw text length: ${pageText.length}`);
+      console.log(`[OCR] Text Preview:`, pageText.slice(0, 300));
+
+      if (reqId !== ocrRequestIdRef.current) return;
+
+      const { sentences, content } = parseOcrPageText(pageText);
+
+      ocrPagesCacheRef.current.set(targetPage, { sentences, content });
+
+      sentencesSignal.value = sentences;
+      setEpubContent(content);
+      fileTypeSignal.value = 'ocr';
+
+      const resumeIdx = pendingResumeRef.current;
+      currentSentenceIndexSignal.value = resumeIdx !== -1 ? resumeIdx : 0;
+      pendingResumeRef.current = -1;
+
+    } catch (err: any) {
+      if (reqId === ocrRequestIdRef.current) {
+        console.error('OCR Flow failed:', err);
+        alert(`OCR failed: ${err.message || err}`);
+        resetReader();
+      }
+    } finally {
+      if (reqId === ocrRequestIdRef.current) {
+        setOcrLoadingStage(null);
+        setOcrProgress(null);
+        setOcrPageLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (isOcrMode && pdfDoc) {
+      startOcrFlow(pdfDoc, pages, ocrCurrentPage);
+    }
+  }, [ocrCurrentPage, pdfDoc, isOcrMode, pages]);
+
   const handleUrlLoad = async (u?: string) => {
     const inputUrl = (u || urlInputValue).trim(); if (!inputUrl) return;
     try { new URL(inputUrl); } catch { setUrlError('Invalid URL'); return; }
-    
+
     let targetUrl = inputUrl;
     const gdocMatch = inputUrl.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
     if (gdocMatch) {
@@ -527,13 +783,13 @@ export default function App() {
     const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
     try {
-      const fetchUrl = gdocMatch 
+      const fetchUrl = gdocMatch
         ? targetUrl
         : `https://urltomd.anudit.workers.dev/${targetUrl}`;
-      
+
       const res = await fetch(fetchUrl, { signal: controller.signal });
       clearTimeout(timeoutId);
-      
+
       if (!res.ok) {
         if (res.status === 404 || res.status === 403 || res.status === 401) {
           throw new Error('Document inaccessible');
@@ -541,21 +797,21 @@ export default function App() {
         throw new Error('Failed to load document');
       }
 
-      const md = await res.text(); 
+      const md = await res.text();
       if (!md.trim() || (gdocMatch && md.includes('<!DOCTYPE html>'))) {
         throw new Error('Document inaccessible');
       }
-      
+
       const titleMatch = md.match(/^Title:\s*(.+)/m);
-      const title = titleMatch 
-        ? titleMatch[1].trim() 
+      const title = titleMatch
+        ? titleMatch[1].trim()
         : (gdocMatch ? md.match(/^#\s+(.+)/m)?.[1].trim() || "Google Doc" : new URL(inputUrl).hostname);
-      
-      currentFileIdSignal.value = inputUrl; 
+
+      currentFileIdSignal.value = inputUrl;
       currentFileNameSignal.value = title;
       const exist = getBookmarks().find(b => b.id === inputUrl); if (exist) pendingResumeRef.current = exist.sentenceIndex;
-      setUrlInputValue(''); 
-      
+      setUrlInputValue('');
+
       // Use requestIdleCallback or setTimeout to ensure parsing doesn't block the next frame
       setTimeout(() => {
         loadMarkdown(md, (sents, content, outline, isFinal) => {
@@ -571,7 +827,7 @@ export default function App() {
         }, setShowTextInput, setTextInputValue);
       }, 10);
 
-    } catch (err: any) { 
+    } catch (err: any) {
       clearTimeout(timeoutId);
       setIsDocLoading(false);
       if (err.name === 'AbortError') {
@@ -580,7 +836,7 @@ export default function App() {
         if (err.message === 'Document inaccessible') {
           alert('Document inaccessible. Please ensure the document is shared with "Anyone with the link".');
         }
-        setUrlError(err.message || 'Load failed'); 
+        setUrlError(err.message || 'Load failed');
       }
     } finally { setIsUrlLoading(false); }
   };
@@ -605,10 +861,10 @@ export default function App() {
           <Icon name="loader-circle" size={28} color={t.textMuted} style={{ animation: 'spin 0.8s linear infinite' }} />
           <span>{currentFileNameSignal.value ? `Loading ${currentFileNameSignal.value}…` : 'Loading…'}</span>
         </div>
-      ) : !hasSentences.value ? (
+      ) : (!hasSentences.value && !isOcrMode) ? (
         <Suspense fallback={null}><LandingCard isDarkMode={isDarkMode} t={t} isDragOver={isDragOver} setIsDragOver={setIsDragOver} onFileDrop={handleFileDrop} urlInputValue={urlInputValue} setUrlInputValue={setUrlInputValue} urlError={urlError} setUrlError={setUrlError} isUrlLoading={isUrlLoading} onUrlLoad={handleUrlLoad} onClipboardPaste={async (e: any) => { e.stopPropagation(); try { const t = await navigator.clipboard.readText(); if (/^https?:\/\/\S+$/.test(t)) handleUrlLoad(t); else if (t) loadText(t, (sents, content, outline, isFinal) => { sentencesSignal.value = sents; setEpubContent(content); outlineSignal.value = outline; if (!fileTypeSignal.value && (sents.length > 5 || isFinal)) { fileTypeSignal.value = 'text'; setIsDocLoading(false); } }, setShowTextInput, setTextInputValue); else setShowTextInput(true); } catch { setShowTextInput(true); } }} showTextInput={showTextInput} setShowTextInput={setShowTextInput} textInputValue={textInputValue} setTextInputValue={setTextInputValue} onLoadText={(t: string) => loadText(t, (sents, content, outline, isFinal) => { sentencesSignal.value = sents; setEpubContent(content); outlineSignal.value = outline; if (!fileTypeSignal.value && (sents.length > 5 || isFinal)) { fileTypeSignal.value = 'text'; setIsDocLoading(false); } }, setShowTextInput, setTextInputValue)} bookmarks={bookmarks} onSelectBookmark={(e: any) => e.fileType === 'url' && e.url && handleUrlLoad(e.url)} onDeleteBookmark={(id: string) => { removeBookmark(id); setBookmarks(getBookmarks()); }} /></Suspense>
       ) : (
-        <Suspense fallback={null}><ContentViewer fileType={fileTypeSignal.peek()!} pages={pages} pdfDoc={pdfDoc} epubContent={epubContent} activeHeaderId={activeHeaderId} isDarkMode={isDarkMode} t={t} fontSize={fontSize} onLineClick={handleLineClick} /></Suspense>
+        <Suspense fallback={null}><ContentViewer fileType={fileTypeSignal.peek()!} pages={pages} pdfDoc={pdfDoc} epubContent={epubContent} activeHeaderId={activeHeaderId} isDarkMode={isDarkMode} t={t} fontSize={fontSize} onLineClick={handleLineClick} ocrCurrentPage={ocrCurrentPage} setOcrCurrentPage={changeOcrPage} ocrPageLoading={ocrPageLoading} /></Suspense>
       )}
       <style>{`
         html, body { background-color: ${t.bg}; }
@@ -619,6 +875,34 @@ export default function App() {
         @keyframes toastIn { from { opacity: 0; transform: translateX(-50%) translateY(8px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
         @keyframes toastOut { from { opacity: 1; transform: translateX(-50%) translateY(0); } to { opacity: 0; transform: translateX(-50%) translateY(8px); } }
       `}</style>
+      {ocrLoadingStage && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 10000,
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          backgroundColor: isDarkMode ? 'rgba(15,15,15,0.85)' : 'rgba(245,239,227,0.85)',
+          backdropFilter: 'blur(8px)',
+          WebkitBackdropFilter: 'blur(8px)',
+          color: t.text,
+        }}>
+          <div style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem',
+            padding: '2.5rem', borderRadius: '1.25rem',
+            backgroundColor: t.menuBg, border: `1px solid ${t.menuBorder}`,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.15)', maxWidth: '400px', width: '90%', boxSizing: 'border-box',
+          }}>
+            <Icon name="loader-circle" size={32} color={isDarkMode ? '#60a5fa' : '#2563eb'} style={{ animation: 'spin 0.8s linear infinite' }} />
+            <div style={{ fontSize: '1.05rem', fontWeight: 600, color: t.headerColor, textAlign: 'center' }}>Running OCR Engine</div>
+            <div style={{ fontSize: '0.875rem', color: t.textMuted, textAlign: 'center', lineHeight: 1.4 }}>
+              {ocrLoadingStage}
+            </div>
+            {ocrProgress !== null && (
+              <div style={{ width: '100%', height: '6px', backgroundColor: t.inputBorder, borderRadius: '999px', overflow: 'hidden', marginTop: '0.5rem' }}>
+                <div style={{ width: `${ocrProgress * 100}%`, height: '100%', backgroundColor: isDarkMode ? '#60a5fa' : '#2563eb', transition: 'width 0.1s ease' }} />
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       <OfflineToast />
       {eggPhase && <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ width: '300px', height: '300px', borderRadius: '50%', backgroundColor: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: eggPhase === 'in' ? 'eggBounceIn 0.55s forwards' : 'eggFadeOut 0.6s forwards' }}><img src="./180.png" style={{ width: '250px', height: '250px' }} /></div></div>}
       <ScrollToCurrentButton />
@@ -669,4 +953,24 @@ function ScrollToCurrentButton() {
   const isPlaying = isPlayingSignal.value, idx = currentSentenceIndexSignal.value, sents = sentencesSignal.value;
   if (sents.length === 0 || isPlaying || idx < 0) return null;
   return <button onClick={() => { const u = sents[idx]; if (u) document.getElementById(`line-${u.lines[0]}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }} style={{ position: 'fixed', bottom: '1rem', right: '1rem', zIndex: 200, display: 'flex', alignItems: 'center', padding: '0.4rem 0.7rem', backgroundColor: '#2a2015', color: '#c0b4a4', border: '1px solid #1a1510', borderRadius: '999px', cursor: 'pointer', fontSize: '0.72rem', boxShadow: '0 2px 10px rgba(0,0,0,0.25)' }}><Icon name="target" size={13} /></button>;
+}
+
+function eraseRuledRowsFromCanvas(lctx: CanvasRenderingContext2D, W: number, H: number) {
+  const idata = lctx.getImageData(0, 0, W, H);
+  const d = idata.data;
+  const thresh = Math.floor(W * 0.55);
+  for (let y = 0; y < H; y++) {
+    let cnt = 0;
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      if (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 180) cnt++;
+    }
+    if (cnt > thresh) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        d[i] = d[i + 1] = d[i + 2] = d[i + 3] = 255;
+      }
+    }
+  }
+  lctx.putImageData(idata, 0, 0);
 }

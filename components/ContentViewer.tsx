@@ -1,5 +1,6 @@
 import { Fragment } from 'preact';
 import { memo } from 'preact/compat';
+import { useEffect, useRef } from 'preact/hooks';
 import type { JSX } from 'preact';
 import { useComputed } from '@preact/signals';
 import type { Signal } from '@preact/signals';
@@ -10,9 +11,10 @@ import { renderMd } from '../utils';
 import BookOutline from './BookOutline';
 import PDFPage from './PDFPage';
 import LazyBlock from './LazyBlock';
+import Icon from './icons';
 
 interface ContentViewerProps {
-  fileType: 'pdf' | 'epub' | 'text';
+  fileType: 'pdf' | 'epub' | 'text' | 'ocr';
   pages: any[];
   pdfDoc: any;
   epubContent: any[];
@@ -21,6 +23,9 @@ interface ContentViewerProps {
   isDarkMode: boolean;
   fontSize: number;
   onLineClick: (lineId: number) => void;
+  ocrCurrentPage?: number;
+  setOcrCurrentPage?: (page: number) => void;
+  ocrPageLoading?: boolean;
 }
 
 const H_SIZE: Record<number, string> = { 1: '1.45rem', 2: '1.25rem', 3: '1.1rem', 4: '1rem', 5: '0.95rem', 6: '0.9rem' };
@@ -28,6 +33,7 @@ const H_SIZE: Record<number, string> = { 1: '1.45rem', 2: '1.25rem', 3: '1.1rem'
 export default function ContentViewer({
   fileType, pages, pdfDoc, epubContent, activeHeaderId,
   t, isDarkMode, fontSize, onLineClick,
+  ocrCurrentPage, setOcrCurrentPage, ocrPageLoading,
 }: ContentViewerProps) {
   const pageContainerStyle: JSX.CSSProperties = { position: 'relative', marginBottom: '1rem', boxShadow: t.pageShadow, backgroundColor: '#fff', width: '100%', height: 'auto' };
   const lc = isDarkMode ? '#60a5fa' : '#2563eb';
@@ -40,14 +46,30 @@ export default function ContentViewer({
     }
   };
 
+  const wrapperMaxWidth = fileType === 'ocr' ? '110rem' : '48rem';
+
   return (
     <div 
       onClick={handleContainerClick}
-      style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', maxWidth: '48rem', padding: '1rem', paddingBottom: '6rem', boxSizing: 'border-box' }}
+      style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%', maxWidth: wrapperMaxWidth, padding: '1rem', paddingBottom: '6rem', boxSizing: 'border-box' }}
     >
       {fileType === 'pdf' && pages.map(pageData => (
         <PDFPage key={pageData.pageNumber} data={pageData} pdfDoc={pdfDoc} onLineClick={onLineClick} pageContainerStyle={pageContainerStyle} />
       ))}
+
+      {fileType === 'ocr' && (
+        <OCRSplitView
+          pdfDoc={pdfDoc}
+          ocrCurrentPage={ocrCurrentPage || 1}
+          setOcrCurrentPage={setOcrCurrentPage}
+          epubContent={epubContent}
+          t={t}
+          isDarkMode={isDarkMode}
+          fontSize={fontSize}
+          lc={lc}
+          ocrPageLoading={ocrPageLoading}
+        />
+      )}
 
       {(fileType === 'epub' || fileType === 'text') && (
         <>
@@ -61,7 +83,7 @@ export default function ContentViewer({
   );
 }
 
-const RenderItem = memo(({ item, t, isDarkMode, lc }: any) => {
+const RenderItem = memo(({ item, t, isDarkMode, lc, isOcr }: any) => {
   if (item.type === 'frontmatter') {
     return (
       <div style={{ margin: '0 0 2rem', borderRadius: '0.75rem', overflow: 'hidden', border: `1px solid ${t.statBorder}`, backgroundColor: isDarkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)' }}>
@@ -98,11 +120,11 @@ const RenderItem = memo(({ item, t, isDarkMode, lc }: any) => {
     });
 
     return (
-      <LazyBlock id={item.id} startLineId={item.startLineId} endLineId={item.endLineId}>
+      <LazyBlock id={item.id} startLineId={item.startLineId} endLineId={item.endLineId} compact={isOcr}>
         <p style={{
-          margin: isBlockquote ? '0 0 0.9em' : '0 0 1.1em', padding: 0, paddingLeft: isList ? '1.3em' : isBlockquote ? '1em' : 0,
+          margin: isOcr ? '0 0 0.05em' : (isBlockquote ? '0 0 0.9em' : '0 0 1.1em'), padding: 0, paddingLeft: isList ? '1.3em' : isBlockquote ? '1em' : 0,
           borderLeft: isBlockquote ? `3px solid ${t.dropBorder}` : 'none', fontStyle: isBlockquote ? 'italic' : 'normal',
-          color: isBlockquote ? t.textMuted : 'inherit', lineHeight: 'inherit', position: 'relative',
+          color: isBlockquote ? t.textMuted : 'inherit', lineHeight: isOcr ? '1.1' : 'inherit', position: 'relative',
         }}>
           {isList && <span style={{ position: 'absolute', left: 0, color: t.textMuted, userSelect: 'none' }}>•</span>}
           {item.sentences.map((s: any) => (
@@ -173,11 +195,176 @@ const SentenceItem = ({ s, isActive }: { s: any, isActive: Signal<boolean> }) =>
         padding: '2px 0', 
         transition: `background-color 0.2s, ${TT}`, 
         borderRadius: '4px',
-        // Optional: you could add a local "active" style here too, 
-        // though the global observer handles the DOM injection for word-level spans.
       }}
     >
       {s.text}{' '}
     </span>
   );
 };
+
+const OCRSplitView = ({
+  pdfDoc, ocrCurrentPage, setOcrCurrentPage, epubContent, t, isDarkMode, fontSize, lc, ocrPageLoading
+}: any) => {
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: '1.5rem',
+      width: '100%',
+      boxSizing: 'border-box',
+      alignItems: 'flex-start',
+    }}>
+      {/* Left Pane - Render PDF Page */}
+      <div style={{
+        flex: '1 1 350px',
+        minWidth: '320px',
+        display: 'flex',
+        flexDirection: 'column',
+        boxSizing: 'border-box',
+      }}>
+        <OCRPDFView pdfDoc={pdfDoc} pageNumber={ocrCurrentPage} t={t} />
+      </div>
+
+      {/* Right Pane - OCR Text content */}
+      <div style={{
+        flex: '1.6 1 480px',
+        minWidth: '320px',
+        display: 'flex',
+        flexDirection: 'column',
+        backgroundColor: t.epubBg,
+        border: `1px solid ${t.statBorder}`,
+        borderRadius: '0.75rem',
+        padding: '1.25rem',
+        boxShadow: t.pageShadow,
+        boxSizing: 'border-box',
+        minHeight: '400px',
+      }}>
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          borderBottom: `1px solid ${t.statBorder}`,
+          paddingBottom: '0.5rem',
+        }}>
+          <span style={{ fontSize: '0.9rem', fontWeight: 600, color: t.headerColor }}>
+            Recognized Page Text
+          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <button
+              disabled={ocrCurrentPage === 1}
+              onClick={() => setOcrCurrentPage?.(Math.max(1, ocrCurrentPage - 1))}
+              style={{
+                background: 'none', border: 'none', color: ocrCurrentPage === 1 ? t.textMuted : t.text,
+                cursor: ocrCurrentPage === 1 ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', padding: '4px'
+              }}
+            >
+              <Icon name="chevron-left" size={20} />
+            </button>
+            <span style={{ fontSize: '0.82rem', color: t.textMuted, fontWeight: 500 }}>
+              Page {ocrCurrentPage} of {pdfDoc?.numPages || 1}
+            </span>
+            <button
+              disabled={ocrCurrentPage === (pdfDoc?.numPages || 1)}
+              onClick={() => setOcrCurrentPage?.(Math.min(pdfDoc?.numPages || 1, ocrCurrentPage + 1))}
+              style={{
+                background: 'none', border: 'none', color: ocrCurrentPage === (pdfDoc?.numPages || 1) ? t.textMuted : t.text,
+                cursor: ocrCurrentPage === (pdfDoc?.numPages || 1) ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', padding: '4px'
+              }}
+            >
+              <Icon name="chevron-right" size={20} />
+            </button>
+          </div>
+        </div>
+
+        {ocrPageLoading ? (
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexGrow: 1,
+            gap: '0.75rem',
+            color: t.textMuted,
+            padding: '2rem 0',
+          }}>
+            <Icon name="loader-circle" size={24} color={isDarkMode ? '#60a5fa' : '#2563eb'} style={{ animation: 'spin 0.8s linear infinite' }} />
+            <span style={{ fontSize: '0.85rem' }}>Recognizing text via WebGPU...</span>
+          </div>
+        ) : (
+          <div style={{ width: '100%', lineHeight: '1.1', fontSize: `${fontSize}rem`, textAlign: 'left', transition: TT }}>
+            {epubContent.length === 0 ? (
+              <div style={{ padding: '2rem 0', textAlign: 'center', color: t.textMuted, fontSize: '0.85rem' }}>
+                No text found on this page.
+              </div>
+            ) : (
+              epubContent.map((item: any) => (
+                <RenderItem key={item.id} item={item} t={t} isDarkMode={isDarkMode} lc={lc} isOcr={true} />
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const OCRPDFView = ({ pdfDoc, pageNumber, t }: { pdfDoc: any; pageNumber: number; t: any }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const renderTaskRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!pdfDoc || !canvasRef.current) return;
+
+    const render = async () => {
+      try {
+        const page = await pdfDoc.getPage(pageNumber);
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const viewport = page.getViewport({ scale: 1.5 });
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        if (renderTaskRef.current) {
+          try { renderTaskRef.current.cancel(); } catch (e) {}
+        }
+        const renderTask = page.render({ canvasContext: ctx, viewport });
+        renderTaskRef.current = renderTask;
+        await renderTask.promise;
+        page.cleanup();
+      } catch (e: any) {
+        if (e.name !== 'RenderingCancelledException') {
+          console.error("OCR PDF render error:", e);
+        }
+      }
+    };
+
+    render();
+    return () => {
+      if (renderTaskRef.current) {
+        try { renderTaskRef.current.cancel(); } catch (e) {}
+      }
+    };
+  }, [pdfDoc, pageNumber]);
+
+  return (
+    <div style={{
+      width: '100%',
+      height: '100%',
+      display: 'flex',
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+      minHeight: '400px',
+    }}>
+      <canvas ref={canvasRef} style={{ maxWidth: '100%', maxHeight: '88vh', height: 'auto', width: 'auto', display: 'block', borderRadius: '4px' }} />
+    </div>
+  );
+};
+
+
+

@@ -2,10 +2,12 @@ import type { ComponentChildren, JSX } from 'preact';
 
 interface LazyBlockProps {
   id: string;
-  // These are kept in props for future metadata needs, 
+  // These are kept in props for future metadata needs,
   // but we no longer need to "force" renders since we aren't unmounting.
   startLineId?: number;
   endLineId?: number;
+  // Compact removes the inter-block margin (used for OCR line-by-line text).
+  compact?: boolean;
   children: ComponentChildren;
 }
 
@@ -19,9 +21,14 @@ const lazyBlockStyle: JSX.CSSProperties = {
   margin: '0 0 1em 0',
 };
 
-const LazyBlock = ({ id, children }: LazyBlockProps) => {
+const lazyBlockCompactStyle: JSX.CSSProperties = {
+  ...lazyBlockStyle,
+  margin: 0,
+};
+
+const LazyBlock = ({ id, compact, children }: LazyBlockProps) => {
   return (
-    <div id={id} style={lazyBlockStyle}>
+    <div id={id} style={compact ? lazyBlockCompactStyle : lazyBlockStyle}>
       {children}
     </div>
   );

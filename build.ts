@@ -74,7 +74,13 @@ const baseShell = [
     '/index.html',
     '/180.png',
     '/manifest.json',
-    '/pdf.worker.min.mjs'
+    '/pdf.worker.min.mjs',
+    // Workers are built via separate build() calls without a metafile, so they
+    // never appear in meta.outputs. List them explicitly so the service worker
+    // treats them as network-first app-shell assets — new worker bundles then
+    // ship on the next visit without needing a CACHE_VERSION bump.
+    '/ocr.worker.js',
+    '/tts.worker.js'
 ];
 
 const appShellFiles = [...new Set([...baseShell, ...outputs])];

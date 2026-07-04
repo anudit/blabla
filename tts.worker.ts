@@ -1,5 +1,5 @@
 // tts.worker.ts — Kitten TTS WebGPU (kitten-tts-mini-0.8, ~78M)
-import { KittenTTSEngine, textToInputIds } from 'kitten-tts-webgpu';
+import { KittenTTSEngine, textToInputIds } from '@anudit/kitten-tts-webgpu';
 
 const MODEL_REPO = 'kitten-tts-mini-0.8';
 const ONNX_URL = `https://huggingface.co/KittenML/${MODEL_REPO}/resolve/main/kitten_tts_mini_v0_8.onnx`;

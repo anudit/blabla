@@ -1,0 +1,26 @@
+# ── macOS ──────────────────────────────────────────────────────────────────
+.DS_Store
+
+# ── Xcode ──────────────────────────────────────────────────────────────────
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# ── Swift Package Manager ──────────────────────────────────────────────────
+.build/
+.swiftpm/
+
+# ── Build products & profiling artifacts ───────────────────────────────────
+*.app
+*.trace/
+
+# ── Bundled model weights (too large for git; fetched at build time) ────────
+tts-metal/tts-metal/kitten_tts_mini_v0_8.onnx
+tts-metal/tts-metal/voices.npz
+.claude

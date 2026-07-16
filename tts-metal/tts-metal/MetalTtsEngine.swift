@@ -934,7 +934,7 @@ init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         dispatchAdd(a: conv2, b: residual, out: rawSum, size: outCh * curLen)
         deferDestroy(conv2)
         let output = empty(outCh * curLen, label: "adain_block_out")
-        dispatchScale(input: rawSum, out: output, size: outCh * curLen, scale: 1.0 / Float(Double.pi / 4.0).squareRoot())
+        dispatchScale(input: rawSum, out: output, size: outCh * curLen, scale: 1.0 / Float(2.0).squareRoot())
         deferDestroy(rawSum)
         if residual !== input { deferDestroy(residual) }
         return AdaINResBlockResult(output: output, outChannels: outCh, outLength: curLen)
@@ -1002,7 +1002,7 @@ init(device: MTLDevice, commandQueue: MTLCommandQueue) {
                        padding: 1, stride: 1, dilation: 1, useBias: true)
         deferDestroy(act2)
 
-        let sqrt2Inv: Float = 1.0 / Float(Double.pi / 4.0).squareRoot()
+        let sqrt2Inv: Float = 1.0 / Float(2.0).squareRoot()
         let rawSum: MTLBuffer
         if let _ = pool {
             let resized = empty(inCh * curLen, label: "dec_resized")

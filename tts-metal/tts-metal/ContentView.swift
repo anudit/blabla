@@ -2,110 +2,160 @@
 //  ContentView.swift
 //  tts-metal
 //
-//  Native Kitten TTS UI. Loads the largest (mini) model from the app bundle on launch,
-//  phonemizes the text, runs the full inference on Metal, and plays back the waveform.
+//  Menu-bar popover: transport controls, voice/speed, an optional type-to-speak box,
+//  and the Accessibility-permission prompt needed to read the system selection.
 //
 
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var controller = TtsController()
-    @State private var text: String = "Hello! This is Kitten TTS running natively on Metal."
-    @State private var voice: String = "Bella"
-    @State private var speed: Double = 1.0
+    @ObservedObject var controller: TtsController
+    @State private var draft: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Kitten TTS · Metal")
-                .font(.title2.bold())
+        VStack(alignment: .leading, spacing: 12) {
+            header
 
-            HStack {
-                statusDot
+            if !controller.accessibilityGranted {
+                accessibilityBanner
+            }
+
+            transport
+
+            Divider()
+
+            settings
+
+            Divider()
+
+            typeToSpeak
+
+            footer
+        }
+        .padding(14)
+        .frame(width: 320)
+        .onAppear { controller.refreshAccessibility() }
+    }
+
+    // MARK: - Sections
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Image(systemName: controller.menuBarIcon)
+                .foregroundStyle(controller.statusColor)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Kitten TTS · Metal").font(.headline)
                 Text(controller.statusText)
-                    .font(.callout)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            Spacer()
+        }
+    }
 
+    private var accessibilityBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Accessibility access needed", systemImage: "lock.shield")
+                .font(.callout.bold())
+            Text("Required to read highlighted text from other apps.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("Grant Access…") { controller.requestAccessibility() }
+                .controlSize(.small)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.yellow.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var transport: some View {
+        HStack(spacing: 10) {
+            Button(action: { controller.togglePlayPause() }) {
+                Label(primaryLabel, systemImage: primaryIcon)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!controller.canControl)
+
+            Button(action: { controller.stop() }) {
+                Image(systemName: "stop.fill")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+            .disabled(!controller.isBusy)
+        }
+    }
+
+    private var settings: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Voice")
-                Picker("", selection: $voice) {
-                    ForEach(TtsConfig.voiceKeys, id: \.self) { v in Text(v).tag(v) }
+                Text("Voice").frame(width: 48, alignment: .leading)
+                Picker("", selection: $controller.voiceKey) {
+                    ForEach(TtsConfig.voiceKeys, id: \.self) { Text($0).tag($0) }
                 }
-                .pickerStyle(.menu)
-                .frame(width: 130)
-
-                Text("Speed")
-                Slider(value: $speed, in: 0.5...2.0, step: 0.1)
-                    .frame(width: 200)
-                Text(String(format: "%.1f", speed))
+                .labelsHidden()
+            }
+            HStack {
+                Text("Speed").frame(width: 48, alignment: .leading)
+                Slider(value: $controller.speed, in: 0.5...2.0, step: 0.1)
+                Text(String(format: "%.1f×", controller.speed))
                     .monospacedDigit()
-                    .frame(width: 30, alignment: .trailing)
+                    .frame(width: 40, alignment: .trailing)
             }
+        }
+    }
 
-            TextEditor(text: $text)
-                .font(.body)
-                .frame(minHeight: 120, maxHeight: 180)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.tertiary))
-
-            HStack {
-                Button(action: { Task { await controller.generate(text: text, voice: voice, speed: Float(speed)) } }) {
-                    if controller.isPlaying {
-                        Label("Generating…", systemImage: "circle.circle")
-                            .labelStyle(.titleAndIcon)
-                            .opacity(0.8)
-                    } else {
-                        Label("Generate & Play", systemImage: "play.fill")
-                            .labelStyle(.titleAndIcon)
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!controller.canGenerate)
-                .animation(.easeInOut(duration: 0.2), value: controller.isPlaying)
-
-                Button(action: { controller.stop() }) {
-                    Label("Stop", systemImage: "stop.fill")
+    private var typeToSpeak: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Type to speak").font(.caption).foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 6) {
+                TextEditor(text: $draft)
+                    .font(.callout)
+                    .frame(height: 54)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.tertiary))
+                Button {
+                    controller.speak(draft)
+                } label: {
+                    Image(systemName: "play.fill")
                 }
                 .buttonStyle(.bordered)
-                .disabled(!controller.isPlaying)
-            }
-
-            if !controller.timingLog.isEmpty {
-                timingLogView
+                .disabled(!controller.canControl || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(24)
-        .frame(minWidth: 640, minHeight: 480)
     }
 
-    private var statusDot: some View {
-        Circle()
-            .fill(controller.statusColor)
-            .frame(width: 10, height: 10)
-    }
-
-    private var timingLogView: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Last generation")
-                .font(.headline)
-            Text("Total: \(String(format: "%.0f ms", controller.lastTotalMs))")
-                .font(.callout)
-                .monospacedDigit()
-            ForEach(controller.timingLog, id: \.name) { stage in
-                HStack {
-                    Text(stage.name).font(.system(.caption, design: .monospaced))
-                    Spacer()
-                    Text(String(format: "%.1f ms", stage.ms))
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-            }
+    private var footer: some View {
+        HStack {
+            Label("Read selection", systemImage: "text.viewfinder")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("⌥⌘R")
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Quit") { NSApp.terminate(nil) }
+                .controlSize(.small)
         }
-        .padding(12)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
     }
-}
 
-#Preview {
-    ContentView()
+    // MARK: - Labels
+
+    private var primaryLabel: String {
+        switch controller.phase {
+        case .speaking, .generating: return "Pause"
+        case .paused:                return "Resume"
+        default:                     return "Read Selection"
+        }
+    }
+
+    private var primaryIcon: String {
+        switch controller.phase {
+        case .speaking, .generating: return "pause.fill"
+        case .paused:                return "play.fill"
+        default:                     return "text.viewfinder"
+        }
+    }
 }

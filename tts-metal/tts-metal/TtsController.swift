@@ -2,93 +2,280 @@
 //  TtsController.swift
 //  tts-metal
 //
+//  Drives the menu-bar TTS: loads the model, reads the system selection, chunks long
+//  text, and streams synthesized chunks into the gapless audio queue with transport
+//  (play / pause / stop) controls.
+//
 
 import Foundation
 import Metal
 import SwiftUI
 import Combine
+import Carbon.HIToolbox
 
 @MainActor
 final class TtsController: ObservableObject {
-    @Published var statusText: String = "Initializing…"
-    @Published var canGenerate: Bool = false
-    @Published var isPlaying: Bool = false
-    @Published var timingLog: [(name: String, ms: Double)] = []
-    @Published var lastTotalMs: Double = 0
 
-    var statusColor: Color { .green }
+    enum Phase: Equatable {
+        case loading, idle, generating, speaking, paused, error(String)
+    }
+
+    @Published private(set) var phase: Phase = .loading {
+        didSet { updateWaveAnimation() }
+    }
+    @Published private(set) var statusText: String = "Loading model…"
+    @Published private(set) var accessibilityGranted: Bool = SelectionReader.isTrusted
+    /// Animated speaker-wave level (1…3) while speaking; drives the toolbar icon.
+    @Published private(set) var waveLevel: Int = 2
+
+    // Persisted user settings.
+    @Published var voiceKey: String = UserDefaults.standard.string(forKey: "voice") ?? "Bella" {
+        didSet { UserDefaults.standard.set(voiceKey, forKey: "voice") }
+    }
+    @Published var speed: Double = (UserDefaults.standard.object(forKey: "speed") as? Double) ?? 1.0 {
+        didSet { UserDefaults.standard.set(speed, forKey: "speed") }
+    }
 
     private var engine: MetalTtsEngine?
     private let audio = AudioPlayer.shared
     private var loaded = false
 
+    private var hotKey: GlobalHotKey?
+    private var speakTask: Task<Void, Never>?
+    private var waveAnimTask: Task<Void, Never>?
+    private var totalChunks = 0
+    private var enqueuedChunks = 0
+    private var hasPromptedForAccess = false
+
     init() {
+        audio.onAllFinished = { [weak self] in self?.onPlaybackDrained() }
+        registerHotKey()
+        startAccessibilityWatch()
         Task { await load() }
     }
+
+    // MARK: - Derived UI state
+
+    var isBusy: Bool { phase == .generating || phase == .speaking || phase == .paused }
+    var canControl: Bool { loaded }
+
+    /// SF Symbol for the toolbar item, reflecting the current state.
+    var menuBarIcon: String {
+        switch phase {
+        case .loading:               return "hourglass"
+        case .idle:                  return "speaker.slash.fill"
+        case .generating, .speaking: return "speaker.wave.\(waveLevel).fill"
+        case .paused:                return "pause.fill"
+        case .error:                 return "exclamationmark.triangle.fill"
+        }
+    }
+
+    var statusColor: Color {
+        switch phase {
+        case .loading:    return .orange
+        case .error:      return .red
+        case .idle:       return .secondary
+        default:          return .green
+        }
+    }
+
+    // MARK: - Toolbar wave animation
+
+    private func updateWaveAnimation() {
+        let animate = (phase == .generating || phase == .speaking)
+        if animate {
+            guard waveAnimTask == nil else { return }
+            waveAnimTask = Task { @MainActor in
+                var level = 1
+                while !Task.isCancelled {
+                    waveLevel = level
+                    level = level % 3 + 1
+                    try? await Task.sleep(nanoseconds: 350_000_000)
+                }
+            }
+        } else {
+            waveAnimTask?.cancel()
+            waveAnimTask = nil
+        }
+    }
+
+    // MARK: - Model load
 
     private func load() async {
         statusText = "Loading Metal device…"
         guard let device = MTLCreateSystemDefaultDevice() else {
-            statusText = "Metal not available on this device."
-            return
+            fail("Metal not available."); return
         }
         guard let queue = device.makeCommandQueue() else {
-            statusText = "Could not create command queue."
-            return
+            fail("Could not create command queue."); return
         }
         let eng = MetalTtsEngine(device: device, commandQueue: queue)
-        do {
-            try eng.load()
-        } catch {
-            statusText = "Load failed: \(error.localizedDescription)"
-            return
-        }
-        // Preload phonemizer (dictionary + en_rules) during warmup so the
-        // first generate() call doesn't pay the ~50-100ms load cost.
-        statusText = "Warming up phonemizer…"
-        await Task.detached(priority: .utility) {
-            Phonemizer.warmup()
-        }.value
-        self.engine = eng
-        self.loaded = true
-        self.canGenerate = true
-        statusText = "Ready (kitten-tts-mini · 80M params)"
+        do { try eng.load() }
+        catch { fail("Load failed: \(error.localizedDescription)"); return }
+
+        statusText = "Warming up…"
+        await Task.detached(priority: .utility) { Phonemizer.warmup() }.value
+
+        engine = eng
+        loaded = true
+        phase = .idle
+        statusText = "Ready — select text, then press ⌥⌘R"
     }
 
-    func generate(text: String, voice: String, speed: Float) async {
-        guard let engine = engine, loaded else { return }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return }
+    private func fail(_ message: String) {
+        phase = .error(message)
+        statusText = message
+    }
 
-        canGenerate = false
-        isPlaying = true
-        let totalStart = DispatchTime.now().uptimeNanoseconds
+    // MARK: - Hotkey
 
-        statusText = "Phonemizing…"
-        let ids = Phonemizer.textToInputIds(trimmed)
-        if ids.isEmpty { statusText = "No phonemes produced."; canGenerate = true; isPlaying = false; return }
-
-        statusText = "Running inference on Metal…"
-        do {
-            // Run the heavy GPU-encode + CPU-DSP pipeline off the main thread so the UI
-            // stays responsive during the ~hundreds-of-ms inference.
-            let waveform = try await Task.detached(priority: .userInitiated) {
-                try engine.generate(inputIds: ids, voice: voice, speed: speed, textLength: trimmed.count)
-            }.value
-            let totalMs = Double(DispatchTime.now().uptimeNanoseconds - totalStart) / 1_000_000.0
-            lastTotalMs = totalMs
-            timingLog = engine.lastTimings.map { (name: $0.name, ms: $0.ms) }
-            statusText = "Generated \(String(format: "%.2f", Double(waveform.count) / TtsConfig.sampleRate))s of audio in \(String(format: "%.0f", totalMs)) ms"
-            audio.play(waveform, sampleRate: TtsConfig.sampleRate)
-        } catch {
-            statusText = "Inference error: \(error.localizedDescription)"
+    private func registerHotKey() {
+        // ⌥⌘R reads the current selection from anywhere in the system.
+        hotKey = GlobalHotKey(keyCode: UInt32(kVK_ANSI_R),
+                              modifiers: UInt32(cmdKey | optionKey)) { [weak self] in
+            Task { @MainActor in self?.readSelection() }
         }
-        canGenerate = true
-        isPlaying = false
+    }
+
+    // MARK: - Accessibility
+
+    /// Poll trust state so the permission banner clears automatically once granted
+    /// (and reappears if access is later revoked) without needing to reopen the popover.
+    private func startAccessibilityWatch() {
+        Task { @MainActor in
+            while !Task.isCancelled {
+                refreshAccessibility()
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            }
+        }
+    }
+
+    func refreshAccessibility() {
+        let trusted = SelectionReader.isTrusted
+        if trusted != accessibilityGranted { accessibilityGranted = trusted }
+        if trusted { hasPromptedForAccess = false }  // allow a fresh prompt if revoked later
+    }
+
+    func requestAccessibility() {
+        SelectionReader.requestTrust()
+        Task {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            refreshAccessibility()
+        }
+    }
+
+    // MARK: - Read selection → speak
+
+    func readSelection() {
+        guard loaded else { return }
+        guard SelectionReader.isTrusted else {
+            accessibilityGranted = false
+            statusText = "Enable Accessibility for tts-metal, then relaunch."
+            // Prompt at most once per launch so repeated ⌥⌘R presses don't spam the dialog.
+            if !hasPromptedForAccess {
+                hasPromptedForAccess = true
+                requestAccessibility()
+            }
+            return
+        }
+        statusText = "Reading selection…"
+        Task {
+            let text = await Task.detached(priority: .userInitiated) {
+                SelectionReader.currentSelection()
+            }.value
+            let clean = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if clean.isEmpty {
+                statusText = "No text selected."
+                if phase != .generating && phase != .speaking { phase = .idle }
+                return
+            }
+            speak(clean)
+        }
+    }
+
+    // MARK: - Speak (chunked, streamed)
+
+    func speak(_ rawText: String) {
+        guard loaded, let engine else { return }
+        let chunks = TextChunker.chunk(rawText)
+        guard !chunks.isEmpty else { return }
+
+        stop()                     // cancel anything in flight, reset the queue
+        totalChunks = chunks.count
+        enqueuedChunks = 0
+        phase = .generating
+        statusText = chunks.count > 1 ? "Synthesizing \(chunks.count) chunks…" : "Synthesizing…"
+
+        let voice = voiceKey
+        let rate = Float(speed)
+        speakTask = Task { @MainActor in
+            for (index, chunk) in chunks.enumerated() {
+                if Task.isCancelled { return }
+                let wave: [Float]
+                do {
+                    wave = try await Task.detached(priority: .userInitiated) {
+                        let ids = Phonemizer.textToInputIds(chunk)
+                        if ids.isEmpty { return [] }
+                        return try engine.generate(inputIds: ids, voice: voice,
+                                                   speed: rate, textLength: chunk.count)
+                    }.value
+                } catch {
+                    statusText = "Error: \(error.localizedDescription)"
+                    continue
+                }
+                if Task.isCancelled { return }
+                enqueuedChunks += 1
+                if !wave.isEmpty { audio.enqueue(wave) }
+                if phase == .generating && !audio.isPaused { phase = .speaking }
+                if chunks.count > 1 {
+                    statusText = "Speaking \(index + 1) of \(chunks.count)…"
+                }
+            }
+            // If everything already drained while we were still generating, settle now.
+            if !audio.isActive && phase != .paused { finishSpeaking() }
+        }
+    }
+
+    private func onPlaybackDrained() {
+        // Only truly finished once every chunk has been enqueued (and not paused).
+        guard enqueuedChunks >= totalChunks, phase != .paused else { return }
+        finishSpeaking()
+    }
+
+    private func finishSpeaking() {
+        phase = .idle
+        statusText = "Ready — select text, then press ⌥⌘R"
+    }
+
+    // MARK: - Transport
+
+    /// Play/pause primary action. When idle, reads the current selection.
+    func togglePlayPause() {
+        switch phase {
+        case .speaking, .generating:
+            audio.pause()
+            phase = .paused
+            statusText = "Paused"
+        case .paused:
+            audio.resume()
+            phase = audio.isActive ? .speaking : .generating
+            statusText = "Speaking…"
+        case .idle, .error:
+            readSelection()
+        case .loading:
+            break
+        }
     }
 
     func stop() {
+        speakTask?.cancel()
+        speakTask = nil
         audio.stop()
-        isPlaying = false
+        totalChunks = 0
+        enqueuedChunks = 0
+        if loaded, phase != .loading {
+            phase = .idle
+            statusText = "Ready — select text, then press ⌥⌘R"
+        }
     }
 }

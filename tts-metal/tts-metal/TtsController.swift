@@ -36,7 +36,15 @@ final class TtsController: ObservableObject {
         didSet { UserDefaults.standard.set(speed, forKey: "speed") }
     }
 
+    /// When on, generated audio is denoised + upsampled to 48 kHz through RE-USE.
+    @Published var enhanceEnabled: Bool = (UserDefaults.standard.object(forKey: "enhance") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(enhanceEnabled, forKey: "enhance") }
+    }
+    /// True once the RE-USE weights finished loading; gates the toggle's effect.
+    @Published private(set) var enhancerReady: Bool = false
+
     private var engine: MetalTtsEngine?
+    private var enhancer: ReuseEnhancer?
     private let audio = AudioPlayer.shared
     private var loaded = false
 
@@ -119,6 +127,22 @@ final class TtsController: ObservableObject {
         engine = eng
         loaded = true
         phase = .idle
+        statusText = "Ready — select text, then press ⌥⌘R"
+
+        // Load the RE-USE enhancer in the background; enhancement stays off until ready.
+        statusText = "Loading enhancer…"
+        let reuse = ReuseEnhancer(device: device, commandQueue: queue)
+        let ok = await Task.detached(priority: .utility) { () -> Bool in
+            do { try reuse.load(); return true }
+            catch { print("[RE-USE] load failed: \(error)"); return false }
+        }.value
+        if ok {
+            enhancer = reuse
+            enhancerReady = true
+            if ProcessInfo.processInfo.environment["REUSE_SELFTEST"] == "1" {
+                await Task.detached(priority: .utility) { reuse.selfTest() }.value
+            }
+        }
         statusText = "Ready — select text, then press ⌥⌘R"
     }
 
@@ -208,16 +232,33 @@ final class TtsController: ObservableObject {
 
         let voice = voiceKey
         let rate = Float(speed)
+        let doEnhance = enhanceEnabled && enhancerReady
+        let reuse = enhancer
+        // The audio graph runs at a fixed 48 kHz; everything we enqueue is 48 kHz.
+        let outRate = TtsConfig.enhancedSampleRate
         speakTask = Task { @MainActor in
             for (index, chunk) in chunks.enumerated() {
                 if Task.isCancelled { return }
+                // Sliding-window backpressure: stay at most 5 chunks ahead of playback,
+                // so generation of the next sentence overlaps playback of the current one
+                // without synthesizing the whole document up front.
+                await audio.reserveSlot(limit: 5)
+                if Task.isCancelled { return }
                 let wave: [Float]
                 do {
-                    wave = try await Task.detached(priority: .userInitiated) {
+                    wave = try await Task.detached(priority: .userInitiated) { () -> [Float] in
                         let ids = Phonemizer.textToInputIds(chunk)
                         if ids.isEmpty { return [] }
-                        return try engine.generate(inputIds: ids, voice: voice,
-                                                   speed: rate, textLength: chunk.count)
+                        let raw = try engine.generate(inputIds: ids, voice: voice,
+                                                      speed: rate, textLength: chunk.count)
+                        if raw.isEmpty { return [] }
+                        if doEnhance, let reuse {
+                            return try reuse.enhance(raw, inputSR: TtsConfig.sampleRate,
+                                                     targetSR: outRate)
+                        }
+                        // Enhancement off: upsample so the fixed 48 kHz graph plays at the
+                        // right pitch/speed (no main-thread graph reconfiguration).
+                        return Resampler.resample(raw, from: TtsConfig.sampleRate, to: outRate)
                     }.value
                 } catch {
                     statusText = "Error: \(error.localizedDescription)"

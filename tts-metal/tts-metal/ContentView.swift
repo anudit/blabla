@@ -105,6 +105,18 @@ struct ContentView: View {
                     .monospacedDigit()
                     .frame(width: 40, alignment: .trailing)
             }
+            Toggle(isOn: $controller.enhanceEnabled) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Enhance audio (RE-USE)")
+                    Text(controller.enhancerReady ? "Denoise + upsample to 48 kHz"
+                                                   : "Loading model…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(!controller.enhancerReady)
         }
     }
 

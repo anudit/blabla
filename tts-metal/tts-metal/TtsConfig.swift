@@ -8,6 +8,9 @@ import Foundation
 enum TtsConfig {
     static let sampleRate: Double = 24000
 
+    /// Output rate after the RE-USE cleanup/upsampling layer.
+    static let enhancedSampleRate: Double = 48000
+
     static let symbols: [String] = {
         var s = ""
         s += "$;:,.!?¡¿—…“«»”„ ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"

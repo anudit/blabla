@@ -821,3 +821,494 @@ kernel void istft_kernel(device const float* conv_post    [[buffer(0)]],
     }
     output[out_pos] = sum;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  RE-USE (SEMamba) speech-enhancement kernels
+//  Tensor layout convention below: 2D feature maps are stored channel-major,
+//  row-major within each channel:  x[c, h, w] = buf[(c*H + h)*W + w].
+//  Sequence tensors for Mamba are [batch, L, D] row-major:
+//      x[b, l, d] = buf[(b*L + l)*D + d].
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Forward STFT → compressed magnitude (log1p) + phase ─────────────────────
+// One thread per (freq bin f, frame t). `signal` is already reflect-padded by
+// n_fft/2 on each side, so window sample k of frame t is signal[t*hop + k].
+
+struct ReuseStftParams {
+    uint n_fft;      // == win_size
+    uint hop;
+    uint num_freq;   // n_fft/2 + 1
+    uint num_frames;
+};
+
+kernel void reuse_stft_kernel(device const float* signal [[buffer(0)]],
+                              device const float* window [[buffer(1)]],
+                              device float*       mag    [[buffer(2)]],
+                              device float*       pha    [[buffer(3)]],
+                              constant ReuseStftParams& p [[buffer(4)]],
+                              uint gid [[thread_position_in_grid]]) {
+    uint total = p.num_freq * p.num_frames;
+    if (gid >= total) return;
+    uint f = gid / p.num_frames;
+    uint t = gid % p.num_frames;
+    float re = 0.0, im = 0.0;
+    float coef = -2.0 * M_PI_F * float(f) / float(p.n_fft);
+    // Phasor recurrence: (ck, sk) = (cos(coef*k), sin(coef*k)) advanced by one step
+    // per iteration instead of calling cos/sin for every sample.
+    float cs = cos(coef), sn = sin(coef);
+    float ck = 1.0, sk = 0.0;
+    uint base = t * p.hop;
+    for (uint k = 0; k < p.n_fft; ++k) {
+        float s = window[k] * signal[base + k];
+        re = fma(s, ck, re);
+        im = fma(s, sk, im);
+        float nck = ck * cs - sk * sn;
+        sk = ck * sn + sk * cs;
+        ck = nck;
+    }
+    float m = sqrt(re * re + im * im);
+    mag[gid] = log(1.0 + m);          // log1p compression (relu_log1p)
+    pha[gid] = atan2(im, re);
+}
+
+// ── General 2D convolution (bias optional) ──────────────────────────────────
+struct ReuseConv2dParams {
+    uint in_ch;  uint out_ch;
+    uint H;      uint W;
+    uint kh;     uint kw;
+    uint pad_h;  uint pad_w;
+    uint str_h;  uint str_w;
+    uint dil_h;  uint dil_w;
+    uint out_h;  uint out_w;
+    uint use_bias; uint _pad;
+};
+
+kernel void reuse_conv2d_kernel(device const float* input  [[buffer(0)]],
+                                device const float* weight [[buffer(1)]],
+                                device const float* bias   [[buffer(2)]],
+                                device float*       output [[buffer(3)]],
+                                constant ReuseConv2dParams& p [[buffer(4)]],
+                                uint gid [[thread_position_in_grid]]) {
+    uint total = p.out_ch * p.out_h * p.out_w;
+    if (gid >= total) return;
+    uint ow = gid % p.out_w;
+    uint oh = (gid / p.out_w) % p.out_h;
+    uint oc = gid / (p.out_w * p.out_h);
+    float sum = 0.0;
+    for (uint ic = 0; ic < p.in_ch; ++ic) {
+        uint in_ch_base = ic * p.H * p.W;
+        uint w_base = ((oc * p.in_ch) + ic) * p.kh * p.kw;
+        for (uint r = 0; r < p.kh; ++r) {
+            int ih = int(oh * p.str_h) + int(r * p.dil_h) - int(p.pad_h);
+            if (ih < 0 || uint(ih) >= p.H) continue;
+            uint in_row = in_ch_base + uint(ih) * p.W;
+            uint w_row = w_base + r * p.kw;
+            for (uint c = 0; c < p.kw; ++c) {
+                int iw = int(ow * p.str_w) + int(c * p.dil_w) - int(p.pad_w);
+                if (iw < 0 || uint(iw) >= p.W) continue;
+                sum = fma(input[in_row + uint(iw)], weight[w_row + c], sum);
+            }
+        }
+    }
+    if (p.use_bias != 0u) sum += bias[oc];
+    output[gid] = sum;
+}
+
+// ── InstanceNorm2d with affine (one threadgroup per channel) ─────────────────
+struct ReuseInstNorm2dParams { uint channels; uint length; float eps; };
+
+kernel void reuse_instance_norm2d_kernel(device const float* input  [[buffer(0)]],
+                                         device const float* gamma  [[buffer(1)]],
+                                         device const float* beta   [[buffer(2)]],
+                                         device float*       output [[buffer(3)]],
+                                         constant ReuseInstNorm2dParams& p [[buffer(4)]],
+                                         uint2 wid [[threadgroup_position_in_grid]],
+                                         uint2 lid [[thread_position_in_threadgroup]]) {
+    constexpr uint WGT = 256;
+    threadgroup float red[256];
+    threadgroup float sh_mean;
+    threadgroup float sh_inv;
+    uint ch = wid.x;
+    bool active = ch < p.channels;
+    uint tid = lid.x;
+    uint L = p.length;
+    uint base = active ? ch * L : 0;
+    float s = 0.0;
+    for (uint i = tid; i < L; i += WGT) s += input[base + i];
+    red[tid] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = WGT / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) red[tid] += red[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) sh_mean = red[0] / float(L);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float mean = sh_mean;
+    float vs = 0.0;
+    for (uint i = tid; i < L; i += WGT) { float d = input[base + i] - mean; vs += d * d; }
+    red[tid] = vs;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = WGT / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) red[tid] += red[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) sh_inv = 1.0 / sqrt(red[0] / float(L) + p.eps);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (!active) return;
+    float inv = sh_inv;
+    float g = gamma[ch], b = beta[ch];
+    for (uint i = tid; i < L; i += WGT) {
+        output[base + i] = (input[base + i] - mean) * inv * g + b;
+    }
+}
+
+// ── PReLU (per-channel slope) ───────────────────────────────────────────────
+struct ReuseChanLenParams { uint channels; uint length; };
+
+kernel void reuse_prelu_kernel(device const float* input  [[buffer(0)]],
+                               device const float* slope  [[buffer(1)]],
+                               device float*       output [[buffer(2)]],
+                               constant ReuseChanLenParams& p [[buffer(3)]],
+                               uint gid [[thread_position_in_grid]]) {
+    uint total = p.channels * p.length;
+    if (gid >= total) return;
+    uint ch = gid / p.length;
+    float x = input[gid];
+    output[gid] = (x >= 0.0) ? x : slope[ch] * x;
+}
+
+// ── Constant (zero) pad 2D ──────────────────────────────────────────────────
+struct ReusePad2dParams {
+    uint channels; uint H; uint W;
+    uint pad_top; uint pad_bottom; uint pad_left; uint pad_right;
+};
+
+kernel void reuse_pad2d_kernel(device const float* input  [[buffer(0)]],
+                               device float*       output [[buffer(1)]],
+                               constant ReusePad2dParams& p [[buffer(2)]],
+                               uint gid [[thread_position_in_grid]]) {
+    uint outH = p.H + p.pad_top + p.pad_bottom;
+    uint outW = p.W + p.pad_left + p.pad_right;
+    uint total = p.channels * outH * outW;
+    if (gid >= total) return;
+    uint ow = gid % outW;
+    uint oh = (gid / outW) % outH;
+    uint c  = gid / (outW * outH);
+    if (oh < p.pad_top || oh >= p.pad_top + p.H ||
+        ow < p.pad_left || ow >= p.pad_left + p.W) {
+        output[gid] = 0.0;
+        return;
+    }
+    uint ih = oh - p.pad_top;
+    uint iw = ow - p.pad_left;
+    output[gid] = input[(c * p.H + ih) * p.W + iw];
+}
+
+// ── Sub-pixel width shuffle for SPConvTranspose2d ───────────────────────────
+// in : [out_ch*r, H, W]   out : [out_ch, H, W*r]
+// out[c, h, w*r + rr] = in[rr*out_ch + c, h, w]
+struct ReusePixelShuffleParams { uint out_ch; uint r; uint H; uint W; };
+
+kernel void reuse_pixelshuffle_w_kernel(device const float* input  [[buffer(0)]],
+                                        device float*       output [[buffer(1)]],
+                                        constant ReusePixelShuffleParams& p [[buffer(2)]],
+                                        uint gid [[thread_position_in_grid]]) {
+    uint Wr = p.W * p.r;
+    uint total = p.out_ch * p.H * Wr;
+    if (gid >= total) return;
+    uint ow = gid % Wr;
+    uint oh = (gid / Wr) % p.H;
+    uint c  = gid / (Wr * p.H);
+    uint w  = ow / p.r;
+    uint rr = ow % p.r;
+    uint in_ch = rr * p.out_ch + c;
+    output[gid] = input[(in_ch * p.H + oh) * p.W + w];
+}
+
+// ── Per-channel spatial transpose (swap H and W) ────────────────────────────
+struct ReuseTransposeHWParams { uint channels; uint H; uint W; };
+
+kernel void reuse_transpose_hw_kernel(device const float* input  [[buffer(0)]],
+                                      device float*       output [[buffer(1)]],
+                                      constant ReuseTransposeHWParams& p [[buffer(2)]],
+                                      uint gid [[thread_position_in_grid]]) {
+    uint total = p.channels * p.H * p.W;
+    if (gid >= total) return;
+    uint w = gid % p.W;
+    uint h = (gid / p.W) % p.H;
+    uint c = gid / (p.W * p.H);
+    // out[c, w, h] over dims (H'=W, W'=H)
+    output[(c * p.W + w) * p.H + h] = input[gid];
+}
+
+// ── Flip a [batch, L, D] tensor along L ─────────────────────────────────────
+struct ReuseFlipParams { uint batch; uint L; uint dim; };
+
+kernel void reuse_flip_kernel(device const float* input  [[buffer(0)]],
+                              device float*       output [[buffer(1)]],
+                              constant ReuseFlipParams& p [[buffer(2)]],
+                              uint gid [[thread_position_in_grid]]) {
+    uint total = p.batch * p.L * p.dim;
+    if (gid >= total) return;
+    uint d = gid % p.dim;
+    uint l = (gid / p.dim) % p.L;
+    uint b = gid / (p.dim * p.L);
+    uint src_l = p.L - 1 - l;
+    output[gid] = input[(b * p.L + src_l) * p.dim + d];
+}
+
+// ── Mamba depthwise causal conv over L + bias + SiLU ────────────────────────
+// xz : [batch*L, in_stride] with the "x" channels in cols [0, d_inner).
+// out: [batch*L, d_inner] = SiLU(conv1d_causal(x) + conv_bias)
+struct ReuseMambaConvParams {
+    uint batch; uint L; uint d_inner; uint in_stride; uint k;
+};
+
+kernel void reuse_mamba_conv_kernel(device const float* xz      [[buffer(0)]],
+                                    device const float* weight  [[buffer(1)]],  // [d_inner, 1, k]
+                                    device const float* bias    [[buffer(2)]],  // [d_inner]
+                                    device float*       out     [[buffer(3)]],  // [batch*L, d_inner]
+                                    constant ReuseMambaConvParams& p [[buffer(4)]],
+                                    uint gid [[thread_position_in_grid]]) {
+    uint total = p.batch * p.L * p.d_inner;
+    if (gid >= total) return;
+    uint d = gid % p.d_inner;
+    uint l = (gid / p.d_inner) % p.L;
+    uint b = gid / (p.d_inner * p.L);
+    float sum = bias[d];
+    uint wbase = d * p.k;
+    // causal taps: input positions l-(k-1) .. l
+    for (uint j = 0; j < p.k; ++j) {
+        int lp = int(l) + int(j) - int(p.k - 1);
+        if (lp < 0) continue;
+        uint row = b * p.L + uint(lp);
+        sum += xz[row * p.in_stride + d] * weight[wbase + j];
+    }
+    out[gid] = sum / (1.0 + exp(-sum));   // SiLU
+}
+
+// ── Mamba selective scan (sequential over L, parallel over batch*d_inner) ───
+struct ReuseScanParams {
+    uint batch; uint L; uint d_inner; uint d_state; uint dbl_stride; uint xz_stride;
+};
+
+kernel void reuse_selective_scan_kernel(device const float* u       [[buffer(0)]],  // [batch*L, d_inner]
+                                        device const float* dt_raw  [[buffer(1)]],  // [batch*L, d_inner]
+                                        device const float* xdbl    [[buffer(2)]],  // [batch*L, dbl_stride], B@[dt_rank..], C@[..]
+                                        device const float* xz      [[buffer(3)]],  // [batch*L, xz_stride], z@[d_inner..]
+                                        device const float* A_log   [[buffer(4)]],  // [d_inner, d_state]
+                                        device const float* Dvec    [[buffer(5)]],  // [d_inner]
+                                        device const float* dt_bias [[buffer(6)]],  // [d_inner]
+                                        device float*       y       [[buffer(7)]],  // [batch*L, d_inner]
+                                        constant ReuseScanParams& p [[buffer(8)]],
+                                        uint gid [[thread_position_in_grid]]) {
+    uint total = p.batch * p.d_inner;
+    if (gid >= total) return;
+    uint d = gid % p.d_inner;
+    uint b = gid / p.d_inner;
+    uint N = p.d_state;
+    uint dt_rank = p.dbl_stride - 2u * N;   // B offset = dt_rank, C offset = dt_rank+N
+
+    float A[16];
+    float h[16];
+    for (uint n = 0; n < N; ++n) { A[n] = -exp(A_log[d * N + n]); h[n] = 0.0; }
+    float Dd = Dvec[d];
+    float dbias = dt_bias[d];
+
+    for (uint l = 0; l < p.L; ++l) {
+        uint row = b * p.L + l;
+        float uu = u[row * p.d_inner + d];
+        float dtr = dt_raw[row * p.d_inner + d] + dbias;
+        // softplus
+        float dt = (dtr > 20.0) ? dtr : log(1.0 + exp(dtr));
+        float z = xz[row * p.xz_stride + p.d_inner + d];
+        uint dblbase = row * p.dbl_stride;
+        float acc = 0.0;
+        float dtu = dt * uu;
+        for (uint n = 0; n < N; ++n) {
+            float Bn = xdbl[dblbase + dt_rank + n];
+            float Cn = xdbl[dblbase + dt_rank + N + n];
+            float dA = exp(dt * A[n]);
+            h[n] = fma(dA, h[n], dtu * Bn);
+            acc = fma(h[n], Cn, acc);
+        }
+        acc += Dd * uu;
+        acc *= z / (1.0 + exp(-z));   // * SiLU(z)
+        y[row * p.d_inner + d] = acc;
+    }
+}
+
+// ── amp/phase → complex spectrum with artifact-frame zeroing ────────────────
+// mag_out[f,t] = expm1(relu(amp[f,t])); if >50% of a frame's bins are zero,
+// the whole frame is zeroed. Emits real[f,t], imag[f,t].
+struct ReuseSpecParams { uint num_freq; uint num_frames; };
+
+kernel void reuse_zero_frac_kernel(device const float* amp      [[buffer(0)]],  // [F, T]
+                                   device float*       zero_frac [[buffer(1)]], // [T]
+                                   constant ReuseSpecParams& p [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.num_frames) return;
+    uint t = gid;
+    uint zeros = 0;
+    for (uint f = 0; f < p.num_freq; ++f) {
+        if (amp[f * p.num_frames + t] <= 0.0) zeros++;   // expm1(relu(x))==0  <=>  x<=0
+    }
+    zero_frac[t] = float(zeros) / float(p.num_freq);
+}
+
+kernel void reuse_spec_to_complex_kernel(device const float* amp       [[buffer(0)]],  // [F, T]
+                                         device const float* pha       [[buffer(1)]],  // [F, T]
+                                         device const float* zero_frac [[buffer(2)]],  // [T]
+                                         device float*       out_real  [[buffer(3)]],  // [F, T]
+                                         device float*       out_imag  [[buffer(4)]],  // [F, T]
+                                         constant ReuseSpecParams& p [[buffer(5)]],
+                                         uint gid [[thread_position_in_grid]]) {
+    uint total = p.num_freq * p.num_frames;
+    if (gid >= total) return;
+    uint t = gid % p.num_frames;
+    float a = amp[gid];
+    float m = (a > 0.0) ? (exp(a) - 1.0) : 0.0;   // expm1(relu(amp))
+    if (zero_frac[t] > 0.5) m = 0.0;
+    float ph = pha[gid];
+    out_real[gid] = m * cos(ph);
+    out_imag[gid] = m * sin(ph);
+}
+
+// ── Per-frame windowed inverse rFFT ─────────────────────────────────────────
+// real/imag: [F, T] onesided (F = n_fft/2+1). Output frames[t, k] windowed.
+struct ReuseIrfftParams { uint n_fft; uint num_freq; uint num_frames; };
+
+kernel void reuse_irfft_kernel(device const float* re     [[buffer(0)]],  // [F, T]
+                               device const float* im     [[buffer(1)]],  // [F, T]
+                               device const float* window [[buffer(2)]],  // [n_fft]
+                               device float*       frames [[buffer(3)]],  // [T, n_fft]
+                               constant ReuseIrfftParams& p [[buffer(4)]],
+                               uint gid [[thread_position_in_grid]]) {
+    uint total = p.num_frames * p.n_fft;
+    if (gid >= total) return;
+    uint k = gid % p.n_fft;
+    uint t = gid / p.n_fft;
+    uint N = p.n_fft;
+    uint nyq_idx = N / 2;   // Nyquist index
+    float acc = re[0 * p.num_frames + t];                       // DC (f=0)
+    float coef = 2.0 * M_PI_F * float(k) / float(N);
+    // Phasor recurrence over frequency bins: (cf, sf) = (cos(coef*f), sin(coef*f)).
+    float cs = cos(coef), sn = sin(coef);
+    float cf = cs, sf = sn;                                     // start at f = 1
+    for (uint f = 1; f < nyq_idx; ++f) {
+        acc += 2.0 * (re[f * p.num_frames + t] * cf - im[f * p.num_frames + t] * sf);
+        float ncf = cf * cs - sf * sn;
+        sf = cf * sn + sf * cs;
+        cf = ncf;
+    }
+    // Nyquist term (f = N/2): cos(pi*k) = (-1)^k, sin term drops out for real signal
+    float nyq = re[nyq_idx * p.num_frames + t];
+    acc += nyq * ((k & 1u) ? -1.0 : 1.0);
+    acc /= float(N);
+    frames[t * N + k] = acc * window[k];
+}
+
+// ── Overlap-add with window-envelope normalisation, then centre-trim ────────
+struct ReuseOlaParams {
+    uint n_fft; uint hop; uint num_frames; uint pad_len; uint out_len; uint trim;
+};
+
+kernel void reuse_ola_kernel(device const float* frames [[buffer(0)]],  // [T, n_fft]
+                             device const float* window [[buffer(1)]],  // [n_fft]
+                             device float*       output [[buffer(2)]],  // [out_len]
+                             constant ReuseOlaParams& p [[buffer(3)]],
+                             uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.out_len) return;
+    uint n = gid + p.trim;                 // position in padded coordinates
+    float num = 0.0, den = 0.0;
+    // frames t with t*hop <= n < t*hop + n_fft  →  k = n - t*hop in [0, n_fft)
+    uint t_lo = (n >= p.n_fft - 1) ? ((n - (p.n_fft - 1) + p.hop - 1) / p.hop) : 0u;
+    uint t_hi = n / p.hop;
+    for (uint t = t_lo; t <= t_hi && t < p.num_frames; ++t) {
+        uint k = n - t * p.hop;
+        if (k >= p.n_fft) continue;
+        float w = window[k];
+        num += frames[t * p.n_fft + k];
+        den += w * w;
+    }
+    output[gid] = (den > 1e-11) ? (num / den) : 0.0;
+}
+
+// ── Generic 3D permute ──────────────────────────────────────────────────────
+// Output axis j reads input axis perm[j]; output dims = (d[p0], d[p1], d[p2]).
+struct ReusePermute3dParams { uint d0; uint d1; uint d2; uint p0; uint p1; uint p2; };
+
+kernel void reuse_permute3d_kernel(device const float* input  [[buffer(0)]],
+                                   device float*       output [[buffer(1)]],
+                                   constant ReusePermute3dParams& p [[buffer(2)]],
+                                   uint gid [[thread_position_in_grid]]) {
+    uint d[3]; d[0] = p.d0; d[1] = p.d1; d[2] = p.d2;
+    uint perm[3]; perm[0] = p.p0; perm[1] = p.p1; perm[2] = p.p2;
+    uint o0 = d[perm[0]], o1 = d[perm[1]], o2 = d[perm[2]];
+    uint total = o0 * o1 * o2;
+    if (gid >= total) return;
+    uint c2 = gid % o2;
+    uint c1 = (gid / o2) % o1;
+    uint c0 = gid / (o2 * o1);
+    uint incoord[3];
+    incoord[perm[0]] = c0;
+    incoord[perm[1]] = c1;
+    incoord[perm[2]] = c2;
+    uint in_lin = (incoord[0] * d[1] + incoord[1]) * d[2] + incoord[2];
+    output[gid] = input[in_lin];
+}
+
+// ── Slice contiguous columns out of a [rows, in_stride] matrix ───────────────
+struct ReuseSliceColsParams { uint rows; uint in_stride; uint col_off; uint col_count; };
+
+kernel void reuse_slice_cols_kernel(device const float* input  [[buffer(0)]],
+                                    device float*       output [[buffer(1)]],
+                                    constant ReuseSliceColsParams& p [[buffer(2)]],
+                                    uint gid [[thread_position_in_grid]]) {
+    uint total = p.rows * p.col_count;
+    if (gid >= total) return;
+    uint r = gid / p.col_count;
+    uint c = gid % p.col_count;
+    output[gid] = input[r * p.in_stride + p.col_off + c];
+}
+
+// ── Concatenate two [rows, *] matrices along the last dim ───────────────────
+struct ReuseConcatColsParams { uint rows; uint cols_a; uint cols_b; };
+
+kernel void reuse_concat_cols_kernel(device const float* a   [[buffer(0)]],
+                                     device const float* b   [[buffer(1)]],
+                                     device float*       out [[buffer(2)]],
+                                     constant ReuseConcatColsParams& p [[buffer(3)]],
+                                     uint gid [[thread_position_in_grid]]) {
+    uint total_cols = p.cols_a + p.cols_b;
+    uint total = p.rows * total_cols;
+    if (gid >= total) return;
+    uint r = gid / total_cols;
+    uint c = gid % total_cols;
+    out[gid] = (c < p.cols_a) ? a[r * p.cols_a + c]
+                              : b[r * p.cols_b + (c - p.cols_a)];
+}
+
+// ── Crop a [inH, inW] map to its top-left [outH, outW] corner ────────────────
+struct ReuseCropParams { uint in_h; uint in_w; uint out_h; uint out_w; };
+
+kernel void reuse_crop2d_kernel(device const float* input  [[buffer(0)]],
+                                device float*       output [[buffer(1)]],
+                                constant ReuseCropParams& p [[buffer(2)]],
+                                uint gid [[thread_position_in_grid]]) {
+    uint total = p.out_h * p.out_w;
+    if (gid >= total) return;
+    uint w = gid % p.out_w;
+    uint h = gid / p.out_w;
+    output[gid] = input[h * p.in_w + w];
+}
+
+// ── Elementwise atan2(y, x) ─────────────────────────────────────────────────
+kernel void reuse_atan2_kernel(device const float* y   [[buffer(0)]],
+                               device const float* x   [[buffer(1)]],
+                               device float*       out [[buffer(2)]],
+                               constant SizeParams& p [[buffer(3)]],
+                               uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.size) return;
+    out[gid] = atan2(y[gid], x[gid]);
+}

@@ -914,6 +914,112 @@ kernel void reuse_conv2d_kernel(device const float* input  [[buffer(0)]],
     output[gid] = sum;
 }
 
+// ── Register-blocked GEMM: out[M,N] = A[M,K] · B[K,N] (+bias per column) ─────
+// 64×64 output tile per threadgroup, each of 256 threads computes a 4×4 subtile.
+// Much higher arithmetic intensity than one-output-per-thread; used for the
+// Mamba projections which dominate RE-USE runtime.
+kernel void reuse_matmul_kernel(device const float* A    [[buffer(0)]],
+                                device const float* B    [[buffer(1)]],
+                                device const float* bias [[buffer(2)]],
+                                device float*       out  [[buffer(3)]],
+                                constant MatmulParams& p [[buffer(4)]],
+                                uint2 tgid [[threadgroup_position_in_grid]],
+                                uint2 lid2 [[thread_position_in_threadgroup]]) {
+    constexpr uint BM = 64, BN = 64, BK = 16, TM = 4, TN = 4;
+    threadgroup float As[BM * BK];
+    threadgroup float Bs[BK * BN];
+    uint lid = lid2.x;
+    uint bm0 = tgid.y * BM;
+    uint bn0 = tgid.x * BN;
+    uint tRow = lid / 16;            // 0..15
+    uint tCol = lid % 16;            // 0..15
+
+    float acc[TM][TN];
+    for (uint i = 0; i < TM; ++i) for (uint j = 0; j < TN; ++j) acc[i][j] = 0.0;
+
+    uint M = p.M, K = p.K, N = p.N;
+    for (uint k0 = 0; k0 < K; k0 += BK) {
+        for (uint i = lid; i < BM * BK; i += 256) {
+            uint r = i / BK, c = i % BK;
+            uint gr = bm0 + r, gc = k0 + c;
+            As[i] = (gr < M && gc < K) ? A[gr * K + gc] : 0.0;
+        }
+        for (uint i = lid; i < BK * BN; i += 256) {
+            uint r = i / BN, c = i % BN;
+            uint gr = k0 + r, gc = bn0 + c;
+            Bs[i] = (gr < K && gc < N) ? B[gr * N + gc] : 0.0;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0; kk < BK; ++kk) {
+            float af[TM], bf[TN];
+            for (uint i = 0; i < TM; ++i) af[i] = As[(tRow * TM + i) * BK + kk];
+            for (uint j = 0; j < TN; ++j) bf[j] = Bs[kk * BN + tCol * TN + j];
+            for (uint i = 0; i < TM; ++i)
+                for (uint j = 0; j < TN; ++j)
+                    acc[i][j] = fma(af[i], bf[j], acc[i][j]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint i = 0; i < TM; ++i) {
+        uint gr = bm0 + tRow * TM + i;
+        if (gr >= M) continue;
+        for (uint j = 0; j < TN; ++j) {
+            uint gc = bn0 + tCol * TN + j;
+            if (gc >= N) continue;
+            float v = acc[i][j];
+            if (p.use_bias != 0u) v += bias[gc];
+            out[gr * N + gc] = v;
+        }
+    }
+}
+
+// ── Tiled 2D convolution: one threadgroup per output channel, weights cached ──
+// in threadgroup memory and reused across all spatial positions. Used when the
+// per-channel weight row (in_ch*kh*kw) fits the tile; the dense blocks (256*3*3
+// = 2304) dominate RE-USE runtime, so this is the hot path.
+kernel void reuse_conv2d_tiled_kernel(device const float* input  [[buffer(0)]],
+                                      device const float* weight [[buffer(1)]],
+                                      device const float* bias   [[buffer(2)]],
+                                      device float*       output [[buffer(3)]],
+                                      constant ReuseConv2dParams& p [[buffer(4)]],
+                                      uint2 wid [[threadgroup_position_in_grid]],
+                                      uint2 lid [[thread_position_in_threadgroup]]) {
+    constexpr uint WG = 256;
+    threadgroup half wtile[4096];               // fp16 weights: 2× rate, half the LDS
+    uint oc = wid.y;
+    uint row_size = p.in_ch * p.kh * p.kw;
+    uint w_base = oc * row_size;
+    for (uint i = lid.x; i < row_size; i += WG) wtile[i] = half(weight[w_base + i]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint sp = wid.x * WG + lid.x;               // spatial output index
+    uint out_hw = p.out_h * p.out_w;
+    if (sp >= out_hw) return;
+    uint ow = sp % p.out_w;
+    uint oh = sp / p.out_w;
+
+    // fp16 multiply, fp32 accumulate. Convs are feed-forward, so fp16 rounding does
+    // not compound the way it would through the recurrent Mamba scan.
+    float sum = 0.0;
+    for (uint ic = 0; ic < p.in_ch; ++ic) {
+        uint in_ch_base = ic * p.H * p.W;
+        uint wc_base = ic * p.kh * p.kw;
+        for (uint r = 0; r < p.kh; ++r) {
+            int ih = int(oh * p.str_h) + int(r * p.dil_h) - int(p.pad_h);
+            if (ih < 0 || uint(ih) >= p.H) continue;
+            uint in_row = in_ch_base + uint(ih) * p.W;
+            uint w_row = wc_base + r * p.kw;
+            for (uint c = 0; c < p.kw; ++c) {
+                int iw = int(ow * p.str_w) + int(c * p.dil_w) - int(p.pad_w);
+                if (iw < 0 || uint(iw) >= p.W) continue;
+                sum += float(half(input[in_row + uint(iw)]) * wtile[w_row + c]);
+            }
+        }
+    }
+    if (p.use_bias != 0u) sum += bias[oc];
+    output[oc * out_hw + sp] = sum;
+}
+
 // ── InstanceNorm2d with affine (one threadgroup per channel) ─────────────────
 struct ReuseInstNorm2dParams { uint channels; uint length; float eps; };
 

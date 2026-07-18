@@ -45,6 +45,17 @@ final class ReuseEnhancer: @unchecked Sendable {
     private var enc: MTLComputeCommandEncoder?
     private var scratch: [MTLBuffer] = []
 
+    // Optional per-stage GPU timing (set by the self-test).
+    var profile = false
+    private var stageT0 = Date()
+    private func stage(_ name: String) {
+        guard profile else { return }
+        flushAndWait()
+        let dt = Date().timeIntervalSince(stageT0) * 1000
+        print(String(format: "[RE-USE stage] %@ %.0f ms", name, dt)); fflush(stdout)
+        stageT0 = Date()
+    }
+
     init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         self.device = device
         self.commandQueue = commandQueue
@@ -94,13 +105,14 @@ final class ReuseEnhancer: @unchecked Sendable {
 
     private func compilePipelines() {
         let names = [
-            "reuse_stft_kernel", "reuse_conv2d_kernel", "reuse_instance_norm2d_kernel",
+            "reuse_stft_kernel", "reuse_conv2d_kernel", "reuse_conv2d_tiled_kernel", "reuse_instance_norm2d_kernel",
             "reuse_prelu_kernel", "reuse_pad2d_kernel", "reuse_pixelshuffle_w_kernel",
             "reuse_transpose_hw_kernel", "reuse_flip_kernel", "reuse_mamba_conv_kernel",
             "reuse_selective_scan_kernel", "reuse_zero_frac_kernel", "reuse_spec_to_complex_kernel",
             "reuse_irfft_kernel", "reuse_ola_kernel", "reuse_permute3d_kernel",
             "reuse_slice_cols_kernel", "reuse_concat_cols_kernel", "reuse_crop2d_kernel",
             "reuse_atan2_kernel",
+            "reuse_matmul_kernel",
             // reused from the Kitten pipeline:
             "matmul_kernel", "layer_norm_kernel", "add_kernel", "concat_channels_kernel",
             "transpose_kernel",
@@ -144,6 +156,8 @@ final class ReuseEnhancer: @unchecked Sendable {
     /// command buffer on the same queue correctly reads results produced here. The
     /// scratch buffers are retained by a completion handler until the GPU is done,
     /// then released — the CPU never stalls waiting for the GPU mid-pass.
+    private var lastCommitted: MTLCommandBuffer?
+
     private func flush() {
         guard let e = enc, let cb = cmdBuf else { return }
         e.endEncoding()
@@ -151,11 +165,17 @@ final class ReuseEnhancer: @unchecked Sendable {
         scratch = []
         cb.addCompletedHandler { _ in _ = held }   // keep buffers alive until completion
         cb.commit()
+        lastCommitted = cb
         cmdBuf = nil; enc = nil
     }
 
     private func flushAndWait() {
-        if let e = enc { e.endEncoding(); cmdBuf?.commit(); cmdBuf?.waitUntilCompleted() }
+        if let e = enc, let cb = cmdBuf {
+            e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        } else {
+            lastCommitted?.waitUntilCompleted()   // drain async-committed work too
+        }
+        lastCommitted = nil
         cmdBuf = nil; enc = nil
     }
 
@@ -232,9 +252,10 @@ final class ReuseEnhancer: @unchecked Sendable {
     private func matmul(_ A: MTLBuffer, _ B: MTLBuffer, bias: MTLBuffer?, out: MTLBuffer,
                         M: Int, K: Int, N: Int) {
         let p = MatmulP(M: UInt32(M), K: UInt32(K), N: UInt32(N), use_bias: bias == nil ? 0 : 1)
-        runTG("matmul_kernel", [A, B, bias ?? dummyBias, out], params: p,
-              groups: MTLSize(width: (M + 15) / 16, height: (N + 15) / 16, depth: 1),
-              tpg: MTLSize(width: 16, height: 16, depth: 1))
+        // Register-blocked GEMM: 64×64 tile per threadgroup, 256 threads (4×4 each).
+        runTG("reuse_matmul_kernel", [A, B, bias ?? dummyBias, out], params: p,
+              groups: MTLSize(width: (N + 63) / 64, height: (M + 63) / 64, depth: 1),
+              tpg: MTLSize(width: 256, height: 1, depth: 1))
     }
 
     private func add(_ a: MTLBuffer, _ b: MTLBuffer, _ out: MTLBuffer, _ n: Int) {
@@ -253,7 +274,17 @@ final class ReuseEnhancer: @unchecked Sendable {
                         kh: UInt32(kh), kw: UInt32(kw), pad_h: UInt32(padH), pad_w: UInt32(padW),
                         str_h: UInt32(strH), str_w: UInt32(strW), dil_h: UInt32(dilH), dil_w: UInt32(dilW),
                         out_h: UInt32(outH), out_w: UInt32(outW), use_bias: bName != nil ? 1 : 0, _pad: 0)
-        run("reuse_conv2d_kernel", [input, try w(wName), bias, out], total: outCh * outH * outW, params: p)
+        let rowSize = inCh * kh * kw
+        let outHW = outH * outW
+        if rowSize <= 4096 {
+            // Tiled path: cache this channel's weights in threadgroup memory, reuse
+            // across all spatial positions (the dominant cost for the dense blocks).
+            runTG("reuse_conv2d_tiled_kernel", [input, try w(wName), bias, out], params: p,
+                  groups: MTLSize(width: (outHW + 255) / 256, height: outCh, depth: 1),
+                  tpg: MTLSize(width: 256, height: 1, depth: 1))
+        } else {
+            run("reuse_conv2d_kernel", [input, try w(wName), bias, out], total: outCh * outHW, params: p)
+        }
         return (out, outH, outW)
     }
 
@@ -481,13 +512,16 @@ final class ReuseEnhancer: @unchecked Sendable {
     /// Shared decoder trunk: dense block, up_conv1 (freq x2), up_conv2 (time x4).
     private func decoderTrunk(_ base: String, x: MTLBuffer, T2: Int, F2: Int) throws -> (MTLBuffer, Int, Int) {
         let db = try denseBlock("\(base).dense_block", input: x, H: T2, W: F2, label: "\(base)_db")
+        stage("  \(base).dense_block")
         // up_conv1: upsample freq (W) by 2
         let (u1, h1, w1) = try upConv("\(base).up_conv1", input: db, inCh: hidFeature, H: T2, W: F2,
                                       r: 2, label: "\(base)_up1")   // [64, T2, 2F2]
+        stage("  \(base).up_conv1")
         // up_conv2 operates on the transposed map to upsample time by 4
         let tp = transposeHW(u1, channels: hidFeature, H: h1, W: w1, label: "\(base)_up2tp")  // [64, 2F2, T2]
         let (u2, h2, w2) = try upConv("\(base).up_conv2", input: tp, inCh: hidFeature, H: w1, W: h1,
                                       r: 4, label: "\(base)_up2")   // [64, 2F2, 4T2]
+        stage("  \(base).up_conv2")
         let back = transposeHW(u2, channels: hidFeature, H: h2, W: w2, label: "\(base)_up2back") // [64, 4T2, 2F2]
         return (back, w2, h2)   // (buf, outH=4T2, outW=2F2)
     }
@@ -586,8 +620,10 @@ final class ReuseEnhancer: @unchecked Sendable {
         run("reuse_pad2d_kernel", [twoCh, encIn], total: 2 * Tp * Fp,
             params: Pad2dP(channels: 2, H: UInt32(T), W: UInt32(F), pt: 0, pb: 2, pl: 0, pr: 2))
 
+        stage("stft+prep")
         // 4. Dense encoder → [64, T2, F2]
         var (feat, T2, F2) = try denseEncoder(encIn, Tp: Tp, Fp: Fp)
+        stage("dense_encoder")
 
         // 5. 30 TFMamba blocks. Commit (without blocking) every few layers to bound
         //    the command-buffer size and let the GPU start early. `feat` stays alive
@@ -597,10 +633,12 @@ final class ReuseEnhancer: @unchecked Sendable {
             feat = try tfMambaBlock(layer, feat, T2: T2, F2: F2)
             if layer % 3 == 2 { flush() }
         }
+        stage("30x mamba")
 
         // 6. Decoders → denoised magnitude & phase [F, T]
         let ampFT = try magDecoder(feat, T2: T2, F2: F2, F: F, T: T)
         let phaFT = try phaseDecoder(feat, T2: T2, F2: F2, F: F, T: T)
+        stage("decoders")
 
         // 7. amp/phase → complex (with artifact-frame zeroing)
         let zeroFrac = empty(T, "zeroFrac")
@@ -636,12 +674,14 @@ final class ReuseEnhancer: @unchecked Sendable {
     /// Triggered by `REUSE_SELFTEST=1`. Exercises every kernel end-to-end.
     func selfTest() {
         let sr = 24000.0
-        let n = Int(0.30 * sr)                        // 0.3 s
+        let secs = Double(ProcessInfo.processInfo.environment["REUSE_SECS"] ?? "3.5") ?? 3.5
+        let n = Int(secs * sr)
         var x = [Float](repeating: 0, count: n)
         for i in 0..<n {
             let t = Double(i) / sr
             x[i] = Float(0.3 * sin(2 * .pi * 220 * t) + 0.15 * sin(2 * .pi * 660 * t))
         }
+        profile = true
         let t0 = Date()
         do {
             let y = try enhance(x, inputSR: sr, targetSR: 48000)

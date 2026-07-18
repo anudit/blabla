@@ -36,15 +36,15 @@ final class TtsController: ObservableObject {
         didSet { UserDefaults.standard.set(speed, forKey: "speed") }
     }
 
-    /// When on, generated audio is denoised + upsampled to 48 kHz through RE-USE.
+    /// When on, generated audio is enhanced + upsampled to 48 kHz through LavaSR v2.
     @Published var enhanceEnabled: Bool = (UserDefaults.standard.object(forKey: "enhance") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(enhanceEnabled, forKey: "enhance") }
     }
-    /// True once the RE-USE weights finished loading; gates the toggle's effect.
+    /// True once the LavaSR weights finished loading; gates the toggle's effect.
     @Published private(set) var enhancerReady: Bool = false
 
     private var engine: MetalTtsEngine?
-    private var enhancer: ReuseEnhancer?
+    private var enhancer: LavaEnhancer?
     private let audio = AudioPlayer.shared
     private var loaded = false
 
@@ -129,12 +129,12 @@ final class TtsController: ObservableObject {
         phase = .idle
         statusText = "Ready — select text, then press ⌥⌘R"
 
-        // Load the RE-USE enhancer in the background; enhancement stays off until ready.
+        // Load the LavaSR enhancer in the background; enhancement stays off until ready.
         statusText = "Loading enhancer…"
-        let reuse = ReuseEnhancer(device: device, commandQueue: queue)
+        let reuse = LavaEnhancer(device: device, commandQueue: queue)
         let ok = await Task.detached(priority: .utility) { () -> Bool in
             do { try reuse.load(); return true }
-            catch { print("[RE-USE] load failed: \(error)"); return false }
+            catch { print("[LavaSR] load failed: \(error)"); return false }
         }.value
         if ok {
             enhancer = reuse

@@ -24,7 +24,7 @@ xcuserdata/
 tts-metal/tts-metal/kitten_tts_mini_v0_8.onnx
 tts-metal/tts-metal/voices.npz
 .claude
-RE_USE/
+Lava_SR/
 
 # RE-USE enhancer weights (bundled at build time)
-tts-metal/tts-metal/model.safetensors
+tts-metal/tts-metal/lavasr_v2.safetensors

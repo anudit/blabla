@@ -107,7 +107,7 @@ struct ContentView: View {
             }
             Toggle(isOn: $controller.enhanceEnabled) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Enhance audio (RE-USE)")
+                    Text("Enhance audio (LavaSR v2)")
                     Text(controller.enhancerReady ? "Denoise + upsample to 48 kHz"
                                                    : "Loading model…")
                         .font(.caption2)

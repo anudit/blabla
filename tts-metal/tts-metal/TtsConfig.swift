@@ -8,7 +8,7 @@ import Foundation
 enum TtsConfig {
     static let sampleRate: Double = 24000
 
-    /// Output rate after the RE-USE cleanup/upsampling layer.
+    /// Output rate after the LavaSR v2 enhancement/upsampling layer.
     static let enhancedSampleRate: Double = 48000
 
     static let symbols: [String] = {

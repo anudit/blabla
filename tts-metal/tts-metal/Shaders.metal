@@ -1418,3 +1418,109 @@ kernel void reuse_atan2_kernel(device const float* y   [[buffer(0)]],
     if (gid >= p.size) return;
     out[gid] = atan2(y[gid], x[gid]);
 }
+// ═══════════════════════════════════════════════════════════════════════════
+//  LavaSR v2 (Vocos) bandwidth-extension kernels
+//  Mel → Conv1d embed → 8× ConvNeXt → LayerNorm → ISTFTHead.
+//  Sequence tensors are [dim, T] (channel-major) or [T, dim] (row-major);
+//  the reused matmul / irfft / ola / conv1d / transpose / layernorm / gelu
+//  kernels handle the heavy lifting; only the pieces below are LavaSR-specific.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Forward STFT → linear magnitude [F, T] (power=1, no compression) ─────────
+// `signal` is already reflect-padded, so window sample k of frame t is
+// signal[t*hop + k]. Uses a phasor recurrence instead of per-sample cos/sin.
+kernel void lava_stft_mag_kernel(device const float* signal [[buffer(0)]],
+                                 device const float* window [[buffer(1)]],
+                                 device float*       mag    [[buffer(2)]],
+                                 constant ReuseStftParams& p [[buffer(3)]],
+                                 uint gid [[thread_position_in_grid]]) {
+    uint total = p.num_freq * p.num_frames;
+    if (gid >= total) return;
+    uint f = gid / p.num_frames;
+    uint t = gid % p.num_frames;
+    float re = 0.0, im = 0.0;
+    float coef = -2.0 * M_PI_F * float(f) / float(p.n_fft);
+    float cs = cos(coef), sn = sin(coef);
+    float ck = 1.0, sk = 0.0;
+    uint base = t * p.hop;
+    for (uint k = 0; k < p.n_fft; ++k) {
+        float s = window[k] * signal[base + k];
+        re = fma(s, ck, re);
+        im = fma(s, sk, im);
+        float nck = ck * cs - sk * sn;
+        sk = ck * sn + sk * cs;
+        ck = nck;
+    }
+    mag[gid] = sqrt(re * re + im * im);
+}
+
+// ── safe_log: log(clip(x, min=1e-7)) — applied to the mel spectrogram ────────
+kernel void lava_safe_log_kernel(device const float* input  [[buffer(0)]],
+                                 device float*       output [[buffer(1)]],
+                                 constant SizeParams& p [[buffer(2)]],
+                                 uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.size) return;
+    output[gid] = log(max(input[gid], 1e-7));
+}
+
+// ── Depthwise Conv1d (per-channel, symmetric padding) ───────────────────────
+struct LavaDwParams { uint channels; uint length; uint ksize; uint pad; };
+
+kernel void lava_dwconv1d_kernel(device const float* input  [[buffer(0)]],  // [C, T]
+                                 device const float* weight [[buffer(1)]],  // [C, K]
+                                 device const float* bias   [[buffer(2)]],  // [C]
+                                 device float*       output [[buffer(3)]],  // [C, T]
+                                 constant LavaDwParams& p [[buffer(4)]],
+                                 uint gid [[thread_position_in_grid]]) {
+    uint total = p.channels * p.length;
+    if (gid >= total) return;
+    uint c = gid / p.length;
+    uint t = gid % p.length;
+    uint in_base = c * p.length;
+    uint w_base = c * p.ksize;
+    float sum = bias[c];
+    for (uint k = 0; k < p.ksize; ++k) {
+        int ip = int(t) + int(k) - int(p.pad);
+        if (ip >= 0 && uint(ip) < p.length) {
+            sum = fma(input[in_base + uint(ip)], weight[w_base + k], sum);
+        }
+    }
+    output[gid] = sum;
+}
+
+// ── ConvNeXt tail: out[d,t] = residual[d,t] + gamma[d] * h[t,d] ──────────────
+// h is [T, dim] (row-major), residual and output are [dim, T] (channel-major).
+struct LavaGammaParams { uint dim; uint length; };
+
+kernel void lava_gamma_residual_kernel(device const float* h        [[buffer(0)]],  // [T, dim]
+                                       device const float* residual [[buffer(1)]],  // [dim, T]
+                                       device const float* gamma    [[buffer(2)]],  // [dim]
+                                       device float*       output   [[buffer(3)]],  // [dim, T]
+                                       constant LavaGammaParams& p [[buffer(4)]],
+                                       uint gid [[thread_position_in_grid]]) {
+    uint total = p.dim * p.length;
+    if (gid >= total) return;
+    uint d = gid / p.length;
+    uint t = gid % p.length;
+    output[gid] = residual[gid] + gamma[d] * h[t * p.dim + d];
+}
+
+// ── ISTFTHead: split [T, 2F] into magnitude/phase, form complex spectrum ─────
+struct LavaHeadParams { uint num_freq; uint num_frames; };
+
+kernel void lava_head_to_complex_kernel(device const float* head [[buffer(0)]],  // [T, 2F]
+                                        device float* out_real   [[buffer(1)]],  // [F, T]
+                                        device float* out_imag   [[buffer(2)]],  // [F, T]
+                                        constant LavaHeadParams& p [[buffer(3)]],
+                                        uint gid [[thread_position_in_grid]]) {
+    uint total = p.num_freq * p.num_frames;
+    if (gid >= total) return;
+    uint f = gid / p.num_frames;
+    uint t = gid % p.num_frames;
+    uint stride = 2 * p.num_freq;
+    float magraw = head[t * stride + f];
+    float ph = head[t * stride + p.num_freq + f];
+    float m = min(exp(magraw), 1e2);   // exp then clamp, matching Vocos ISTFTHead
+    out_real[f * p.num_frames + t] = m * cos(ph);
+    out_imag[f * p.num_frames + t] = m * sin(ph);
+}

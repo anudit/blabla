@@ -116,7 +116,32 @@ struct ContentView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
-            .disabled(!controller.enhancerReady)
+            .disabled(!controller.enhancerReady || controller.useSupertonic)
+
+            Divider()
+
+            Toggle(isOn: $controller.useSupertonic) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Use Supertonic 3")
+                    Text(controller.supertonicReady ? "Flow-matching TTS · 44.1 kHz · multilingual"
+                                                     : "Loading models…")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(!controller.supertonicReady)
+
+            if controller.useSupertonic {
+                HStack {
+                    Text("Voice").frame(width: 48, alignment: .leading)
+                    Picker("", selection: $controller.supertonicVoice) {
+                        ForEach(["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"], id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                }
+            }
         }
     }
 

@@ -1524,3 +1524,219 @@ kernel void lava_head_to_complex_kernel(device const float* head [[buffer(0)]], 
     out_real[f * p.num_frames + t] = m * cos(ph);
     out_imag[f * p.num_frames + t] = m * sin(ph);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Supertonic 3 kernels
+//  Flow-matching latent TTS. Feature maps are channel-major [C, T] unless noted
+//  row-major [T, C]. ConvNeXt reuses lava_dwconv1d / lava_gamma_residual / matmul
+//  / layer_norm; the pieces below are Supertonic-specific.
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct StSizeParams { uint size; };
+
+// erf approximation (Abramowitz & Stegun 7.1.26), max abs error ~1.5e-7.
+static inline float st_erf(float x) {
+    float s = (x < 0.0f) ? -1.0f : 1.0f;
+    float ax = fabs(x);
+    float t = 1.0f / (1.0f + 0.3275911f * ax);
+    float y = 1.0f - (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t
+                       - 0.284496736f) * t + 0.254829592f) * t * exp(-ax * ax);
+    return s * y;
+}
+
+// ── Exact GELU (erf form, matches ONNX Gelu/Erf) ────────────────────────────
+kernel void st_gelu_erf_kernel(device const float* input  [[buffer(0)]],
+                               device float*       output [[buffer(1)]],
+                               constant StSizeParams& p [[buffer(2)]],
+                               uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.size) return;
+    float x = input[gid];
+    output[gid] = 0.5f * x * (1.0f + st_erf(x * 0.70710678118f));
+}
+
+// ── Softplus ────────────────────────────────────────────────────────────────
+kernel void st_softplus_kernel(device const float* input  [[buffer(0)]],
+                               device float*       output [[buffer(1)]],
+                               constant StSizeParams& p [[buffer(2)]],
+                               uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.size) return;
+    float x = input[gid];
+    output[gid] = (x > 20.0f) ? x : log(1.0f + exp(x));
+}
+
+// ── FiLM conditioning (channel-major): out[c,t] = x[c,t]*(1+scale[c]) + shift[c]
+// scale/shift are length-C vectors (a linear projection of time+style, broadcast
+// across T). Set add_one=0 to skip the (1+·) affine offset.
+struct StFilmParams { uint channels; uint length; uint add_one; };
+
+kernel void st_film_kernel(device const float* x      [[buffer(0)]],
+                           device const float* scale  [[buffer(1)]],  // [C]
+                           device const float* shift  [[buffer(2)]],  // [C]
+                           device float*       out    [[buffer(3)]],  // [C, T]
+                           constant StFilmParams& p [[buffer(4)]],
+                           uint gid [[thread_position_in_grid]]) {
+    uint total = p.channels * p.length;
+    if (gid >= total) return;
+    uint c = gid / p.length;
+    float s = scale[c] + (p.add_one != 0u ? 1.0f : 0.0f);
+    out[gid] = x[gid] * s + shift[c];
+}
+
+// ── Broadcast-add a length-C vector across T (channel-major) ─────────────────
+kernel void st_add_col_kernel(device const float* x   [[buffer(0)]],  // [C, T]
+                              device const float* vec [[buffer(1)]],  // [C]
+                              device float*       out [[buffer(2)]],  // [C, T]
+                              constant StFilmParams& p [[buffer(3)]],
+                              uint gid [[thread_position_in_grid]]) {
+    uint total = p.channels * p.length;
+    if (gid >= total) return;
+    out[gid] = x[gid] + vec[gid / p.length];
+}
+
+// ── Rotary position embedding, applied to a [L, H*D] row-major tensor ────────
+// Rotates each head's D dims in (i, i+D/2) pairs by angle pos*theta_i.
+// theta_i = base^(-2i/D). One thread per (l, head, i<D/2).
+struct StRopeParams { uint seq_len; uint num_heads; uint head_dim; float base; };
+
+kernel void st_rope_kernel(device const float* x   [[buffer(0)]],   // [L, H*D]
+                           device float*       out [[buffer(1)]],   // [L, H*D]
+                           constant StRopeParams& p [[buffer(2)]],
+                           uint gid [[thread_position_in_grid]]) {
+    uint hf = p.head_dim / 2u;
+    uint total = p.seq_len * p.num_heads * hf;
+    if (gid >= total) return;
+    uint i = gid % hf;
+    uint h = (gid / hf) % p.num_heads;
+    uint l = gid / (hf * p.num_heads);
+    float freq = pow(p.base, -2.0f * float(i) / float(p.head_dim));
+    float ang = float(l) * freq;
+    float c = cos(ang), s = sin(ang);
+    uint base = l * p.num_heads * p.head_dim + h * p.head_dim;
+    float x0 = x[base + i];
+    float x1 = x[base + i + hf];
+    out[base + i]      = x0 * c - x1 * s;
+    out[base + i + hf] = x0 * s + x1 * c;
+}
+
+// ── Masked multi-head attention (self or cross) ──────────────────────────────
+// Q:[Lq, H*D], K/V:[Lkv, H*D] row-major, interleaved heads. key_mask:[Lkv]
+// (1 = keep, 0 = masked). One thread per (q_pos, head, d). scale premultiplied.
+struct StAttnParams { uint lq; uint lkv; uint num_heads; uint head_dim; float scale; };
+
+kernel void st_mha_kernel(device const float* Q        [[buffer(0)]],
+                          device const float* K        [[buffer(1)]],
+                          device const float* V        [[buffer(2)]],
+                          device const float* key_mask [[buffer(3)]],  // [Lkv] or null
+                          device float*       out      [[buffer(4)]],
+                          constant StAttnParams& p [[buffer(5)]],
+                          uint gid [[thread_position_in_grid]]) {
+    uint d = gid % p.head_dim;
+    uint h = (gid / p.head_dim) % p.num_heads;
+    uint q = gid / (p.head_dim * p.num_heads);
+    if (q >= p.lq) return;
+    uint HD = p.num_heads * p.head_dim;
+    uint q_base = q * HD + h * p.head_dim;
+    float mx = -1e30f;
+    for (uint k = 0; k < p.lkv; ++k) {
+        if (key_mask && key_mask[k] == 0.0f) continue;
+        uint k_base = k * HD + h * p.head_dim;
+        float sc = 0.0f;
+        for (uint e = 0; e < p.head_dim; ++e) sc += Q[q_base + e] * K[k_base + e];
+        sc *= p.scale;
+        mx = max(mx, sc);
+    }
+    float denom = 0.0f, acc = 0.0f;
+    for (uint k = 0; k < p.lkv; ++k) {
+        if (key_mask && key_mask[k] == 0.0f) continue;
+        uint k_base = k * HD + h * p.head_dim;
+        float sc = 0.0f;
+        for (uint e = 0; e < p.head_dim; ++e) sc += Q[q_base + e] * K[k_base + e];
+        sc *= p.scale;
+        float w = exp(sc - mx);
+        denom += w;
+        acc += w * V[k_base + d];
+    }
+    out[q * HD + h * p.head_dim + d] = (denom > 0.0f) ? acc / denom : 0.0f;
+}
+
+// ── VITS relative-position attention (self-attn with windowed rel-pos keys) ──
+// Q/K/V:[L, H*D]. emb_rel_k/emb_rel_v: [H, 2*window+1, D] (per-head rel embeds).
+// Adds rel-position logits and rel-position value contributions. key_mask:[L].
+struct StRelAttnParams { uint seq_len; uint num_heads; uint head_dim; uint window; float scale; };
+
+kernel void st_rel_attn_kernel(device const float* Q        [[buffer(0)]],
+                               device const float* K        [[buffer(1)]],
+                               device const float* V        [[buffer(2)]],
+                               device const float* rel_k    [[buffer(3)]],  // [H,2w+1,D]
+                               device const float* rel_v    [[buffer(4)]],  // [H,2w+1,D]
+                               device const float* key_mask [[buffer(5)]],  // [L] or null
+                               device float*       out      [[buffer(6)]],
+                               constant StRelAttnParams& p [[buffer(7)]],
+                               uint gid [[thread_position_in_grid]]) {
+    uint d = gid % p.head_dim;
+    uint h = (gid / p.head_dim) % p.num_heads;
+    uint q = gid / (p.head_dim * p.num_heads);
+    if (q >= p.seq_len) return;
+    uint HD = p.num_heads * p.head_dim;
+    uint W = 2u * p.window + 1u;
+    uint q_base = q * HD + h * p.head_dim;
+    uint rel_base = h * W * p.head_dim;
+    float mx = -1e30f;
+    for (uint k = 0; k < p.seq_len; ++k) {
+        if (key_mask && key_mask[k] == 0.0f) continue;
+        uint k_base = k * HD + h * p.head_dim;
+        float sc = 0.0f;
+        for (uint e = 0; e < p.head_dim; ++e) sc += Q[q_base + e] * K[k_base + e];
+        // relative key term: clamp (k - q) to [-window, window]
+        int rel = int(k) - int(q);
+        rel = clamp(rel, -int(p.window), int(p.window));
+        uint ridx = uint(rel + int(p.window));
+        float rsc = 0.0f;
+        for (uint e = 0; e < p.head_dim; ++e)
+            rsc += Q[q_base + e] * rel_k[rel_base + ridx * p.head_dim + e];
+        sc = (sc + rsc) * p.scale;
+        mx = max(mx, sc);
+    }
+    float denom = 0.0f;
+    // first pass weights are recomputed; accumulate value + rel_value
+    float acc = 0.0f;
+    for (uint k = 0; k < p.seq_len; ++k) {
+        if (key_mask && key_mask[k] == 0.0f) continue;
+        uint k_base = k * HD + h * p.head_dim;
+        float sc = 0.0f;
+        for (uint e = 0; e < p.head_dim; ++e) sc += Q[q_base + e] * K[k_base + e];
+        int rel = int(k) - int(q);
+        rel = clamp(rel, -int(p.window), int(p.window));
+        uint ridx = uint(rel + int(p.window));
+        float rsc = 0.0f;
+        for (uint e = 0; e < p.head_dim; ++e)
+            rsc += Q[q_base + e] * rel_k[rel_base + ridx * p.head_dim + e];
+        float w = exp((sc + rsc) * p.scale - mx);
+        denom += w;
+        acc += w * (V[k_base + d] + rel_v[rel_base + ridx * p.head_dim + d]);
+    }
+    out[q * HD + h * p.head_dim + d] = (denom > 0.0f) ? acc / denom : 0.0f;
+}
+
+// ── Sinusoidal timestep embedding: emb[t, 2i]=sin(t*f_i), [t,2i+1]=cos ───────
+// One thread per (row, i<dim/2). freqs f_i = exp(-i/(half-1) * log(max_period)).
+struct StSinusoidParams { uint rows; uint dim; float max_period; };
+
+kernel void st_sinusoid_kernel(device const float* t    [[buffer(0)]],  // [rows]
+                               device float*       out  [[buffer(1)]],  // [rows, dim]
+                               constant StSinusoidParams& p [[buffer(2)]],
+                               uint gid [[thread_position_in_grid]]) {
+    uint hf = p.dim / 2u;
+    uint total = p.rows * hf;
+    if (gid >= total) return;
+    uint i = gid % hf;
+    uint r = gid / hf;
+    float denom = (hf > 1u) ? float(hf) : 1.0f;
+    float freq = exp(-log(p.max_period) * float(i) / denom);
+    float ang = t[r] * freq;
+    out[r * p.dim + i]      = cos(ang);
+    out[r * p.dim + hf + i] = sin(ang);
+}
+
+// ── PReLU/tanh helpers already exist (reuse_prelu_kernel, tanh_kernel) ───────
+

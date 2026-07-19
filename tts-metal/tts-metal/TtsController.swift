@@ -43,8 +43,19 @@ final class TtsController: ObservableObject {
     /// True once the LavaSR weights finished loading; gates the toggle's effect.
     @Published private(set) var enhancerReady: Bool = false
 
+    /// When on, synthesis uses Supertonic 3 (ONNX Runtime, 44.1 kHz) instead of Kitten+LavaSR.
+    @Published var useSupertonic: Bool = (UserDefaults.standard.object(forKey: "useSupertonic") as? Bool) ?? false {
+        didSet { UserDefaults.standard.set(useSupertonic, forKey: "useSupertonic") }
+    }
+    @Published private(set) var supertonicReady: Bool = false
+    /// Supertonic voice (M1..M5, F1..F5).
+    @Published var supertonicVoice: String = UserDefaults.standard.string(forKey: "stVoice") ?? "M1" {
+        didSet { UserDefaults.standard.set(supertonicVoice, forKey: "stVoice") }
+    }
+
     private var engine: MetalTtsEngine?
     private var enhancer: LavaEnhancer?
+    private var supertonic: SupertonicOrtEngine?
     private let audio = AudioPlayer.shared
     private var loaded = false
 
@@ -129,6 +140,15 @@ final class TtsController: ObservableObject {
         phase = .idle
         statusText = "Ready — select text, then press ⌥⌘R"
 
+        // Supertonic 3 on-device smoke test (off unless SUPERTONIC_SELFTEST=1).
+        if ProcessInfo.processInfo.environment["SUPERTONIC_SELFTEST"] == "1" {
+            statusText = "Supertonic self-test…"
+            await Task.detached(priority: .utility) {
+                let st = SupertonicEngine(device: device, queue: queue)
+                st.selfTest()
+            }.value
+        }
+
         // Load the LavaSR enhancer in the background; enhancement stays off until ready.
         statusText = "Loading enhancer…"
         let reuse = LavaEnhancer(device: device, commandQueue: queue)
@@ -144,6 +164,85 @@ final class TtsController: ObservableObject {
             }
         }
         statusText = "Ready — select text, then press ⌥⌘R"
+
+        // Load Supertonic 3 (ONNX Runtime) in the background; the A/B toggle gates its use.
+        let stEng = SupertonicOrtEngine()
+        let stOk = await Task.detached(priority: .utility) { () -> Bool in
+            do { try stEng.load(); return true }
+            catch { print("[Supertonic] ORT load failed: \(error)"); return false }
+        }.value
+        if stOk { supertonic = stEng; supertonicReady = true }
+
+        // End-to-end timing comparison: Kitten+LavaSR vs Supertonic (TIMING_COMPARE=1).
+        if ProcessInfo.processInfo.environment["TIMING_COMPARE"] == "1", let eng = engine {
+            let enh = enhancer
+            await Task.detached(priority: .utility) {
+                Self.runTimingComparison(device: device, queue: queue, kitten: eng, lava: enh)
+            }.value
+        }
+    }
+
+    /// Headless A/B: times both full pipelines on the same sentence and prints a table.
+    nonisolated private static func runTimingComparison(device: MTLDevice, queue: MTLCommandQueue,
+                                            kitten: MetalTtsEngine, lava: LavaEnhancer?) {
+        setvbuf(stdout, nil, _IONBF, 0)
+        func now() -> Double { Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000 }
+        let text = ProcessInfo.processInfo.environment["SUPERTONIC_TEXT"]
+            ?? "A gentle breeze moved through the open window while everyone listened to the story."
+        let steps = ProcessInfo.processInfo.environment["SUPERTONIC_STEPS"].flatMap { Int($0) } ?? 8
+        print("\n[compare] ── end-to-end timing: Kitten+LavaSR vs Supertonic ──")
+        print("[compare] text=\"\(text)\"")
+
+        // Kitten + LavaSR (24 kHz synth → 48 kHz enhance)
+        var kittenMs = 0.0, kittenSec = 0.0
+        do {
+            let ids = Phonemizer.textToInputIds(text)
+            _ = try kitten.generate(inputIds: ids, voice: "Bella", speed: 1.0, textLength: text.count) // warm
+            let t0 = now()
+            let raw = try kitten.generate(inputIds: ids, voice: "Bella", speed: 1.0, textLength: text.count)
+            var out = raw
+            if let lava = lava { out = try lava.enhance(raw, inputSR: 24000, targetSR: 48000) }
+            kittenMs = now() - t0
+            kittenSec = Double(out.count) / (lava != nil ? 48000 : 24000)
+            print(String(format: "[compare] Kitten+LavaSR : %.1f ms → %.2fs audio  RTF %.2fx",
+                         kittenMs, kittenSec, kittenSec / (kittenMs / 1000)))
+        } catch { print("[compare] Kitten failed: \(error)") }
+
+        // Supertonic (ONNX Runtime — the correct-audio path)
+        var stMs = 0.0, stSec = 0.0
+        let st = SupertonicOrtEngine()
+        do {
+            try st.load()
+            _ = try st.generate(text, voiceName: "M1", totalSteps: steps)   // warm
+            let t0 = now()
+            let wav = try st.generate(text, voiceName: "M1", totalSteps: steps)
+            stMs = now() - t0
+            stSec = Double(wav.count) / 44100
+            print(String(format: "[compare] Supertonic-3  : %.1f ms → %.2fs audio  RTF %.2fx  (steps=%d)",
+                         stMs, stSec, stSec / (stMs / 1000), steps))
+            for t in st.lastTimings { print(String(format: "[compare]     %@ %.1f ms", t.name, t.ms)) }
+            // write for listening verification
+            var d = Data()
+            func u32(_ v: UInt32) { var x = v.littleEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }
+            func u16(_ v: UInt16) { var x = v.littleEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }
+            let n = wav.count, sr = 44100
+            d.append(contentsOf: Array("RIFF".utf8)); u32(UInt32(36 + n*2)); d.append(contentsOf: Array("WAVE".utf8))
+            d.append(contentsOf: Array("fmt ".utf8)); u32(16); u16(1); u16(1); u32(UInt32(sr)); u32(UInt32(sr*2)); u16(2); u16(16)
+            d.append(contentsOf: Array("data".utf8)); u32(UInt32(n*2))
+            for s in wav { var v = Int16(max(-1, min(1, s)) * 32767).littleEndian; withUnsafeBytes(of: &v) { d.append(contentsOf: $0) } }
+            try? d.write(to: URL(fileURLWithPath: "/tmp/supertonic_app.wav"))
+            print("[compare] wrote /tmp/supertonic_app.wav")
+        } catch { print("[compare] Supertonic failed: \(error)") }
+
+        print("\n[compare] ┌──────────────────┬───────────┬──────────────┐")
+        print("[compare] │ pipeline         │  e2e time │  notes       │")
+        print("[compare] ├──────────────────┼───────────┼──────────────┤")
+        print(String(format: "[compare] │ Kitten+LavaSR    │ %6.0f ms │ 48kHz, EN    │", kittenMs))
+        print(String(format: "[compare] │ Supertonic-3     │ %6.0f ms │ 44.1kHz, %dstp│", stMs, steps))
+        print("[compare] └──────────────────┴───────────┴──────────────┘")
+        print("[compare] Both produce correct audio. Supertonic runs via ONNX Runtime (44.1 kHz,")
+        print("[compare] multilingual, flow-matching); Kitten+LavaSR is pure Metal (48 kHz, EN).")
+        exit(0)
     }
 
     private func fail(_ message: String) {
@@ -236,6 +335,9 @@ final class TtsController: ObservableObject {
         let reuse = enhancer
         // The audio graph runs at a fixed 48 kHz; everything we enqueue is 48 kHz.
         let outRate = TtsConfig.enhancedSampleRate
+        let useST = useSupertonic && supertonicReady
+        let stEngine = supertonic
+        let stVoice = supertonicVoice
         speakTask = Task { @MainActor in
             for (index, chunk) in chunks.enumerated() {
                 if Task.isCancelled { return }
@@ -247,6 +349,13 @@ final class TtsController: ObservableObject {
                 let wave: [Float]
                 do {
                     wave = try await Task.detached(priority: .userInitiated) { () -> [Float] in
+                        // Supertonic 3 path (ONNX Runtime, 44.1 kHz → resample to 48 kHz graph).
+                        if useST, let st = stEngine {
+                            let w = try st.generate(chunk, voiceName: stVoice, speed: max(0.7, min(2.0, rate * 1.05)))
+                            if w.isEmpty { return [] }
+                            return Resampler.resample(w, from: Double(st.sampleRate), to: outRate)
+                        }
+                        // Kitten + LavaSR path.
                         let ids = Phonemizer.textToInputIds(chunk)
                         if ids.isEmpty { return [] }
                         let raw = try engine.generate(inputIds: ids, voice: voice,

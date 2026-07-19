@@ -142,6 +142,39 @@ kernel void matmul_gelu_kernel(device const float* A    [[buffer(0)]],
     }
 }
 
+kernel void matmul_relu_kernel(device const float* A    [[buffer(0)]],
+                               device const float* B    [[buffer(1)]],
+                               device const float* bias [[buffer(2)]],
+                               device float*       out  [[buffer(3)]],
+                               constant MatmulParams& params [[buffer(4)]],
+                               uint2 gid [[thread_position_in_grid]],
+                               uint2 lid [[thread_position_in_threadgroup]]) {
+    constexpr uint TILE = 16;
+    threadgroup float tileA[256];
+    threadgroup float tileB[256];
+    uint row = gid.x;
+    uint col = gid.y;
+    uint lr = lid.x;
+    uint lc = lid.y;
+    float sum = 0.0;
+    uint numTiles = (params.K + TILE - 1) / TILE;
+    for (uint t = 0; t < numTiles; ++t) {
+        uint aCol = t * TILE + lc;
+        tileA[lr * TILE + lc] = (row < params.M && aCol < params.K) ? A[row * params.K + aCol] : 0.0;
+        uint bRow = t * TILE + lr;
+        tileB[lr * TILE + lc] = (bRow < params.K && col < params.N) ? B[bRow * params.N + col] : 0.0;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint k = 0; k < TILE; ++k) {
+            sum += tileA[lr * TILE + k] * tileB[k * TILE + lc];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (row < params.M && col < params.N) {
+        if (params.use_bias != 0u) sum += bias[col];
+        out[row * params.N + col] = max(sum, 0.0f);
+    }
+}
+
 // ── Conv1d ──────────────────────────────────────────────────────────────────
 
 struct Conv1dParams {
@@ -1069,7 +1102,7 @@ kernel void reuse_instance_norm2d_kernel(device const float* input  [[buffer(0)]
 }
 
 // ── PReLU (per-channel slope) ───────────────────────────────────────────────
-struct ReuseChanLenParams { uint channels; uint length; };
+struct ReuseChanLenParams { uint channels; uint length; uint slope_shared; };
 
 kernel void reuse_prelu_kernel(device const float* input  [[buffer(0)]],
                                device const float* slope  [[buffer(1)]],
@@ -1078,7 +1111,7 @@ kernel void reuse_prelu_kernel(device const float* input  [[buffer(0)]],
                                uint gid [[thread_position_in_grid]]) {
     uint total = p.channels * p.length;
     if (gid >= total) return;
-    uint ch = gid / p.length;
+    uint ch = p.slope_shared ? 0 : (gid / p.length);
     float x = input[gid];
     output[gid] = (x >= 0.0) ? x : slope[ch] * x;
 }
@@ -1660,15 +1693,17 @@ kernel void st_mha_kernel(device const float* Q        [[buffer(0)]],
 }
 
 // ── VITS relative-position attention (self-attn with windowed rel-pos keys) ──
-// Q/K/V:[L, H*D]. emb_rel_k/emb_rel_v: [H, 2*window+1, D] (per-head rel embeds).
-// Adds rel-position logits and rel-position value contributions. key_mask:[L].
+// Q/K/V:[L, H*D]. emb_rel_k/emb_rel_v: [1, 2*window+1, D] — SHARED across heads.
+// Following VITS: relative positions with |k-q| > window contribute ZERO (the
+// reference zero-pads the (2w+1) embeddings out to 2L-1). scale = 1/sqrt(D) is
+// applied to both content and relative logits (q is pre-scaled in the reference).
 struct StRelAttnParams { uint seq_len; uint num_heads; uint head_dim; uint window; float scale; };
 
 kernel void st_rel_attn_kernel(device const float* Q        [[buffer(0)]],
                                device const float* K        [[buffer(1)]],
                                device const float* V        [[buffer(2)]],
-                               device const float* rel_k    [[buffer(3)]],  // [H,2w+1,D]
-                               device const float* rel_v    [[buffer(4)]],  // [H,2w+1,D]
+                               device const float* rel_k    [[buffer(3)]],  // [1,2w+1,D] shared
+                               device const float* rel_v    [[buffer(4)]],  // [1,2w+1,D] shared
                                device const float* key_mask [[buffer(5)]],  // [L] or null
                                device float*       out      [[buffer(6)]],
                                constant StRelAttnParams& p [[buffer(7)]],
@@ -1678,44 +1713,97 @@ kernel void st_rel_attn_kernel(device const float* Q        [[buffer(0)]],
     uint q = gid / (p.head_dim * p.num_heads);
     if (q >= p.seq_len) return;
     uint HD = p.num_heads * p.head_dim;
-    uint W = 2u * p.window + 1u;
     uint q_base = q * HD + h * p.head_dim;
-    uint rel_base = h * W * p.head_dim;
+    int win = int(p.window);
     float mx = -1e30f;
     for (uint k = 0; k < p.seq_len; ++k) {
         if (key_mask && key_mask[k] == 0.0f) continue;
         uint k_base = k * HD + h * p.head_dim;
         float sc = 0.0f;
         for (uint e = 0; e < p.head_dim; ++e) sc += Q[q_base + e] * K[k_base + e];
-        // relative key term: clamp (k - q) to [-window, window]
         int rel = int(k) - int(q);
-        rel = clamp(rel, -int(p.window), int(p.window));
-        uint ridx = uint(rel + int(p.window));
-        float rsc = 0.0f;
-        for (uint e = 0; e < p.head_dim; ++e)
-            rsc += Q[q_base + e] * rel_k[rel_base + ridx * p.head_dim + e];
-        sc = (sc + rsc) * p.scale;
+        if (rel >= -win && rel <= win) {          // in-window: add relative-key logit
+            uint ridx = uint(rel + win);
+            float rsc = 0.0f;
+            for (uint e = 0; e < p.head_dim; ++e)
+                rsc += Q[q_base + e] * rel_k[ridx * p.head_dim + e];
+            sc += rsc;
+        }
+        sc *= p.scale;
         mx = max(mx, sc);
     }
-    float denom = 0.0f;
-    // first pass weights are recomputed; accumulate value + rel_value
-    float acc = 0.0f;
+    float denom = 0.0f, acc = 0.0f;
     for (uint k = 0; k < p.seq_len; ++k) {
         if (key_mask && key_mask[k] == 0.0f) continue;
         uint k_base = k * HD + h * p.head_dim;
         float sc = 0.0f;
         for (uint e = 0; e < p.head_dim; ++e) sc += Q[q_base + e] * K[k_base + e];
         int rel = int(k) - int(q);
-        rel = clamp(rel, -int(p.window), int(p.window));
-        uint ridx = uint(rel + int(p.window));
-        float rsc = 0.0f;
-        for (uint e = 0; e < p.head_dim; ++e)
-            rsc += Q[q_base + e] * rel_k[rel_base + ridx * p.head_dim + e];
-        float w = exp((sc + rsc) * p.scale - mx);
+        float relV = 0.0f;
+        if (rel >= -win && rel <= win) {
+            uint ridx = uint(rel + win);
+            float rsc = 0.0f;
+            for (uint e = 0; e < p.head_dim; ++e)
+                rsc += Q[q_base + e] * rel_k[ridx * p.head_dim + e];
+            sc += rsc;
+            relV = rel_v[ridx * p.head_dim + d];
+        }
+        float w = exp(sc * p.scale - mx);
         denom += w;
-        acc += w * (V[k_base + d] + rel_v[rel_base + ridx * p.head_dim + d]);
+        acc += w * (V[k_base + d] + relV);
     }
     out[q * HD + h * p.head_dim + d] = (denom > 0.0f) ? acc / denom : 0.0f;
+}
+
+// ── Causal, edge-padded 1D conv (full) — AE decoder convs use pad_left=dil*(k-1),
+// pad_right=0, mode='edge'. Out-of-range left indices clamp to sample 0. ────────
+struct StCausalConvParams { uint in_ch; uint out_ch; uint ksz; uint length; uint dilation; uint use_bias; };
+
+kernel void st_causal_conv1d_kernel(device const float* input  [[buffer(0)]],  // [in_ch, L]
+                                    device const float* weight [[buffer(1)]],  // [out_ch, in_ch, k]
+                                    device const float* bias   [[buffer(2)]],  // [out_ch]
+                                    device float*       out    [[buffer(3)]],  // [out_ch, L]
+                                    constant StCausalConvParams& p [[buffer(4)]],
+                                    uint gid [[thread_position_in_grid]]) {
+    uint total = p.out_ch * p.length;
+    if (gid >= total) return;
+    uint oc = gid / p.length;
+    uint t  = gid % p.length;
+    uint padL = p.dilation * (p.ksz - 1u);
+    float sum = (p.use_bias != 0u) ? bias[oc] : 0.0f;
+    for (uint ic = 0; ic < p.in_ch; ++ic) {
+        uint in_base = ic * p.length;
+        uint w_base = (oc * p.in_ch + ic) * p.ksz;
+        for (uint k = 0; k < p.ksz; ++k) {
+            int ip = int(t) + int(k * p.dilation) - int(padL);
+            uint idx = ip < 0 ? 0u : uint(ip);        // edge (replicate) padding on the left
+            sum += input[in_base + idx] * weight[w_base + k];
+        }
+    }
+    out[gid] = sum;
+}
+
+// ── Causal, edge-padded depthwise 1D conv (AE decoder ConvNeXt dwconv) ────────
+kernel void st_causal_dwconv1d_kernel(device const float* input  [[buffer(0)]],  // [C, L]
+                                      device const float* weight [[buffer(1)]],  // [C, 1, k]
+                                      device const float* bias   [[buffer(2)]],  // [C]
+                                      device float*       out    [[buffer(3)]],  // [C, L]
+                                      constant StCausalConvParams& p [[buffer(4)]],
+                                      uint gid [[thread_position_in_grid]]) {
+    uint total = p.out_ch * p.length;   // out_ch == channels for depthwise
+    if (gid >= total) return;
+    uint c = gid / p.length;
+    uint t = gid % p.length;
+    uint padL = p.dilation * (p.ksz - 1u);
+    uint in_base = c * p.length;
+    uint w_base = c * p.ksz;
+    float sum = (p.use_bias != 0u) ? bias[c] : 0.0f;
+    for (uint k = 0; k < p.ksz; ++k) {
+        int ip = int(t) + int(k * p.dilation) - int(padL);
+        uint idx = ip < 0 ? 0u : uint(ip);
+        sum += input[in_base + idx] * weight[w_base + k];
+    }
+    out[gid] = sum;
 }
 
 // ── Sinusoidal timestep embedding: emb[t, 2i]=sin(t*f_i), [t,2i+1]=cos ───────
@@ -1731,12 +1819,61 @@ kernel void st_sinusoid_kernel(device const float* t    [[buffer(0)]],  // [rows
     if (gid >= total) return;
     uint i = gid % hf;
     uint r = gid / hf;
-    float denom = (hf > 1u) ? float(hf) : 1.0f;
+    float denom = (hf > 1u) ? float(hf - 1u) : 1.0f;
     float freq = exp(-log(p.max_period) * float(i) / denom);
     float ang = t[r] * freq;
-    out[r * p.dim + i]      = cos(ang);
-    out[r * p.dim + hf + i] = sin(ang);
+    out[r * p.dim + i]      = sin(ang);
+    out[r * p.dim + hf + i] = cos(ang);
 }
 
 // ── PReLU/tanh helpers already exist (reuse_prelu_kernel, tanh_kernel) ───────
 
+// ── Dilated Depthwise Conv1d for Supertonic ──────────────────────────────
+struct StDwParams { uint channels; uint length; uint ksize; uint pad; uint dilation; };
+
+kernel void st_dwconv1d_kernel(device const float* input  [[buffer(0)]],  // [C, T]
+                               device const float* weight [[buffer(1)]],  // [C, K]
+                               device const float* bias   [[buffer(2)]],  // [C]
+                               device float*       output [[buffer(3)]],  // [C, T]
+                               constant StDwParams& p [[buffer(4)]],
+                               uint gid [[thread_position_in_grid]]) {
+    uint total = p.channels * p.length;
+    if (gid >= total) return;
+    uint c = gid / p.length;
+    uint t = gid % p.length;
+    uint in_base = c * p.length;
+    uint w_base = c * p.ksize;
+    float sum = bias[c];
+    for (uint k = 0; k < p.ksize; ++k) {
+        int ip = int(t) + int(k) * int(p.dilation) - int(p.pad);
+        if (ip >= 0 && uint(ip) < p.length) {
+            sum = fma(input[in_base + uint(ip)], weight[w_base + k], sum);
+        }
+    }
+    output[gid] = sum;
+}
+
+// ── Symmetric edge(replicate)-padded depthwise conv (vector_field convnext) ───
+// Same as st_dwconv1d but out-of-range indices clamp to the boundary sample
+// (ONNX Pad mode='edge', pads=[dil*(k-1)/2 each side]).
+kernel void st_dwconv1d_edge_kernel(device const float* input  [[buffer(0)]],  // [C, T]
+                                    device const float* weight [[buffer(1)]],  // [C, K]
+                                    device const float* bias   [[buffer(2)]],  // [C]
+                                    device float*       output [[buffer(3)]],  // [C, T]
+                                    constant StDwParams& p [[buffer(4)]],
+                                    uint gid [[thread_position_in_grid]]) {
+    uint total = p.channels * p.length;
+    if (gid >= total) return;
+    uint c = gid / p.length;
+    uint t = gid % p.length;
+    uint in_base = c * p.length;
+    uint w_base = c * p.ksize;
+    float sum = bias[c];
+    for (uint k = 0; k < p.ksize; ++k) {
+        int ip = int(t) + int(k) * int(p.dilation) - int(p.pad);
+        if (ip < 0) ip = 0;
+        if (ip >= int(p.length)) ip = int(p.length) - 1;
+        sum = fma(input[in_base + uint(ip)], weight[w_base + k], sum);
+    }
+    output[gid] = sum;
+}

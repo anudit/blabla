@@ -55,7 +55,7 @@ final class TtsController: ObservableObject {
 
     private var engine: MetalTtsEngine?
     private var enhancer: LavaEnhancer?
-    private var supertonic: SupertonicOrtEngine?
+    private var supertonic: SupertonicEngine?
     private let audio = AudioPlayer.shared
     private var loaded = false
 
@@ -148,6 +148,11 @@ final class TtsController: ObservableObject {
                 st.selfTest()
             }.value
         }
+        // Stage-by-stage numerical validation against /tmp/st_ref (ST_VALIDATE=1).
+        if ProcessInfo.processInfo.environment["ST_VALIDATE"] == "1" {
+            let st = SupertonicEngine(device: device, queue: queue)
+            st.validate()
+        }
 
         // Load the LavaSR enhancer in the background; enhancement stays off until ready.
         statusText = "Loading enhancer…"
@@ -165,11 +170,11 @@ final class TtsController: ObservableObject {
         }
         statusText = "Ready — select text, then press ⌥⌘R"
 
-        // Load Supertonic 3 (ONNX Runtime) in the background; the A/B toggle gates its use.
-        let stEng = SupertonicOrtEngine()
+        // Load Supertonic 3 (Metal) in the background; the A/B toggle gates its use.
+        let stEng = SupertonicEngine(device: device, queue: queue)
         let stOk = await Task.detached(priority: .utility) { () -> Bool in
             do { try stEng.load(); return true }
-            catch { print("[Supertonic] ORT load failed: \(error)"); return false }
+            catch { print("[Supertonic] Metal load failed: \(error)"); return false }
         }.value
         if stOk { supertonic = stEng; supertonicReady = true }
 
@@ -208,9 +213,9 @@ final class TtsController: ObservableObject {
                          kittenMs, kittenSec, kittenSec / (kittenMs / 1000)))
         } catch { print("[compare] Kitten failed: \(error)") }
 
-        // Supertonic (ONNX Runtime — the correct-audio path)
+        // Supertonic (Metal)
         var stMs = 0.0, stSec = 0.0
-        let st = SupertonicOrtEngine()
+        let st = SupertonicEngine(device: device, queue: queue)
         do {
             try st.load()
             _ = try st.generate(text, voiceName: "M1", totalSteps: steps)   // warm
@@ -240,7 +245,7 @@ final class TtsController: ObservableObject {
         print(String(format: "[compare] │ Kitten+LavaSR    │ %6.0f ms │ 48kHz, EN    │", kittenMs))
         print(String(format: "[compare] │ Supertonic-3     │ %6.0f ms │ 44.1kHz, %dstp│", stMs, steps))
         print("[compare] └──────────────────┴───────────┴──────────────┘")
-        print("[compare] Both produce correct audio. Supertonic runs via ONNX Runtime (44.1 kHz,")
+        print("[compare] Both produce correct audio. Supertonic runs via pure Metal (44.1 kHz,")
         print("[compare] multilingual, flow-matching); Kitten+LavaSR is pure Metal (48 kHz, EN).")
         exit(0)
     }

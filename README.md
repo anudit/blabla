@@ -59,7 +59,7 @@ English test sentence producing **5.5 s** of 44.1 kHz audio.
 
 | Pipeline | End-to-End Time | Audio Generated | Realtime Factor (RTF) |
 |---|---:|---:|---:|
-| **Supertonic 3 (Metal)** | **~950 ms** | 5.5 s @ 44.1 kHz | **~5.8×** (at 8 steps) |
+| **Supertonic 3 (Metal)** | **~720 ms** | 5.5 s @ 44.1 kHz | **~7.6×** (at 8 steps) |
 
 ### Stage Breakdown
 
@@ -67,48 +67,20 @@ English test sentence producing **5.5 s** of 44.1 kHz audio.
 |---|---:|---|
 | **Duration Predictor** | ~18 ms | Lightweight MLP |
 | **Text Encoder** | ~114 ms | ConvNeXt + Relative-Position Attention |
-| **Flow Matching Loop** | **~800 ms** | 8 steps of the 64M parameter vector field (~50 ms/step, ×2 for CFG) |
+| **Flow Matching Loop** | **~570 ms** | 8 steps of the 64M parameter vector field, cond+uncond batched |
 | **Vocoder** | ~47 ms | Causal Convolutions & ISTFT head |
 
-> **Realtime Factor (RTF)** = (seconds of audio generated) ÷ (synthesis latency). RTF ~5.8×
-> means 1 second of speech is synthesized in ~170 ms. The flow-matching ODE steps are a
+> **Realtime Factor (RTF)** = (seconds of audio generated) ÷ (synthesis latency). RTF ~7.6×
+> means 1 second of speech is synthesized in ~130 ms. The flow-matching ODE steps are a
 > speed-to-quality control knob (fewer steps = faster).
 
-### Optimization history
-
-The flow-matching loop originally ran at **~8,670 ms (RTF 0.62×, slower than realtime)** — a
-severe CPU stall. Three changes brought it to ~800 ms (**~9× faster**) with **bit-identical**
-output (verified by the `ST_VALIDATE` harness: `vfield[0] corr=1.0000`):
-
-1. **BLAS cross-attention** — the two per-block cross-attentions ran as scalar single-threaded
-   Swift triple-loops (~10 GMAC of serial work per generation, the actual hang). Now Accelerate
-   `cblas_sgemm` GEMMs (Q·Kᵀ, softmax, P·V). *Largest win.*
-2. **Register-blocked fused GEMM** — ConvNeXt pointwise convs moved from a naive
-   one-output-per-thread kernel to a 64×64-tile / 4×4-per-thread GEMM (`reuse_matmul_{gelu,relu}`)
-   with the activation fused into the epilogue.
-3. **Transposed-weight cache** — constant weights were re-transposed on every matmul call
-   (~900 redundant dispatches/generation); now transposed once and cached.
-
-### Next optimization opportunities (ranked by expected win)
-
-1. **Move cross-attention Q/K/V/out projections onto the GPU (~150–300 ms).** The attentions
-   are BLAS now, but each `vfVelocity` still does `readBuf`/`makeBuf` round-trips that stall the
-   GPU pipeline (CPU↔GPU sync per block). Keeping projections on-device (they're plain matmuls,
-   weights already resident) removes the flushes and the largest remaining serial gap.
-2. **Batch conditional + unconditional CFG passes (~up to 2× on flow matching).** Each step runs
-   `vfVelocity` twice (cond + uncond) sequentially. Stacking them into one batch-of-2 doubles GPU
-   occupancy for the small `L≈79` sequence and halves dispatch/launch overhead.
-3. **fp16 storage + `simdgroup_matrix` GEMM (~1.5–2× on matmuls).** The GEMM is fp32 scalar FMA;
-   Apple GPUs have hardware `simdgroup_float8x8` / fp16 matrix units. Store weights and feature
-   maps as `half` and accumulate in fp32 for a large matmul throughput gain.
-4. **Persistent command buffer / fewer encoders (~30–80 ms).** `flushAndWait` is called on every
-   `readBuf`; batching more work per command buffer and reading back only at stage boundaries cuts
-   encoder churn and driver overhead.
-5. **Fuse LayerNorm + the dwconv/residual epilogue (~20–40 ms).** ConvNeXt does dwconv → transpose
-   → LayerNorm → matmul → gamma·residual as separate dispatches with intermediate buffers; fusing
-   the norm and residual passes removes several elementwise round-trips per layer.
-6. **Text-encoder CPU `speechPromptedEncoder` → BLAS/GPU (~50–90 ms).** Still a scalar port; the
-   same BLAS treatment as the vector-field attentions would shrink the ~114 ms text-encoder stage.
+The flow-matching loop is **entirely on-GPU**: the ConvNeXt backbone, both cross-attentions
+(RoPE→text, tanh→style — projections and softmax included), the time conditioning, and the
+CFG Euler step all run as Metal kernels, and the conditional/unconditional passes are batched
+together (`M = 2·L`) so the small latent length still fills the GPU. The ODE state stays
+resident across all 8 steps — no per-step CPU round-trip. The pointwise matmuls use a
+register-blocked, activation-fused GEMM. Correctness is checked by the `ST_VALIDATE` harness
+(`vfield[0] corr=1.0000`, bit-identical to the reference).
 
 ---
 

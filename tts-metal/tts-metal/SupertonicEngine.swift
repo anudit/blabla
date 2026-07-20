@@ -241,7 +241,9 @@ final class SupertonicEngine: @unchecked Sendable {
             "st_gelu_erf_kernel", "st_softplus_kernel", "st_film_kernel", "st_add_col_kernel",
             "st_rope_kernel", "st_mha_kernel", "st_rel_attn_kernel", "st_sinusoid_kernel",
             "st_dwconv1d_kernel", "st_causal_conv1d_kernel", "st_causal_dwconv1d_kernel",
-            "st_dwconv1d_edge_kernel",
+            "st_dwconv1d_edge_kernel", "st_rope_norm_kernel", "st_cfg_euler_kernel",
+            "copy_kernel", "transpose_batched_kernel", "st_dwconv1d_edge_batched_kernel",
+            "lava_gamma_residual_batched_kernel", "st_add_col_batched_kernel",
         ]
         for n in names {
             guard let fn = library.makeFunction(name: n) else { print("[Supertonic] MISSING \(n)"); continue }
@@ -479,50 +481,6 @@ final class SupertonicEngine: @unchecked Sendable {
         return out
     }
 
-    /// BLAS multi-head cross-attention. Q:[n,Dq], K/V:[m,Dq] with `heads` heads of
-    /// width `hd` interleaved (head h at column offset h*hd, row stride Dq). Returns
-    /// ctx:[n,Dq]. `tanhK` applies tanh to keys first (style attention). Replaces the
-    /// scalar per-(head,pos,pos) triple loops that dominated flow-matching CPU time.
-    private func blasCrossAttn(Q: [Float], K: [Float], V: [Float], n: Int, m: Int,
-                               Dq: Int, heads: Int, hd: Int, scale: Float, tanhK: Bool) -> [Float] {
-        var Kt = K
-        if tanhK { vForce.tanh(K, result: &Kt) }
-        var ctx = [Float](repeating: 0, count: n * Dq)
-        var scores = [Float](repeating: 0, count: n * m)
-        Q.withUnsafeBufferPointer { qp in
-        Kt.withUnsafeBufferPointer { kp in
-        V.withUnsafeBufferPointer { vp in
-        ctx.withUnsafeMutableBufferPointer { cp in
-        scores.withUnsafeMutableBufferPointer { sp in
-            for h in 0..<heads {
-                let off = h * hd
-                // scores[n,m] = scale · Q_h · K_h^T
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                            Int32(n), Int32(m), Int32(hd), scale,
-                            qp.baseAddress! + off, Int32(Dq),
-                            kp.baseAddress! + off, Int32(Dq), 0.0,
-                            sp.baseAddress!, Int32(m))
-                // row-softmax over the m keys
-                for i in 0..<n {
-                    let base = i * m
-                    var mx = -Float.greatestFiniteMagnitude
-                    for j in 0..<m { mx = max(mx, sp[base + j]) }
-                    var sum: Float = 0
-                    for j in 0..<m { let e = expf(sp[base + j] - mx); sp[base + j] = e; sum += e }
-                    let inv = 1.0 / sum
-                    for j in 0..<m { sp[base + j] *= inv }
-                }
-                // ctx_h[n,hd] = P · V_h
-                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                            Int32(n), Int32(hd), Int32(m), 1.0,
-                            sp.baseAddress!, Int32(m),
-                            vp.baseAddress! + off, Int32(Dq), 0.0,
-                            cp.baseAddress! + off, Int32(Dq))
-            }
-        }}}}}
-        return ctx
-    }
-
     /// speech_prompted_text_encoder — exact CPU port of the ONNX subgraph.
     ///   h        = transpose(projOut) → [T,C]              (query source, the residual)
     ///   attn(q)  = ( softmax( (qWq · tanh(styleKey·Wk)^T) / 16 ) · (styleTtl·Wv) ) · Wo
@@ -709,98 +667,207 @@ final class SupertonicEngine: @unchecked Sendable {
 
     // MARK: - Stage: flow matching
 
-    // Flow-matching loop with classifier-free guidance. Each step runs the vector
-    // estimator twice (conditional + unconditional) and combines the velocities:
-    //   v = w1·v_cond − w2·v_uncond   (w1=4, w2=3)
-    //   x_{k+1} = x_k + v / total_step        (Euler)
-    private func runFlowMatching(textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer, L: Int, totalSteps: Int) throws -> MTLBuffer {
-        var x = gaussian(config.latentCh * L)   // x_0 ~ N(0,1)  [144, L]
-        for k in 0..<totalSteps {
-            try autoreleasepool {
-                x = try vectorEstimatorStep(x: x, textEmb: textEmb, T: T, styleTtl: styleTtl,
-                                            L: L, curStep: Float(k), totalStep: Float(totalSteps))
-            }
-        }
-        return makeBuf(x)
+    // Precomputed, generation-constant conditioning buffers (text + style, for both
+    // the conditional and unconditional CFG branches) plus the shared RoPE theta table.
+    private struct VfCond {
+        let textR_cond: MTLBuffer, textR_null: MTLBuffer            // [T,256] row-major
+        let sK_cond: MTLBuffer, sV_cond: MTLBuffer                  // [S,256]
+        let sK_null: MTLBuffer, sV_null: MTLBuffer                  // [S,256]
+        let S_cond: Int, S_null: Int
+        let theta: MTLBuffer
     }
 
-    // One flow-matching step: CFG combine of conditional/unconditional velocities + Euler.
-    // x is channel-major [144, L].  Returns next x (same layout).
-    func vectorEstimatorStep(x: [Float], textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer,
-                             L: Int, curStep: Float, totalStep: Float) throws -> [Float] {
-        let ch = config.latentCh
-        let tEmb = try timeEmbeddingArr(cur: curStep, total: totalStep)   // [64]
-
-        // conditioning sources
-        let textCM = readBuf(textEmb, count: config.charEmb * T)          // [256, T] channel-major
-        let styleV_cond = readBuf(styleTtl, count: 50 * config.charEmb)   // [50, 256] row-major
+    private func prepConditioning(textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer) throws -> VfCond {
+        let C = config.charEmb
         guard let styleK_cond = rawWeight("vf", "/vector_estimator/Expand_output_0"),
               let textNullTok = rawWeight("vf", "vector_estimator.tts.ttl.uncond_masker.text_special_token"),
               let styleK_null = rawWeight("vf", "vector_estimator.tts.ttl.uncond_masker.style_key_special_token"),
-              let styleV_null = rawWeight("vf", "vector_estimator.tts.ttl.uncond_masker.style_value_special_token")
+              let styleV_null = rawWeight("vf", "vector_estimator.tts.ttl.uncond_masker.style_value_special_token"),
+              let theta = rawWeight("vf", "vector_estimator.tts.ttl.vector_field.main_blocks.3.attn.theta")
         else { throw err("vector_field conditioning tokens missing") }
-        // null text: broadcast text_special_token [256] across T
-        var textNullCM = [Float](repeating: 0, count: config.charEmb * T)
-        for c in 0..<config.charEmb { for t in 0..<T { textNullCM[c * T + t] = textNullTok[c] } }
+        // text (row-major [T,256]): cond = transpose of textEmb[256,T]; null = broadcast token.
+        let textR_cond = try toRowMajor(textEmb, rows: C, cols: T)
+        var textNullR = [Float](repeating: 0, count: T * C)
+        for t in 0..<T { for c in 0..<C { textNullR[t * C + c] = textNullTok[c] } }
+        return VfCond(textR_cond: textR_cond, textR_null: makeBuf(textNullR),
+                      sK_cond: makeBuf(styleK_cond), sV_cond: styleTtl,
+                      sK_null: makeBuf(styleK_null), sV_null: makeBuf(styleV_null),
+                      S_cond: styleK_cond.count / C, S_null: styleK_null.count / C,
+                      theta: makeBuf(theta))
+    }
 
-        let vCond = try vfVelocity(x: x, L: L, tEmb: tEmb, textCM: textCM, T: T,
-                                   styleK: styleK_cond, styleV: styleV_cond)
-        let vUncond = try vfVelocity(x: x, L: L, tEmb: tEmb, textCM: textNullCM, T: T,
-                                     styleK: styleK_null, styleV: styleV_null)
-        var out = x
-        let inv = 1.0 / totalStep
-        for i in 0..<(ch * L) { out[i] = x[i] + (4.0 * vCond[i] - 3.0 * vUncond[i]) * inv }
+    // Flow-matching loop with classifier-free guidance, fully on-GPU. Each step runs
+    // the vector estimator for the conditional and unconditional conditioning, then
+    // combines the velocities and takes an Euler step — all as Metal kernels, so the
+    // ODE state stays resident and there is no per-step CPU round-trip:
+    //   v = w1·v_cond − w2·v_uncond   (w1=4, w2=3);  x_{k+1} = x_k + v / total_step
+    private func runFlowMatching(textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer, L: Int, totalSteps: Int) throws -> MTLBuffer {
+        let ch = config.latentCh
+        let cond = try prepConditioning(textEmb: textEmb, T: T, styleTtl: styleTtl)
+        var xBuf = makeBuf(gaussian(ch * L))    // x_0 ~ N(0,1)  [144, L]
+        let inv = 1.0 / Float(totalSteps)
+        for k in 0..<totalSteps {
+            let tEmbBuf = makeBuf(try timeEmbeddingArr(cur: Float(k), total: Float(totalSteps)))  // [64]
+            // one batched pass yields both velocities: vB = [2, 144, L] (b0 cond, b1 uncond)
+            let vB = try vfVelocityBatched(x: xBuf, L: L, tEmbBuf: tEmbBuf, T: T, cond: cond)
+            let vCond = empty(ch * L); dispatchCopy(src: vB, dst: vCond, size: ch * L, srcOff: 0, dstOff: 0)
+            let vUncond = empty(ch * L); dispatchCopy(src: vB, dst: vUncond, size: ch * L, srcOff: ch * L, dstOff: 0)
+            let nx = empty(ch * L)
+            dispatchCfgEuler(x: xBuf, vCond: vCond, vUncond: vUncond, out: nx,
+                             size: ch * L, w1: 4.0, w2: 3.0, invTotal: inv)
+            xBuf = nx
+            if k == 0 { printBufStats("vfield[0] step0", xBuf, count: ch * L) }
+        }
+        return xBuf
+    }
+
+    // One flow-matching step (CPU array in/out) — retained for the ST_VALIDATE harness,
+    // which feeds a fixed reference noise/text_emb and diffs the result. Delegates to the
+    // batched GPU path so validation exercises the same kernels the production loop uses.
+    func vectorEstimatorStep(x: [Float], textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer,
+                             L: Int, curStep: Float, totalStep: Float) throws -> [Float] {
+        let ch = config.latentCh
+        let cond = try prepConditioning(textEmb: textEmb, T: T, styleTtl: styleTtl)
+        let xBuf = makeBuf(x)
+        let tEmbBuf = makeBuf(try timeEmbeddingArr(cur: curStep, total: totalStep))
+        let vB = try vfVelocityBatched(x: xBuf, L: L, tEmbBuf: tEmbBuf, T: T, cond: cond)
+        let vCond = empty(ch * L); dispatchCopy(src: vB, dst: vCond, size: ch * L, srcOff: 0, dstOff: 0)
+        let vUncond = empty(ch * L); dispatchCopy(src: vB, dst: vUncond, size: ch * L, srcOff: ch * L, dstOff: 0)
+        let nx = empty(ch * L)
+        dispatchCfgEuler(x: xBuf, vCond: vCond, vUncond: vUncond, out: nx,
+                         size: ch * L, w1: 4.0, w2: 3.0, invTotal: 1.0 / totalStep)
+        let out = readBuf(nx, count: ch * L)
         if curStep == 0.0 { printArrStats("vfield[0] step0", out) }
         return out
     }
 
-    // One vector_estimator forward for a single conditioning → velocity [144, L] (channel-major).
-    // Heavy ConvNeXt runs on Metal; time-conditioning + the two attentions run on CPU (small).
-    private func vfVelocity(x: [Float], L: Int, tEmb: [Float], textCM: [Float], T: Int,
-                            styleK: [Float], styleV: [Float]) throws -> [Float] {
-        let D = config.vfDim, ch = config.latentCh
+    // Batched vector estimator: processes the conditional (b=0) and unconditional (b=1)
+    // CFG passes together as a batch of 2, so the ConvNeXt matmuls run at M = 2·L and the
+    // GPU stays occupied. The ConvNeXt backbone and time conditioning are batch-parallel;
+    // each cross-attention is applied per-branch with its own conditioning (the only place
+    // the two passes differ). Returns velocities [2, 144, L] channel-major.
+    private func vfVelocityBatched(x: MTLBuffer, L: Int, tEmbBuf: MTLBuffer, T: Int, cond: VfCond) throws -> MTLBuffer {
+        let D = config.vfDim, ch = config.latentCh, B = 2
         let p = "vector_estimator.tts.ttl.vector_field.main_blocks"
-        // proj_in: conv1x1 144→512
-        var h = try conv1x1(ns: "vf", prefix: "vector_estimator.tts.ttl.vector_field.proj_in.net",
-                            x: makeBuf(x), inCh: ch, outCh: D, L: L)
+        // batched input: the ODE state is shared, so duplicate x into both batch slots.
+        let xB = empty(B * ch * L)
+        dispatchCopy(src: x, dst: xB, size: ch * L, srcOff: 0, dstOff: 0)
+        dispatchCopy(src: x, dst: xB, size: ch * L, srcOff: 0, dstOff: ch * L)
+        var h = try conv1x1Batched(ns: "vf", prefix: "vector_estimator.tts.ttl.vector_field.proj_in.net",
+                                   x: xB, inCh: ch, outCh: D, L: L, batch: B)
         for g in 0..<config.vfSuperBlocks {
             let base = 6 * g
-            // convnext_0: 4 layers, dilations [1,2,4,8], symmetric edge padding
             for j in 0..<4 {
-                h = try convNextLayer(ns: "vf", prefix: "\(p).\(base+0).convnext.\(j)",
-                                      x: h, C: D, T: L, ksz: config.vfConvNextKsz,
-                                      dil: [1,2,4,8][j], inter: config.vfConvNextInter, symEdge: true)
+                h = try convNextLayerBatched(ns: "vf", prefix: "\(p).\(base+0).convnext.\(j)",
+                                             x: h, C: D, T: L, ksz: config.vfConvNextKsz,
+                                             dil: [1,2,4,8][j], inter: config.vfConvNextInter, batch: B)
             }
-            // additive time conditioning: h += linear_g(tEmb) broadcast across L
-            h = try addTimeCond(h: h, tEmb: tEmb, D: D, L: L,
-                                prefix: "vector_estimator.tts.ttl.vector_field.main_blocks.\(base+1).linear.linear")
-            // convnext_1
-            h = try convNextLayer(ns: "vf", prefix: "\(p).\(base+2).convnext.0",
-                                  x: h, C: D, T: L, ksz: config.vfConvNextKsz, dil: 1,
-                                  inter: config.vfConvNextInter, symEdge: true)
-            // RoPE cross-attention to text (+ norm)
-            h = try vfRopeCrossAttnText(hCM: readBuf(h, count: D * L), L: L, textCM: textCM, T: T,
-                                        attnPrefix: "\(p).\(base+3).attn",
-                                        normPrefix: "\(p).\(base+3).norm.norm")
-            // convnext_2
-            h = try convNextLayer(ns: "vf", prefix: "\(p).\(base+4).convnext.0",
-                                  x: h, C: D, T: L, ksz: config.vfConvNextKsz, dil: 1,
-                                  inter: config.vfConvNextInter, symEdge: true)
-            // tanh cross-attention to style (+ norm)
-            h = try vfTanhCrossAttnStyle(hCM: readBuf(h, count: D * L), L: L, styleK: styleK, styleV: styleV,
-                                         attnPrefix: "\(p).\(base+5).attention",
-                                         normPrefix: "\(p).\(base+5).norm.norm")
+            h = try addTimeCondGPUBatched(h: h, tEmbBuf: tEmbBuf, D: D, L: L,
+                                          prefix: "\(p).\(base+1).linear.linear", batch: B)
+            h = try convNextLayerBatched(ns: "vf", prefix: "\(p).\(base+2).convnext.0",
+                                         x: h, C: D, T: L, ksz: config.vfConvNextKsz, dil: 1,
+                                         inter: config.vfConvNextInter, batch: B)
+            // RoPE cross-attention to text (+ norm), per branch
+            h = try vfAttnBatched(h, L: L, B: B) { hb, b in
+                try self.vfRopeCrossAttnTextGPU(h: hb, L: L, textR: b == 0 ? cond.textR_cond : cond.textR_null,
+                                                T: T, theta: cond.theta,
+                                                attnPrefix: "\(p).\(base+3).attn", normPrefix: "\(p).\(base+3).norm.norm")
+            }
+            h = try convNextLayerBatched(ns: "vf", prefix: "\(p).\(base+4).convnext.0",
+                                         x: h, C: D, T: L, ksz: config.vfConvNextKsz, dil: 1,
+                                         inter: config.vfConvNextInter, batch: B)
+            // tanh cross-attention to style (+ norm), per branch
+            h = try vfAttnBatched(h, L: L, B: B) { hb, b in
+                try self.vfTanhCrossAttnStyleGPU(h: hb, L: L,
+                                                 styleK: b == 0 ? cond.sK_cond : cond.sK_null,
+                                                 styleV: b == 0 ? cond.sV_cond : cond.sV_null,
+                                                 S: b == 0 ? cond.S_cond : cond.S_null,
+                                                 attnPrefix: "\(p).\(base+5).attention", normPrefix: "\(p).\(base+5).norm.norm")
+            }
         }
-        // last_convnext (4 layers, dil 1, symmetric edge padding)
         for j in 0..<config.vfLastConvNextLayers {
-            h = try convNextLayer(ns: "vf", prefix: "vector_estimator.tts.ttl.vector_field.last_convnext.convnext.\(j)",
-                                  x: h, C: D, T: L, ksz: config.vfConvNextKsz, dil: 1,
-                                  inter: config.vfConvNextInter, symEdge: true)
+            h = try convNextLayerBatched(ns: "vf", prefix: "vector_estimator.tts.ttl.vector_field.last_convnext.convnext.\(j)",
+                                         x: h, C: D, T: L, ksz: config.vfConvNextKsz, dil: 1,
+                                         inter: config.vfConvNextInter, batch: B)
         }
-        // proj_out: conv1x1 512→144
-        let out = try conv1x1(ns: "vf", prefix: "vector_estimator.tts.ttl.vector_field.proj_out.net",
-                              x: h, inCh: D, outCh: ch, L: L)
-        return readBuf(out, count: ch * L)
+        return try conv1x1Batched(ns: "vf", prefix: "vector_estimator.tts.ttl.vector_field.proj_out.net",
+                                  x: h, inCh: D, outCh: ch, L: L, batch: B)
+    }
+
+    // Apply a per-branch cross-attention to a batched channel-major tensor [B, C, L]:
+    // slice each batch's [C, L], run the (single-batch) GPU attention with its own
+    // conditioning, and scatter the result back. Attention is the only per-branch step.
+    private func vfAttnBatched(_ h: MTLBuffer, L: Int, B: Int,
+                               _ attend: (MTLBuffer, Int) throws -> MTLBuffer) rethrows -> MTLBuffer {
+        let C = config.vfDim
+        let out = empty(B * C * L)
+        for b in 0..<B {
+            let hb = empty(C * L)
+            dispatchCopy(src: h, dst: hb, size: C * L, srcOff: b * C * L, dstOff: 0)
+            let ob = try attend(hb, b)
+            dispatchCopy(src: ob, dst: out, size: C * L, srcOff: 0, dstOff: b * C * L)
+        }
+        return out
+    }
+
+    // Batched ConvNeXt block (channel-major [B, C, T], symmetric edge padding). Mirrors
+    // convNextLayer but flattens to [B·T, C] for the LayerNorm + pointwise matmuls so both
+    // CFG branches share one dispatch. The vector field always has a gamma scale.
+    private func convNextLayerBatched(ns: String, prefix: String, x: MTLBuffer, C: Int, T: Int,
+                                      ksz: Int, dil: Int, inter: Int, batch B: Int) throws -> MTLBuffer {
+        let residual = x
+        let pad = dil * (ksz - 1) / 2
+        guard let dwW = weightBuf(ns, "\(prefix).dwconv.weight") ?? weightBuf(ns, "\(prefix).dwconv.net.weight"),
+              let dwB = weightBuf(ns, "\(prefix).dwconv.bias") ?? weightBuf(ns, "\(prefix).dwconv.net.bias")
+        else { return x }
+        let dw = empty(B * C * T)
+        dispatchEdgeDwConvBatched(input: x, weight: dwW, bias: dwB, out: dw, C: C, T: T, ksz: ksz, pad: pad, dil: dil, batch: B)
+        let dwT = empty(B * T * C)                                   // [B·T, C] row-major
+        dispatchTransposeBatched(input: dw, out: dwT, rows: C, cols: T, batch: B)
+        let normed = empty(B * T * C)
+        if let g = weightBuf(ns, "\(prefix).norm.norm.weight"), let bb = weightBuf(ns, "\(prefix).norm.norm.bias") {
+            dispatchLayerNorm(input: dwT, gamma: g, beta: bb, out: normed, rows: B * T, C: C)
+        }
+        guard let w1 = weightBuf(ns, "\(prefix).pwconv1.weight"), let b1 = weightBuf(ns, "\(prefix).pwconv1.bias"),
+              let w2 = weightBuf(ns, "\(prefix).pwconv2.weight"), let b2 = weightBuf(ns, "\(prefix).pwconv2.bias")
+        else { return x }
+        let hid = empty(B * T * inter)
+        matmulRowMajorWT(A: normed, Wt: w1, bias: b1, out: hid, M: B * T, K: C, N: inter, act: "gelu")
+        let proj = empty(B * T * C)
+        matmulRowMajorWT(A: hid, Wt: w2, bias: b2, out: proj, M: B * T, K: inter, N: C)
+        let out = empty(B * C * T)
+        if let gamma = weightBuf(ns, "\(prefix).gamma") {
+            dispatchGammaResidualBatched(h: proj, residual: residual, gamma: gamma, out: out, C: C, T: T, batch: B)
+        } else {
+            let projC = empty(B * C * T)
+            dispatchTransposeBatched(input: proj, out: projC, rows: T, cols: C, batch: B)
+            dispatchAdd(a: residual, b: projC, out: out, size: B * C * T)
+        }
+        return out
+    }
+
+    // Batched conv1x1 (pointwise): [B, inCh, L] → [B, outCh, L] via one [B·L, outCh] matmul.
+    private func conv1x1Batched(ns: String, prefix: String, x: MTLBuffer, inCh: Int, outCh: Int, L: Int, batch B: Int) throws -> MTLBuffer {
+        guard let w = weightBuf(ns, "\(prefix).weight") else { return x }
+        let bias = weightBuf(ns, "\(prefix).bias")
+        let xt = empty(B * L * inCh)                                 // [B·L, inCh]
+        dispatchTransposeBatched(input: x, out: xt, rows: inCh, cols: L, batch: B)
+        let outT = empty(B * L * outCh)
+        matmulRowMajorWT(A: xt, Wt: w, bias: bias, out: outT, M: B * L, K: inCh, N: outCh)
+        let out = empty(B * outCh * L)                              // [B, outCh, L]
+        dispatchTransposeBatched(input: outT, out: out, rows: L, cols: outCh, batch: B)
+        return out
+    }
+
+    // Batched GPU time conditioning: h[b,c,l] += (W·tEmb + b)[c] (same proj for both branches).
+    private func addTimeCondGPUBatched(h: MTLBuffer, tEmbBuf: MTLBuffer, D: Int, L: Int, prefix: String, batch B: Int) throws -> MTLBuffer {
+        guard let w = weightBuf("vf", "\(prefix).weight") else { return h }   // stored [64,512] (in,out)
+        let b = weightBuf("vf", "\(prefix).bias")
+        let projBuf = empty(D)
+        matmulRowMajor(A: tEmbBuf, B: w, bias: b, out: projBuf, M: 1, K: 64, N: D)
+        let out = empty(B * D * L)
+        dispatchAddColBatched(x: h, vec: projBuf, out: out, C: D, L: L, batch: B)
+        return out
     }
 
     // MARK: - Stage: vocoder
@@ -1024,116 +1091,64 @@ final class SupertonicEngine: @unchecked Sendable {
         return linear(mish, w2, b2, inN: 256, outN: 64)               // [64]
     }
 
-    // additive time conditioning: h[c,l] += (W·tEmb + b)[c], broadcast over L.  W is [64,512].
-    private func addTimeCond(h: MTLBuffer, tEmb: [Float], D: Int, L: Int, prefix: String) throws -> MTLBuffer {
-        guard let w = weightBuf("vf", "\(prefix).weight") else { return h }  // stored [64,512] (in,out)
-        let b = weightBuf("vf", "\(prefix).bias")
-        let projBuf = empty(D)
-        matmulRowMajor(A: makeBuf(tEmb), B: w, bias: b, out: projBuf, M: 1, K: 64, N: D)  // out = tEmb·W
-        var ha = readBuf(h, count: D * L)
-        let proj = readBuf(projBuf, count: D)
-        for c in 0..<D { let pc = proj[c]; for l in 0..<L { ha[c * L + l] += pc } }
-        return makeBuf(ha)
-    }
+    // ── GPU cross-attentions (projections + RoPE/tanh + softmax + out-proj + norm) ──
+    // Fully on-device: the Q/K/V/out projections are GPU matmuls, RoPE/tanh are GPU
+    // kernels, the attention core reuses st_mha_kernel, and (O+residual)→LayerNorm→
+    // transpose stays on GPU. Removes the per-block CPU round-trips (readBuf/makeBuf)
+    // that stalled the flow-matching pipeline. Weights are onnx::MatMul [in,out], used
+    // directly as the B operand (no transpose) — mirrors the CPU cpuMatmul convention.
 
-    // RoPE cross-attention: Q from latent h[512,L], K/V from text[256,T]. 8 heads × 64,
-    // rotate-half rotary with normalised position (idx/len)·theta, score ÷16, + residual, + norm.
-    private func vfRopeCrossAttnText(hCM: [Float], L: Int, textCM: [Float], T: Int,
-                                     attnPrefix: String, normPrefix: String) throws -> MTLBuffer {
-        let C = config.vfDim, Ctext = config.charEmb, heads = 8, hd = 64, half = 32
-        let hR = transpose(hCM, rows: C, cols: L)            // [L,512]
-        let tR = transpose(textCM, rows: Ctext, cols: T)     // [T,256]
-        guard let Wq = rawWeight("vf", "\(attnPrefix).W_query.linear.weight"),
-              let Wk = rawWeight("vf", "\(attnPrefix).W_key.linear.weight"),
-              let Wv = rawWeight("vf", "\(attnPrefix).W_value.linear.weight"),
-              let Wo = rawWeight("vf", "\(attnPrefix).out_fc.linear.weight"),
-              // rotary tables are computed once in block 3 and shared by blocks 9/15/21
-              let theta = rawWeight("vf", "vector_estimator.tts.ttl.vector_field.main_blocks.3.attn.theta")
+    // RoPE cross-attention to text. h[512,L] CM, textR[T,256] row-major → [512,L] CM.
+    private func vfRopeCrossAttnTextGPU(h: MTLBuffer, L: Int, textR: MTLBuffer, T: Int,
+                                        theta: MTLBuffer, attnPrefix: String, normPrefix: String) throws -> MTLBuffer {
+        let C = config.vfDim, Ctext = config.charEmb, heads = 8, hd = 64
+        let hR = try toRowMajor(h, rows: C, cols: L)            // [L,512]
+        func wb(_ s: String) -> MTLBuffer? { weightBuf("vf", "\(attnPrefix).\(s)") }
+        guard let Wq = wb("W_query.linear.weight"), let Wk = wb("W_key.linear.weight"),
+              let Wv = wb("W_value.linear.weight"), let Wo = wb("out_fc.linear.weight")
         else { throw err("vf rope attn weights missing (\(attnPrefix))") }
-        let bq = rawWeight("vf", "\(attnPrefix).W_query.linear.bias")
-        let bk = rawWeight("vf", "\(attnPrefix).W_key.linear.bias")
-        let bv = rawWeight("vf", "\(attnPrefix).W_value.linear.bias")
-        let bo = rawWeight("vf", "\(attnPrefix).out_fc.linear.bias")
-        var Q = cpuMatmul(hR, Wq, bq, M: L, K: C, N: C)       // [L,512]
-        var K = cpuMatmul(tR, Wk, bk, M: T, K: Ctext, N: C)   // [T,512]
-        let V = cpuMatmul(tR, Wv, bv, M: T, K: Ctext, N: C)   // [T,512]
-        // rotate-half RoPE per head; angle[pos,f] = (pos/len)·theta[f]
-        func applyRope(_ X: inout [Float], _ n: Int, _ len: Int) {
-            for pos in 0..<n {
-                let pn = Float(pos) / Float(len)
-                for head in 0..<heads {
-                    let o = pos * C + head * hd
-                    for f in 0..<half {
-                        let ang = pn * theta[f], cs = cos(ang), sn = sin(ang)
-                        let x1 = X[o + f], x2 = X[o + half + f]
-                        X[o + f] = x1 * cs - x2 * sn
-                        X[o + half + f] = x1 * sn + x2 * cs
-                    }
-                }
-            }
-        }
-        applyRope(&Q, L, L)
-        applyRope(&K, T, T)
-        let scale: Float = 1.0 / 16.0
-        let ctx = blasCrossAttn(Q: Q, K: K, V: V, n: L, m: T, Dq: C,
-                                heads: heads, hd: hd, scale: scale, tanhK: false)
-        let O = cpuMatmul(ctx, Wo, bo, M: L, K: C, N: C)      // [L,512]
-        return try residualNormCM(O: O, residualR: hR, L: L, C: C, normPrefix: normPrefix)
+        let bq = wb("W_query.linear.bias"), bk = wb("W_key.linear.bias")
+        let bv = wb("W_value.linear.bias"), bo = wb("out_fc.linear.bias")
+        let Q = empty(L * C); matmulRowMajor(A: hR, B: Wq, bias: bq, out: Q, M: L, K: C, N: C)
+        let K = empty(T * C); matmulRowMajor(A: textR, B: Wk, bias: bk, out: K, M: T, K: Ctext, N: C)
+        let V = empty(T * C); matmulRowMajor(A: textR, B: Wv, bias: bv, out: V, M: T, K: Ctext, N: C)
+        let Qr = empty(L * C); dispatchRopeNorm(x: Q, out: Qr, theta: theta, n: L, len: L, heads: heads, hd: hd)
+        let Kr = empty(T * C); dispatchRopeNorm(x: K, out: Kr, theta: theta, n: T, len: T, heads: heads, hd: hd)
+        let ctx = empty(L * C)
+        dispatchMHA(Q: Qr, K: Kr, V: V, mask: nil, out: ctx, Lq: L, Lkv: T, heads: heads, hd: hd, scale: 1.0 / 16.0)
+        let O = empty(L * C); matmulRowMajor(A: ctx, B: Wo, bias: bo, out: O, M: L, K: C, N: C)
+        return try residualNormGPU(O: O, residualR: hR, L: L, C: C, normPrefix: normPrefix)
     }
 
-    // tanh cross-attention: Q from h[512,L]→256, K from styleK[50,256]→256, V from styleV[50,256]→256.
-    // 2 heads × 128, K passed through tanh, score ÷16, out_fc 256→512, + residual, + norm.
-    private func vfTanhCrossAttnStyle(hCM: [Float], L: Int, styleK: [Float], styleV: [Float],
-                                      attnPrefix: String, normPrefix: String) throws -> MTLBuffer {
-        let C = config.vfDim, Dqk = 256, heads = 2, hd = 128, S = 50
-        let hR = transpose(hCM, rows: C, cols: L)             // [L,512]
-        guard let Wq = rawWeight("vf", "\(attnPrefix).W_query.linear.weight"),
-              let Wk = rawWeight("vf", "\(attnPrefix).W_key.linear.weight"),
-              let Wv = rawWeight("vf", "\(attnPrefix).W_value.linear.weight"),
-              let Wo = rawWeight("vf", "\(attnPrefix).out_fc.linear.weight")
+    // tanh cross-attention to style. h[512,L] CM, styleK/styleV[50,256] → [512,L] CM.
+    private func vfTanhCrossAttnStyleGPU(h: MTLBuffer, L: Int, styleK: MTLBuffer, styleV: MTLBuffer,
+                                         S: Int, attnPrefix: String, normPrefix: String) throws -> MTLBuffer {
+        let C = config.vfDim, Dqk = 256, heads = 2, hd = 128
+        let hR = try toRowMajor(h, rows: C, cols: L)            // [L,512]
+        func wb(_ s: String) -> MTLBuffer? { weightBuf("vf", "\(attnPrefix).\(s)") }
+        guard let Wq = wb("W_query.linear.weight"), let Wk = wb("W_key.linear.weight"),
+              let Wv = wb("W_value.linear.weight"), let Wo = wb("out_fc.linear.weight")
         else { throw err("vf tanh attn weights missing (\(attnPrefix))") }
-        let bq = rawWeight("vf", "\(attnPrefix).W_query.linear.bias")
-        let bk = rawWeight("vf", "\(attnPrefix).W_key.linear.bias")
-        let bv = rawWeight("vf", "\(attnPrefix).W_value.linear.bias")
-        let bo = rawWeight("vf", "\(attnPrefix).out_fc.linear.bias")
-        let Q = cpuMatmul(hR, Wq, bq, M: L, K: C, N: Dqk)     // [L,256]
-        let K = cpuMatmul(styleK, Wk, bk, M: S, K: Dqk, N: Dqk)  // [50,256]
-        let Vv = cpuMatmul(styleV, Wv, bv, M: S, K: Dqk, N: Dqk) // [50,256]
-        let scale: Float = 1.0 / 16.0
-        let ctx = blasCrossAttn(Q: Q, K: K, V: Vv, n: L, m: S, Dq: Dqk,
-                                heads: heads, hd: hd, scale: scale, tanhK: true)
-        let O = cpuMatmul(ctx, Wo, bo, M: L, K: Dqk, N: C)    // [L,512]
-        return try residualNormCM(O: O, residualR: hR, L: L, C: C, normPrefix: normPrefix)
+        let bq = wb("W_query.linear.bias"), bk = wb("W_key.linear.bias")
+        let bv = wb("W_value.linear.bias"), bo = wb("out_fc.linear.bias")
+        let Q = empty(L * Dqk); matmulRowMajor(A: hR, B: Wq, bias: bq, out: Q, M: L, K: C, N: Dqk)
+        let K = empty(S * Dqk); matmulRowMajor(A: styleK, B: Wk, bias: bk, out: K, M: S, K: Dqk, N: Dqk)
+        let V = empty(S * Dqk); matmulRowMajor(A: styleV, B: Wv, bias: bv, out: V, M: S, K: Dqk, N: Dqk)
+        let Kt = empty(S * Dqk); dispatchTanh(input: K, out: Kt, size: S * Dqk)   // keys through tanh
+        let ctx = empty(L * Dqk)
+        dispatchMHA(Q: Q, K: Kt, V: V, mask: nil, out: ctx, Lq: L, Lkv: S, heads: heads, hd: hd, scale: 1.0 / 16.0)
+        let O = empty(L * C); matmulRowMajor(A: ctx, B: Wo, bias: bo, out: O, M: L, K: Dqk, N: C)
+        return try residualNormGPU(O: O, residualR: hR, L: L, C: C, normPrefix: normPrefix)
     }
 
-    // (O + residual) row-major [L,C] → LayerNorm over C (eps 1e-6) → channel-major [C,L].
-    private func residualNormCM(O: [Float], residualR: [Float], L: Int, C: Int, normPrefix: String) throws -> MTLBuffer {
-        guard let lnW = rawWeight("vf", "\(normPrefix).weight"),
-              let lnB = rawWeight("vf", "\(normPrefix).bias")
-        else { throw err("vf norm weights missing (\(normPrefix))") }
-        var out = [Float](repeating: 0, count: C * L)
-        for i in 0..<L {
-            var mean: Float = 0
-            for c in 0..<C { mean += O[i * C + c] + residualR[i * C + c] }
-            mean /= Float(C)
-            var varc: Float = 0
-            for c in 0..<C { let d = O[i * C + c] + residualR[i * C + c] - mean; varc += d * d }
-            varc /= Float(C)
-            let inv = 1.0 / (varc + 1e-6).squareRoot()
-            for c in 0..<C {
-                let v = (O[i * C + c] + residualR[i * C + c] - mean) * inv * lnW[c] + lnB[c]
-                out[c * L + i] = v        // transpose → channel-major
-            }
-        }
-        return makeBuf(out)
+    // (O + residualR) row-major [L,C] → LayerNorm over C (eps 1e-6) → channel-major [C,L], all GPU.
+    private func residualNormGPU(O: MTLBuffer, residualR: MTLBuffer, L: Int, C: Int, normPrefix: String) throws -> MTLBuffer {
+        let add = empty(L * C)
+        dispatchAdd(a: O, b: residualR, out: add, size: L * C)
+        let normed = try applyNorm(ns: "vf", name: normPrefix, x: add, rows: L, C: C)   // [L,C]
+        return try toChannelMajor(normed, rows: L, cols: C)                              // [C,L]
     }
 
-    // CPU transpose [rows,cols] → [cols,rows].
-    private func transpose(_ x: [Float], rows: Int, cols: Int) -> [Float] {
-        var o = [Float](repeating: 0, count: rows * cols)
-        for r in 0..<rows { for c in 0..<cols { o[c * rows + r] = x[r * cols + c] } }
-        return o
-    }
 
     private func printArrStats(_ label: String, _ a: [Float]) {
         guard !a.isEmpty else { return }
@@ -1419,6 +1434,64 @@ final class SupertonicEngine: @unchecked Sendable {
         struct P { var seq_len: UInt32; var num_heads: UInt32; var head_dim: UInt32; var window: UInt32; var scale: Float }
         var p = P(seq_len: UInt32(T), num_heads: UInt32(heads), head_dim: UInt32(hd), window: UInt32(window), scale: scale)
         dispatch1d("st_rel_attn_kernel", [Q, K, V, relK, relV, nil, out], &p, 20, T * heads * hd)
+    }
+
+    // Rotate-half RoPE with normalised position, applied to [n, heads*hd] row-major.
+    private func dispatchRopeNorm(x: MTLBuffer, out: MTLBuffer, theta: MTLBuffer, n: Int, len: Int, heads: Int, hd: Int) {
+        struct P { var n: UInt32; var len: UInt32; var num_heads: UInt32; var head_dim: UInt32 }
+        var p = P(n: UInt32(n), len: UInt32(len), num_heads: UInt32(heads), head_dim: UInt32(hd))
+        dispatch1d("st_rope_norm_kernel", [x, out, theta], &p, 16, n * heads * (hd / 2))
+    }
+
+    // Broadcast-add a length-C vector across L (channel-major [C, L]).
+    private func dispatchAddCol(x: MTLBuffer, vec: MTLBuffer, out: MTLBuffer, C: Int, L: Int) {
+        struct P { var channels: UInt32; var length: UInt32; var add_one: UInt32 }
+        var p = P(channels: UInt32(C), length: UInt32(L), add_one: 0)
+        dispatch1d("st_add_col_kernel", [x, vec, out], &p, 12, C * L)
+    }
+
+    // CFG Euler combine on GPU: out = x + (w1·vCond − w2·vUncond)/total.
+    private func dispatchCfgEuler(x: MTLBuffer, vCond: MTLBuffer, vUncond: MTLBuffer, out: MTLBuffer,
+                                  size: Int, w1: Float, w2: Float, invTotal: Float) {
+        struct P { var size: UInt32; var w1: Float; var w2: Float; var inv_total: Float }
+        var p = P(size: UInt32(size), w1: w1, w2: w2, inv_total: invTotal)
+        dispatch1d("st_cfg_euler_kernel", [x, vCond, vUncond, out], &p, 16, size)
+    }
+
+    // Elementwise tanh (reuses the existing tanh_kernel).
+    private func dispatchTanh(input: MTLBuffer, out: MTLBuffer, size: Int) {
+        struct P { var size: UInt32 }
+        var p = P(size: UInt32(size))
+        dispatch1d("tanh_kernel", [input, out], &p, 4, size)
+    }
+
+    // ── Batched (B) dispatch helpers (CFG cond+uncond processed together) ──
+    private func dispatchCopy(src: MTLBuffer, dst: MTLBuffer, size: Int, srcOff: Int, dstOff: Int) {
+        struct P { var size: UInt32; var src_off: UInt32; var dst_off: UInt32 }
+        var p = P(size: UInt32(size), src_off: UInt32(srcOff), dst_off: UInt32(dstOff))
+        dispatch1d("copy_kernel", [src, dst], &p, 12, size)
+    }
+    // Per-batch transpose: B blocks of [rows,cols] → [cols,rows].
+    private func dispatchTransposeBatched(input: MTLBuffer, out: MTLBuffer, rows: Int, cols: Int, batch: Int) {
+        struct P { var rows: UInt32; var cols: UInt32; var batch: UInt32 }
+        var p = P(rows: UInt32(rows), cols: UInt32(cols), batch: UInt32(batch))
+        dispatch1d("transpose_batched_kernel", [input, out], &p, 12, batch * rows * cols)
+    }
+    private func dispatchEdgeDwConvBatched(input: MTLBuffer, weight: MTLBuffer, bias: MTLBuffer, out: MTLBuffer,
+                                           C: Int, T: Int, ksz: Int, pad: Int, dil: Int, batch: Int) {
+        struct P { var channels: UInt32; var length: UInt32; var ksize: UInt32; var pad: UInt32; var dilation: UInt32; var batch: UInt32 }
+        var p = P(channels: UInt32(C), length: UInt32(T), ksize: UInt32(ksz), pad: UInt32(pad), dilation: UInt32(dil), batch: UInt32(batch))
+        dispatch1d("st_dwconv1d_edge_batched_kernel", [input, weight, bias, out], &p, MemoryLayout<P>.size, batch * C * T)
+    }
+    private func dispatchGammaResidualBatched(h: MTLBuffer, residual: MTLBuffer, gamma: MTLBuffer, out: MTLBuffer, C: Int, T: Int, batch: Int) {
+        struct P { var dim: UInt32; var length: UInt32; var batch: UInt32 }
+        var p = P(dim: UInt32(C), length: UInt32(T), batch: UInt32(batch))
+        dispatch1d("lava_gamma_residual_batched_kernel", [h, residual, gamma, out], &p, 12, batch * C * T)
+    }
+    private func dispatchAddColBatched(x: MTLBuffer, vec: MTLBuffer, out: MTLBuffer, C: Int, L: Int, batch: Int) {
+        struct P { var dim: UInt32; var length: UInt32; var batch: UInt32 }
+        var p = P(dim: UInt32(C), length: UInt32(L), batch: UInt32(batch))
+        dispatch1d("st_add_col_batched_kernel", [x, vec, out], &p, 12, batch * C * L)
     }
 
     private func dispatchSinusoid(t: MTLBuffer, out: MTLBuffer, rows: Int, dim: Int, maxPeriod: Float) {

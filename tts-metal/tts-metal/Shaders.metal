@@ -587,6 +587,88 @@ kernel void lava_gamma_residual_kernel(device const float* h        [[buffer(0)]
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+//  Batched (B) variants — process the CFG conditional + unconditional passes as
+//  one batch so the ConvNeXt matmuls run at M = B·L, doubling GPU occupancy for
+//  the small latent length. Row-major tensors flatten to [B·L, C] (matmul/LayerNorm
+//  need no change); channel-major tensors are [B, C, L]; per-batch ops carry a batch
+//  count and never cross the batch boundary. B=1 is bit-identical to the unbatched
+//  kernels above.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Copy `size` floats from src[src_off..] to dst[dst_off..] (batch slice extract/merge).
+struct CopyParams { uint size; uint src_off; uint dst_off; };
+kernel void copy_kernel(device const float* src [[buffer(0)]],
+                        device float*       dst [[buffer(1)]],
+                        constant CopyParams& p [[buffer(2)]],
+                        uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.size) return;
+    dst[p.dst_off + gid] = src[p.src_off + gid];
+}
+
+// Per-batch 2D transpose: B independent [rows,cols] → [cols,rows] blocks.
+struct TransposeBatchParams { uint rows; uint cols; uint batch; };
+kernel void transpose_batched_kernel(device const float* input [[buffer(0)]],
+                                     device float*       out   [[buffer(1)]],
+                                     constant TransposeBatchParams& p [[buffer(2)]],
+                                     uint gid [[thread_position_in_grid]]) {
+    uint rc = p.rows * p.cols;
+    if (gid >= p.batch * rc) return;
+    uint b = gid / rc, rem = gid % rc;
+    uint r = rem / p.cols, c = rem % p.cols;
+    out[b * rc + c * p.rows + r] = input[gid];
+}
+
+struct StDwBatchParams { uint channels; uint length; uint ksize; uint pad; uint dilation; uint batch; };
+kernel void st_dwconv1d_edge_batched_kernel(device const float* input  [[buffer(0)]],  // [B,C,T]
+                                            device const float* weight [[buffer(1)]],  // [C,K]
+                                            device const float* bias   [[buffer(2)]],  // [C]
+                                            device float*       output [[buffer(3)]],  // [B,C,T]
+                                            constant StDwBatchParams& p [[buffer(4)]],
+                                            uint gid [[thread_position_in_grid]]) {
+    uint cl = p.channels * p.length;
+    if (gid >= p.batch * cl) return;
+    uint b = gid / cl, rem = gid % cl;
+    uint c = rem / p.length, t = rem % p.length;
+    uint in_base = b * cl + c * p.length;
+    uint w_base = c * p.ksize;
+    float sum = bias[c];
+    for (uint k = 0; k < p.ksize; ++k) {
+        int ip = int(t) + int(k) * int(p.dilation) - int(p.pad);
+        if (ip < 0) ip = 0;
+        if (ip >= int(p.length)) ip = int(p.length) - 1;
+        sum = fma(input[in_base + uint(ip)], weight[w_base + k], sum);
+    }
+    output[gid] = sum;
+}
+
+// out[b,d,t] = residual[b,d,t] + gamma[d]·h[b*L+t, d]  (h row-major [B·L, dim]).
+struct LavaGammaBatchParams { uint dim; uint length; uint batch; };
+kernel void lava_gamma_residual_batched_kernel(device const float* h        [[buffer(0)]],  // [B·L, dim]
+                                               device const float* residual [[buffer(1)]],  // [B,dim,L]
+                                               device const float* gamma    [[buffer(2)]],  // [dim]
+                                               device float*       output   [[buffer(3)]],  // [B,dim,L]
+                                               constant LavaGammaBatchParams& p [[buffer(4)]],
+                                               uint gid [[thread_position_in_grid]]) {
+    uint dl = p.dim * p.length;
+    if (gid >= p.batch * dl) return;
+    uint b = gid / dl, rem = gid % dl;
+    uint d = rem / p.length, t = rem % p.length;
+    output[gid] = residual[gid] + gamma[d] * h[(b * p.length + t) * p.dim + d];
+}
+
+// Broadcast-add a length-C vector across T for each batch (channel-major [B,C,T]).
+kernel void st_add_col_batched_kernel(device const float* x   [[buffer(0)]],  // [B,C,T]
+                                      device const float* vec [[buffer(1)]],  // [C]
+                                      device float*       out [[buffer(2)]],  // [B,C,T]
+                                      constant LavaGammaBatchParams& p [[buffer(3)]],
+                                      uint gid [[thread_position_in_grid]]) {
+    uint dl = p.dim * p.length;
+    if (gid >= p.batch * dl) return;
+    uint rem = gid % dl;
+    out[gid] = x[gid] + vec[rem / p.length];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 //  Supertonic 3 kernels
 //  Flow-matching latent TTS. Feature maps are channel-major [C, T] unless noted
 //  row-major [T, C]. ConvNeXt reuses lava_dwconv1d / lava_gamma_residual / matmul
@@ -677,6 +759,45 @@ kernel void st_rope_kernel(device const float* x   [[buffer(0)]],   // [L, H*D]
     float x1 = x[base + i + hf];
     out[base + i]      = x0 * c - x1 * s;
     out[base + i + hf] = x0 * s + x1 * c;
+}
+
+// ── Rotate-half RoPE with normalised position (vector_field cross-attention) ──
+// Matches the reference: angle[pos,f] = (pos/len)·theta[f], theta a stored table.
+// x is [n, H*D] row-major, interleaved heads; rotates the (f, f+D/2) pair per head.
+// One thread per (pos, head, f<D/2). Writes to a separate output buffer.
+struct StRopeNormParams { uint n; uint len; uint num_heads; uint head_dim; };
+
+kernel void st_rope_norm_kernel(device const float* x     [[buffer(0)]],
+                                device float*       out   [[buffer(1)]],
+                                device const float* theta [[buffer(2)]],  // [head_dim/2]
+                                constant StRopeNormParams& p [[buffer(3)]],
+                                uint gid [[thread_position_in_grid]]) {
+    uint hf = p.head_dim / 2u;
+    uint total = p.n * p.num_heads * hf;
+    if (gid >= total) return;
+    uint f = gid % hf;
+    uint h = (gid / hf) % p.num_heads;
+    uint pos = gid / (hf * p.num_heads);
+    float ang = (float(pos) / float(p.len)) * theta[f];
+    float c = cos(ang), s = sin(ang);
+    uint base = pos * p.num_heads * p.head_dim + h * p.head_dim;
+    float x0 = x[base + f];
+    float x1 = x[base + hf + f];
+    out[base + f]      = x0 * c - x1 * s;
+    out[base + hf + f] = x0 * s + x1 * c;
+}
+
+// ── CFG Euler combine: out = x + (w1·vCond − w2·vUncond)/total_step ───────────
+struct StCfgParams { uint size; float w1; float w2; float inv_total; };
+
+kernel void st_cfg_euler_kernel(device const float* x       [[buffer(0)]],
+                                device const float* vCond   [[buffer(1)]],
+                                device const float* vUncond [[buffer(2)]],
+                                device float*       out     [[buffer(3)]],
+                                constant StCfgParams& p [[buffer(4)]],
+                                uint gid [[thread_position_in_grid]]) {
+    if (gid >= p.size) return;
+    out[gid] = x[gid] + (p.w1 * vCond[gid] - p.w2 * vUncond[gid]) * p.inv_total;
 }
 
 // ── Masked multi-head attention (self or cross) ──────────────────────────────

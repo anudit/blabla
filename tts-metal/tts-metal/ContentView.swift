@@ -44,7 +44,7 @@ struct ContentView: View {
             Image(systemName: controller.menuBarIcon)
                 .foregroundStyle(controller.statusColor)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Kitten TTS · Metal").font(.headline)
+                Text("Supertonic 3 · Metal").font(.headline)
                 Text(controller.statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -93,8 +93,8 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Voice").frame(width: 48, alignment: .leading)
-                Picker("", selection: $controller.voiceKey) {
-                    ForEach(TtsConfig.voiceKeys, id: \.self) { Text($0).tag($0) }
+                Picker("", selection: $controller.supertonicVoice) {
+                    ForEach(["david-deep", "M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"], id: \.self) { Text($0).tag($0) }
                 }
                 .labelsHidden()
             }
@@ -104,43 +104,6 @@ struct ContentView: View {
                 Text(String(format: "%.1f×", controller.speed))
                     .monospacedDigit()
                     .frame(width: 40, alignment: .trailing)
-            }
-            Toggle(isOn: $controller.enhanceEnabled) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Enhance audio (LavaSR v2)")
-                    Text(controller.enhancerReady ? "Denoise + upsample to 48 kHz"
-                                                   : "Loading model…")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .disabled(!controller.enhancerReady || controller.useSupertonic)
-
-            Divider()
-
-            Toggle(isOn: $controller.useSupertonic) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Use Supertonic 3")
-                    Text(controller.supertonicReady ? "Flow-matching TTS · 44.1 kHz · multilingual"
-                                                     : "Loading models…")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .disabled(!controller.supertonicReady)
-
-            if controller.useSupertonic {
-                HStack {
-                    Text("Voice").frame(width: 48, alignment: .leading)
-                    Picker("", selection: $controller.supertonicVoice) {
-                        ForEach(["david-deep", "M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"], id: \.self) { Text($0).tag($0) }
-                    }
-                    .labelsHidden()
-                }
             }
         }
     }

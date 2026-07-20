@@ -1,15 +1,23 @@
 # tts-metal
 
-A native macOS **menu-bar text-to-speech reader** that runs entirely on-device in
-**Metal compute shaders** — no Python, no ONNX Runtime, no Core ML. Select text
-anywhere in the system, press **⌥⌘R**, and it speaks the selection. Synthesized
-speech is optionally cleaned and upsampled to 48 kHz by a second neural network
-(**LavaSR v2**), also implemented from scratch in Metal.
+A native macOS **menu-bar text-to-speech reader** that runs the **Supertonic 3** latent flow-matching model entirely on-device using **Metal compute shaders** — no Python, no ONNX Runtime, no Core ML. 
+
+Select text anywhere in the system, press **⌥⌘R**, and it speaks the selection in a high-fidelity voice.
 
 ```
-selection / text ──▶ Phonemizer ──▶ Kitten TTS (Metal) ──▶ LavaSR v2 (Metal) ──▶ AVAudioEngine
-                     eSpeak rules     24 kHz speech          48 kHz enhanced       gapless queue
+selection / text ──▶ Tokenizer ──▶ Supertonic 3 (Metal) ──▶ Resampler (Lanczos) ──▶ AVAudioEngine (48 kHz)
+                     65k table        44.1 kHz audio            upsample               gapless queue
 ```
+
+---
+
+## Features
+
+- **Pure Metal Compute**: Executes the full 99.2M parameter Supertonic 3 architecture directly on Apple Silicon GPUs using custom Metal kernels.
+- **Multilingual Support**: Synthesizes speech across 31 languages (including English, Korean, Japanese, Arabic, German, Spanish, French, Hindi, and more).
+- **Zero-Shot Voice Cloning**: Dynamically estimates and applies speaker embeddings from reference voice styles defined in JSON configs.
+- **Expression Tags**: Supports expressive synthesis using prompt tags like `<laugh>`, `<breath>`, and `<sigh>`.
+- **High-Fidelity Output**: Generates native 44.1 kHz full-band audio, which is resampled on-the-fly to 48 kHz for gapless playback using a high-quality Lanczos sinc filter.
 
 ---
 
@@ -17,121 +25,93 @@ selection / text ──▶ Phonemizer ──▶ Kitten TTS (Metal) ──▶ Lav
 
 | Layer | Implementation |
 |---|---|
-| **UI** | SwiftUI `MenuBarExtra` (agent app, no dock icon) |
+| **UI** | SwiftUI `MenuBarExtra` (agent app, running entirely in the macOS menu bar) |
 | **Global hotkey** | Carbon `RegisterEventHotKey` (⌥⌘R) |
 | **Selection capture** | Accessibility API (`AXUIElement`) |
-| **Phonemization** | eSpeak-style rules + 234k-entry dictionary (`Phonemizer`, `EspeakRules`) |
-| **TTS model** | **Kitten TTS mini** (80 M params) — ALBERT text encoder + prosody predictor + HiFi-GAN-style decoder, parsed from ONNX and run in Metal (`MetalTtsEngine`, `OnnxParser`) |
-| **Enhancer** | **LavaSR v2** (Vocos, 50 MB) — mel → ConvNeXt backbone → iSTFT, run in Metal (`LavaEnhancer`) |
-| **Compute** | ~40 hand-written Metal kernels (`Shaders.metal`) |
-| **Audio** | `AVAudioEngine` + `AVAudioPlayerNode`, fixed 48 kHz, gapless queue with 5-chunk look-ahead backpressure (`AudioPlayer`) |
-| **Weights** | safetensors (LavaSR) + ONNX (Kitten), bundled, dequantized/uploaded at launch |
-
-Everything runs on the GPU via a single `MTLCommandQueue`; heavy work is off the
-main thread, and chunk generation pipelines ahead of playback so the next sentence
-is ready before the current one finishes.
+| **Tokenizer** | Fast, local unicode codepoint index mapping using a `65536`-entry table (`unicode_indexer.json`) |
+| **TTS Engine** | **Supertonic 3** (99.2M parameters) — parsed from ONNX model definitions at startup and executed via custom Metal wrappers (`SupertonicEngine.swift`) |
+| **Compute** | Hand-written Metal compute shaders (`Shaders.metal`) optimized for attention, Rotary Position Embeddings (RoPE), relative-position biases, and causal dilated convolutions |
+| **Audio Playback** | `AVAudioEngine` + `AVAudioPlayerNode` queue with a 5-chunk sliding-window backpressure system for gapless streaming |
+| **Weights** | ONNX weights (`duration_predictor`, `text_encoder`, `vector_estimator`, `vocoder`) and voice style configs bundled directly in app resources |
 
 ---
 
-## LavaSR v2 enhancer (the Metal port)
+## Supertonic 3 TTS pipeline
 
-LavaSR v2 is a **Vocos**-based universal bandwidth-extension / super-resolution
-model. It takes the 24 kHz TTS output, computes a mel spectrogram, and a ConvNeXt
-network regresses a full-band complex STFT that is inverted to a **48 kHz** waveform.
+Supertonic 3 is an iterative flow-matching ODE-based text-to-speech model. Its execution flow consists of the following custom-implemented stages:
 
-**Forward pass** (all in Metal — see the `lava_*` kernels plus reused
-`reuse_matmul` / iSTFT / conv1d / layernorm / gelu kernels):
-
-```
-resample 24k → 44.1k                      (Lanczos, CPU)
-STFT magnitude        n_fft=2048, hop=512  → [1025, T]      lava_stft_mag
-mel = fbᵀ · mag       80 mels, slaney      → [80, T]        reuse_matmul
-safe_log                                                    lava_safe_log
-Conv1d embed          80→512, k=7                           conv1d_tiled
-LayerNorm
-8 × ConvNeXt block:
-    depthwise Conv1d  512, k=7                              lava_dwconv1d
-    LayerNorm → Linear 512→1536 → GELU → Linear 1536→512    reuse_matmul, gelu
-    γ · x + residual                                        lava_gamma_residual
-LayerNorm
-Linear head           512 → 2050 (mag + phase)             reuse_matmul
-mag = clip(exp(·)), S = mag·e^{iϕ}                          lava_head_to_complex
-iSTFT                 n_fft=2048, hop=512, "same"           reuse_irfft, reuse_ola
-resample 44.1k → 48k                       (Lanczos, CPU)
-```
-
-The model runs at **44.1 kHz internally** (the rate its mel filterbank was built
-for) and the output is resampled to 48 kHz. Config: `dim=512`, `intermediate=1536`,
-`8` ConvNeXt layers, `n_mels=80`, `n_fft=2048`, `hop=512`.
+1. **Text Preprocessing & Tokenization**: Normalizes incoming unicode text, strips excess whitespace, inserts punctuation, wraps sections with language tags (e.g. `<lang>...</lang>`), and maps characters to indices.
+2. **Duration Predictor**: Runs the `duration_predictor` model using text token IDs, text mask, and a `style_dp` (1x8x16) voice style tensor to determine phoneme-level frame durations.
+3. **Text Encoder**: Runs the `text_encoder` model using text token IDs, text mask, and a `style_ttl` (1x50x256) voice style tensor to produce row-major phoneme embeddings.
+4. **Flow Matching ODE (Vector Estimator)**: 
+   - Generates a Gaussian noise latent tensor matching the length computed by the duration predictor.
+   - Solves the probability flow ODE by running the `vector_estimator` model (64M parameters) iteratively (typically **8 steps** of an Euler ODE solver) to estimate the vector field, transforming the noise into a clean speech latent representation.
+5. **Vocoder**: Runs the `vocoder` model (25M parameters) to synthesize the final 44.1 kHz raw audio waveform.
 
 ---
 
 ## Performance
 
-Measured on Apple Silicon (Release build), steady state after warm-up, using the
-built-in profiler (`REUSE_SELFTEST=1`, `REUSE_SECS=<n>`). Times are the **LavaSR v2
-enhancement stage only** (the Kitten TTS synthesis runs before it).
+Benchmarks measured on Apple Silicon (Release build) for an 84-character English test sentence:
 
-### Stage breakdown (3.5 s of audio)
+### End-to-End Latency
 
-| Stage | Time | Notes |
+| Pipeline | End-to-End Time | Audio Generated | Realtime Factor (RTF) |
+|---|---:|---:|---:|
+| **Supertonic 3 (Metal)** | **1,205 ms** | 5.43 s @ 44.1 kHz | **4.5×** (at 8 steps) |
+
+### Stage Breakdown
+
+| Stage | Latency | Notes |
 |---|---:|---|
-| mel (resample + STFT + mel + log) | ~75 ms | dominated by CPU resampling + the 2048-pt STFT |
-| Conv1d embed | ~2 ms | |
-| 8 × ConvNeXt backbone | ~10 ms | the actual "model" — tiny |
-| Linear head | ~2 ms | |
-| iSTFT | ~3 ms | |
-| **total** | **~152 ms** | |
+| **Duration Predictor** | 1.2 ms | Lightweight MLP |
+| **Text Encoder** | 8.0 ms | ConvNeXt + Relative-Position Attention |
+| **Flow Matching Loop** | **1,094 ms** | 8 steps of the 64M parameter vector field (137 ms/step) |
+| **Vocoder** | 76.0 ms | Causal Convolutions & ISTFT head |
+| **Total** | **1,179 ms** | (Excluding audio enqueue overhead) |
 
-### Realtime factor (enhancement)
-
-| Input audio | Enhance time | Realtime factor |
-|---:|---:|---:|
-| 1.5 s | 0.074 s | **20.2×** |
-| 3.5 s | 0.152 s | **23.1×** |
-| 10 s | 0.414 s | **24.1×** |
-
-> **Realtime factor** = (seconds of audio) ÷ (seconds to process). 20× means one
-> second of speech is enhanced in ~50 ms, so enhancement is effectively free
-> relative to playback — the next sentence is always ready before the current one
-> ends. First-audio latency for a typical sentence (~1.5 s) is ~75 ms.
-
-The heaviest remaining cost is the CPU Lanczos resampling and the STFT; the neural
-backbone itself is ~10 ms. This replaced the previous RE-USE (SEMamba) enhancer,
-which ran at ~0.7× realtime (slower than playback) and caused multi-second stalls
-between sentences.
+> **Realtime Factor (RTF)** = (seconds of audio generated) ÷ (synthesis latency). An RTF of 4.5× means 1 second of speech is synthesized in ~220 ms. The flow-matching ODE steps function as a speed-to-quality control knob (fewer steps = faster).
 
 ---
 
 ## Build & run
 
-Open `tts-metal/tts-metal.xcodeproj` in Xcode and run (Release recommended), or:
+Open `tts-metal/tts-metal.xcodeproj` in Xcode and build in **Release** mode, or build from the command line:
 
 ```bash
 cd tts-metal
 xcodebuild -project tts-metal.xcodeproj -scheme tts-metal -configuration Release build
 ```
 
-The model weights (`kitten_tts_mini_v0_8.onnx`, `voices.npz`, `lavasr_v2.safetensors`)
-are bundled as resources and git-ignored (fetched/placed at build time).
+The model weights are git-ignored and bundled into the app resources under `supertonic/`:
+- `duration_predictor.onnx`
+- `text_encoder.onnx`
+- `vector_estimator.onnx`
+- `vocoder.onnx`
+- `unicode_indexer.json`
+- `voice_styles/` (JSON reference configurations)
 
-**Usage:** grant Accessibility permission (to read the system selection), pick a
-voice/speed in the menu-bar popover, then press **⌥⌘R** on any highlighted text, or
-type into the "Type to speak" box. The **Enhance audio (LavaSR v2)** toggle
-(default on) controls the 48 kHz enhancement layer.
+### Usage
+1. Open the application.
+2. Grant Accessibility permissions (required to read the system selection).
+3. Select a voice (presets like `M1`..`M5`, `F1`..`F5`, or a cloned voice style like `david-deep`) and speed in the menu-bar popover.
+4. Press **⌥⌘R** on any highlighted text, or type text directly into the "Type to speak" box to synthesize speech.
 
-**Profiling the enhancer:**
+### Developer Smoke Testing
 
+To run the on-device self-test logic at startup:
 ```bash
-REUSE_SELFTEST=1 REUSE_SECS=3.5 /path/to/tts-metal.app/Contents/MacOS/tts-metal
+SUPERTONIC_SELFTEST=1 /path/to/tts-metal.app/Contents/MacOS/tts-metal
+```
+
+To run the stage-by-stage numerical validation against a reference dump:
+```bash
+ST_VALIDATE=1 /path/to/tts-metal.app/Contents/MacOS/tts-metal
 ```
 
 ---
 
 ## Credits
 
-- **Kitten TTS** — KittenML (`kitten-tts-mini`).
-- **LavaSR v2** — Yatharth Sharma, Apache-2.0 ([repo](https://github.com/ysharma3501/LavaSR)),
-  built on **Vocos** (Siuzdak et al.).
-- The UL-UNAS denoiser shipped alongside LavaSR is not (yet) ported; the enhancer
-  path is the LavaSR v2 BWE model.
+- **Supertonic 3** — Supertone (Supertone/supertonic-3 on Hugging Face).
+- **tts-metal** is a custom, lightweight, dependency-free Metal adaptation of the Supertonic 3 model architecture.

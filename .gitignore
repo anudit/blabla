@@ -28,3 +28,7 @@ Lava_SR/
 
 # RE-USE enhancer weights (bundled at build time)
 tts-metal/tts-metal/lavasr_v2.safetensors
+tts-metal.app.dSYM
+tts_metal.swiftmodule
+clone
+tools

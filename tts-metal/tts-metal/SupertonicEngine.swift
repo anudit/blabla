@@ -193,7 +193,7 @@ final class SupertonicEngine: @unchecked Sendable {
 
         // Cache film weights and biases
         let allVfInits = W["vf"]!
-        
+
         func blockIndex(of name: String) -> Int {
             if let range = name.range(of: "main_blocks.") {
                 let suffix = name[range.upperBound...]
@@ -213,7 +213,7 @@ final class SupertonicEngine: @unchecked Sendable {
         }
         tempWeights.sort(by: { blockIndex(of: $0.0) < blockIndex(of: $1.0) })
         self.filmWeights = tempWeights.map { $0.1 }
-        
+
         var tempBiases: [(String, MTLBuffer)] = []
         for (name, wt) in allVfInits {
             if name.contains("linear.linear.bias") {
@@ -282,7 +282,7 @@ final class SupertonicEngine: @unchecked Sendable {
 
     private func loadVoices() throws {
         // voice_styles/*.json each has style_ttl [1,50,256] and style_dp [1,8,16]
-        let names = ["F1","F2","F3","F4","F5","M1","M2","M3","M4","M5"]
+        let names = ["david-deep", "F1","F2","F3","F4","F5","M1","M2","M3","M4","M5"]
         for name in names {
             guard let url = Bundle.main.url(forResource: name, withExtension: "json",
                                             subdirectory: "voice_styles") ??
@@ -379,11 +379,11 @@ final class SupertonicEngine: @unchecked Sendable {
 
         lastTimings = timings
         if profile { for t in timings { print(String(format: "[Supertonic] %-20s %.1f ms", (t.name as NSString).utf8String!, t.ms)) } }
-        
+
         let wavMean = wav.reduce(0, +) / Float(wav.count)
         let wavVar = wav.map { ($0 - wavMean) * ($0 - wavMean) }.reduce(0, +) / Float(wav.count)
         print(String(format: "[Stats] wav: count=%d mean=%.6f std=%.6f min=%.6f max=%.6f", wav.count, wavMean, sqrt(wavVar), wav.min() ?? 0, wav.max() ?? 0))
-        
+
         return wav
     }
 
@@ -405,7 +405,7 @@ final class SupertonicEngine: @unchecked Sendable {
         // char embedding: gather rows of char_embedder weight [V, C] → x[C, T] (channel-major)
         var x = try embedChannelMajor(ns: "te", embName: findWeight("te", contains: "char_embedder"), ids: ids, T: T, C: C)
         printBufStats("x after embed", x, count: C * T)
-        
+
         // ConvNeXt stack
         for i in 0..<config.teConvNextLayers {
             x = try convNextLayer(ns: "te", prefix: convnextPrefix("te", "convnext.convnext.\(i)"),
@@ -570,7 +570,7 @@ final class SupertonicEngine: @unchecked Sendable {
         let table = readBuf(emb, count: 8322 * 64) // V=8322, C=64
         let sentToken = readBuf(sent, count: 64) // [1, 64, 1]
         let idArr = readIntBuf(ids, count: T)
-        
+
         var out = [Float](repeating: 0, count: 64 * (T + 1))
         for c in 0..<64 {
             out[c * (T + 1)] = sentToken[c]
@@ -586,28 +586,28 @@ final class SupertonicEngine: @unchecked Sendable {
         return try autoreleasepool {
             let C = 64
             var x = try dpEmbedAndConcat(ids: ids, T: T)
-            
+
             // 6 ConvNeXt layers
             for i in 0..<6 {
                 x = try convNextLayer(ns: "dp", prefix: "sentence_encoder.convnext.convnext.\(i)",
                                       x: x, C: C, T: T + 1, ksz: 5, dil: [1, 1, 2, 2, 4, 4][i], inter: 256)
             }
             let convnextOut = x
-            
+
             // 2 rel-pos attention encoder layers
             var xt = try toRowMajor(x, rows: C, cols: T + 1)
             for i in 0..<2 {
                 xt = try relAttnBlock(ns: "dp", layer: i, x: xt, T: T + 1, C: C, heads: 2, filter: 256)
             }
-            
+
             let attn_out = try toChannelMajor(xt, rows: T + 1, cols: C)
             let addOut = empty(C * (T + 1))
             dispatchAdd(a: attn_out, b: convnextOut, out: addOut, size: C * (T + 1))
-            
+
             let addArr = readBuf(addOut, count: C * (T + 1))
             var token0 = [Float](repeating: 0, count: C)
             for c in 0..<C { token0[c] = addArr[c * (T + 1)] }
-            
+
             guard let projW = rawWeight("dp", "sentence_encoder.proj_out.net.weight") else {
                 throw err("dp proj_out weight missing")
             }
@@ -617,34 +617,34 @@ final class SupertonicEngine: @unchecked Sendable {
                 for i in 0..<C { sum += token0[i] * projW[c * C + i] }
                 token0Proj[c] = sum
             }
-            
+
             guard let w0 = rawWeight("dp", "predictor.layers.0.weight"),
                   let b0 = rawWeight("dp", "predictor.layers.0.bias"),
                   let w1 = rawWeight("dp", "predictor.layers.1.weight"),
                   let b1 = rawWeight("dp", "predictor.layers.1.bias"),
                   let actW = rawWeight("dp", "predictor.activation.weight")
             else { throw err("dp MLP weights missing") }
-            
+
             let styleDpArr = readBuf(styleDp, count: 128)
             var combined = token0Proj + styleDpArr
-            
+
             var h = [Float](repeating: 0, count: 128)
             for j in 0..<128 {
                 var sum = b0[j]
                 for i in 0..<192 { sum += combined[i] * w0[j * 192 + i] }
                 h[j] = sum
             }
-            
+
             let slope = actW[0]
             var hAct = [Float](repeating: 0, count: 128)
             for j in 0..<128 { hAct[j] = h[j] > 0 ? h[j] : h[j] * slope }
-            
+
             var outVal = b1[0]
             for j in 0..<128 { outVal += hAct[j] * w1[j] }
-            
+
             let durSeconds = exp(outVal) / speed
             print("[DurationPredict] predicted duration = \(durSeconds) s")
-            
+
             let chunkSize = Double(512 * config.chunkCompress)
             let L = Int((Double(durSeconds) * Double(config.sampleRate) / chunkSize).rounded(.up))
             return max(1, L)
@@ -1161,22 +1161,22 @@ final class SupertonicEngine: @unchecked Sendable {
               let mean = W[ns]?["tts.ae.decoder.final_norm.norm.running_mean"],
               let var_ = W[ns]?["tts.ae.decoder.final_norm.norm.running_var"]
         else { return x }
-        
+
         let w_arr = readBuf(w.buf, count: C)
         let b_arr = readBuf(b.buf, count: C)
         let mean_arr = readBuf(mean.buf, count: C)
         let var_arr = readBuf(var_.buf, count: C)
-        
+
         var scale = [Float](repeating: 0, count: C)
         var shift = [Float](repeating: 0, count: C)
         let eps: Float = 1e-5
-        
+
         for c in 0..<C {
             let s = w_arr[c] / sqrt(var_arr[c] + eps)
             scale[c] = s
             shift[c] = b_arr[c] - mean_arr[c] * s
         }
-        
+
         let scaleBuf = makeBuf(scale)
         let shiftBuf = makeBuf(shift)
         let out = empty(C * T)
@@ -1215,7 +1215,7 @@ final class SupertonicEngine: @unchecked Sendable {
               let slope = weightBuf(ns, "onnx::PRelu_1506"),
               let w2 = weightBuf(ns, "tts.ae.decoder.head.layer2.weight")
         else { throw err("missing vocoder head weights") }
-        
+
         let h1 = empty(2048 * T)
         dispatchCausalConv1d(input: h, weight: w1, bias: b1, out: h1, inCh: hdim, outCh: 2048, ksz: 3, L: T, dil: 1)
 
@@ -1224,10 +1224,10 @@ final class SupertonicEngine: @unchecked Sendable {
 
         let h2 = empty(512 * T)
         dispatchCausalConv1d(input: h1_act, weight: w2, bias: nil, out: h2, inCh: 2048, outCh: 512, ksz: 1, L: T, dil: 1)
-        
+
         let wavBuf = empty(512 * T)
         dispatchTranspose(input: h2, out: wavBuf, rows: 512, cols: T)
-        
+
         return readBuf(wavBuf, count: 512 * T)
     }
 
@@ -1283,25 +1283,25 @@ final class SupertonicEngine: @unchecked Sendable {
 
     private func weightBuf(_ ns: String, _ contains: String) -> MTLBuffer? {
         if let w = W[ns]?[contains] { return w.buf }
-        
+
         // Resolve via alias map
         let normalized = contains
             .replacingOccurrences(of: "vector_estimator.tts.ttl.", with: "")
             .replacingOccurrences(of: "tts.ttl.", with: "")
             .replacingOccurrences(of: "speech_prompted_text_encoder.", with: "")
             .replacingOccurrences(of: "tts.ae.", with: "")
-        
+
         if let alias = weightAliasMap[normalized] {
             if let w = W[ns]?[alias] { return w.buf }
         }
-        
+
         if normalized.hasSuffix(".weight") {
             let matmulKey = normalized.replacingOccurrences(of: ".weight", with: ".MatMul.weight")
             if let alias = weightAliasMap[matmulKey] {
                 if let w = W[ns]?[alias] { return w.buf }
             }
         }
-        
+
         // suffix / substring match
         if let hit = W[ns]?.first(where: { $0.key.hasSuffix(contains) || $0.key.contains(contains) }) {
             print("[WeightBuf] matched '\(contains)' to '\(hit.key)'")

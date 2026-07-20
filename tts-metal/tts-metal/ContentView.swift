@@ -137,7 +137,7 @@ struct ContentView: View {
                 HStack {
                     Text("Voice").frame(width: 48, alignment: .leading)
                     Picker("", selection: $controller.supertonicVoice) {
-                        ForEach(["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"], id: \.self) { Text($0).tag($0) }
+                        ForEach(["david-deep", "M1","M2","M3","M4","M5","F1","F2","F3","F4","F5"], id: \.self) { Text($0).tag($0) }
                     }
                     .labelsHidden()
                 }

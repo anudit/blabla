@@ -437,6 +437,92 @@ kernel void reuse_matmul_kernel(device const float* A    [[buffer(0)]],
     }
 }
 
+// ── Register-blocked GEMM with fused activation (GELU / ReLU) ────────────────
+// Same 64×64 tiling as reuse_matmul_kernel; applies an activation at store so the
+// ConvNeXt pointwise convs (pwconv1+GELU, attn FFN conv_1+ReLU) fuse the epilogue
+// and avoid a separate elementwise pass. act: 0 = none, 1 = GELU(tanh), 2 = ReLU.
+static inline float reuse_activate(float x, uint act) {
+    if (act == 1u) {
+        float inner = clamp(0.7978845608f * (x + 0.044715f * x * x * x), -44.0f, 44.0f);
+        return 0.5f * x * (1.0f + tanh(inner));
+    } else if (act == 2u) {
+        return max(x, 0.0f);
+    }
+    return x;
+}
+
+template <uint ACT>
+static inline void reuse_matmul_act_impl(device const float* A, device const float* B,
+                                         device const float* bias, device float* out,
+                                         constant MatmulParams& p, uint2 tgid, uint lid,
+                                         threadgroup float* As, threadgroup float* Bs) {
+    constexpr uint BM = 64, BN = 64, BK = 16, TM = 4, TN = 4;
+    uint bm0 = tgid.y * BM;
+    uint bn0 = tgid.x * BN;
+    uint tRow = lid / 16;
+    uint tCol = lid % 16;
+    float acc[TM][TN];
+    for (uint i = 0; i < TM; ++i) for (uint j = 0; j < TN; ++j) acc[i][j] = 0.0;
+    uint M = p.M, K = p.K, N = p.N;
+    for (uint k0 = 0; k0 < K; k0 += BK) {
+        for (uint i = lid; i < BM * BK; i += 256) {
+            uint r = i / BK, c = i % BK;
+            uint gr = bm0 + r, gc = k0 + c;
+            As[i] = (gr < M && gc < K) ? A[gr * K + gc] : 0.0;
+        }
+        for (uint i = lid; i < BK * BN; i += 256) {
+            uint r = i / BN, c = i % BN;
+            uint gr = k0 + r, gc = bn0 + c;
+            Bs[i] = (gr < K && gc < N) ? B[gr * N + gc] : 0.0;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kk = 0; kk < BK; ++kk) {
+            float af[TM], bf[TN];
+            for (uint i = 0; i < TM; ++i) af[i] = As[(tRow * TM + i) * BK + kk];
+            for (uint j = 0; j < TN; ++j) bf[j] = Bs[kk * BN + tCol * TN + j];
+            for (uint i = 0; i < TM; ++i)
+                for (uint j = 0; j < TN; ++j)
+                    acc[i][j] = fma(af[i], bf[j], acc[i][j]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint i = 0; i < TM; ++i) {
+        uint gr = bm0 + tRow * TM + i;
+        if (gr >= M) continue;
+        for (uint j = 0; j < TN; ++j) {
+            uint gc = bn0 + tCol * TN + j;
+            if (gc >= N) continue;
+            float v = acc[i][j];
+            if (p.use_bias != 0u) v += bias[gc];
+            out[gr * N + gc] = reuse_activate(v, ACT);
+        }
+    }
+}
+
+kernel void reuse_matmul_gelu_kernel(device const float* A    [[buffer(0)]],
+                                     device const float* B    [[buffer(1)]],
+                                     device const float* bias [[buffer(2)]],
+                                     device float*       out  [[buffer(3)]],
+                                     constant MatmulParams& p [[buffer(4)]],
+                                     uint2 tgid [[threadgroup_position_in_grid]],
+                                     uint2 lid2 [[thread_position_in_threadgroup]]) {
+    threadgroup float As[64 * 16];
+    threadgroup float Bs[16 * 64];
+    reuse_matmul_act_impl<1u>(A, B, bias, out, p, tgid, lid2.x, As, Bs);
+}
+
+kernel void reuse_matmul_relu_kernel(device const float* A    [[buffer(0)]],
+                                     device const float* B    [[buffer(1)]],
+                                     device const float* bias [[buffer(2)]],
+                                     device float*       out  [[buffer(3)]],
+                                     constant MatmulParams& p [[buffer(4)]],
+                                     uint2 tgid [[threadgroup_position_in_grid]],
+                                     uint2 lid2 [[thread_position_in_threadgroup]]) {
+    threadgroup float As[64 * 16];
+    threadgroup float Bs[16 * 64];
+    reuse_matmul_act_impl<2u>(A, B, bias, out, p, tgid, lid2.x, As, Bs);
+}
+
 // ── Tiled 2D convolution: one threadgroup per output channel, weights cached ──
 // in threadgroup memory and reused across all spatial positions. Used when the
 // per-channel weight row (in_ch*kh*kw) fits the tile; the dense blocks (256*3*3

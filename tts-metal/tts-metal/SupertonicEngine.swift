@@ -22,6 +22,7 @@
 
 import Foundation
 import Metal
+import Accelerate
 
 final class SupertonicEngine: @unchecked Sendable {
 
@@ -235,7 +236,7 @@ final class SupertonicEngine: @unchecked Sendable {
             "conv1d_kernel", "conv1d_tiled_kernel", "gelu_kernel", "tanh_kernel", "sigmoid_kernel",
             "add_kernel", "scale_kernel", "add_scale_kernel", "softmax_kernel",
             "lava_dwconv1d_kernel", "lava_gamma_residual_kernel", "reuse_prelu_kernel",
-            "reuse_matmul_kernel",
+            "reuse_matmul_kernel", "reuse_matmul_gelu_kernel", "reuse_matmul_relu_kernel",
             // new Supertonic kernels
             "st_gelu_erf_kernel", "st_softplus_kernel", "st_film_kernel", "st_add_col_kernel",
             "st_rope_kernel", "st_mha_kernel", "st_rel_attn_kernel", "st_sinusoid_kernel",
@@ -454,17 +455,72 @@ final class SupertonicEngine: @unchecked Sendable {
 
     /// CPU matmul: out[M,N] = A[M,K] · W[K,N] (+ bias[N]).  W is row-major [in,out]
     /// exactly as stored in ONNX (used as the B operand of an ONNX MatMul → no transpose).
+    /// Uses Accelerate BLAS (multi-threaded, vectorized) — the flow-matching cross
+    /// attentions used to run this as a scalar triple loop, which was the CPU hang.
     private func cpuMatmul(_ A: [Float], _ W: [Float], _ bias: [Float]?, M: Int, K: Int, N: Int) -> [Float] {
         var out = [Float](repeating: 0, count: M * N)
-        for m in 0..<M {
-            for n in 0..<N {
-                var acc: Float = bias?[n] ?? 0
-                let aoff = m * K
-                for k in 0..<K { acc += A[aoff + k] * W[k * N + n] }
-                out[m * N + n] = acc
+        A.withUnsafeBufferPointer { ap in
+            W.withUnsafeBufferPointer { wp in
+                out.withUnsafeMutableBufferPointer { op in
+                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                                Int32(M), Int32(N), Int32(K), 1.0,
+                                ap.baseAddress, Int32(K),
+                                wp.baseAddress, Int32(N), 0.0,
+                                op.baseAddress, Int32(N))
+                }
+            }
+        }
+        if let bias = bias {
+            for m in 0..<M {
+                let off = m * N
+                for n in 0..<N { out[off + n] += bias[n] }
             }
         }
         return out
+    }
+
+    /// BLAS multi-head cross-attention. Q:[n,Dq], K/V:[m,Dq] with `heads` heads of
+    /// width `hd` interleaved (head h at column offset h*hd, row stride Dq). Returns
+    /// ctx:[n,Dq]. `tanhK` applies tanh to keys first (style attention). Replaces the
+    /// scalar per-(head,pos,pos) triple loops that dominated flow-matching CPU time.
+    private func blasCrossAttn(Q: [Float], K: [Float], V: [Float], n: Int, m: Int,
+                               Dq: Int, heads: Int, hd: Int, scale: Float, tanhK: Bool) -> [Float] {
+        var Kt = K
+        if tanhK { vForce.tanh(K, result: &Kt) }
+        var ctx = [Float](repeating: 0, count: n * Dq)
+        var scores = [Float](repeating: 0, count: n * m)
+        Q.withUnsafeBufferPointer { qp in
+        Kt.withUnsafeBufferPointer { kp in
+        V.withUnsafeBufferPointer { vp in
+        ctx.withUnsafeMutableBufferPointer { cp in
+        scores.withUnsafeMutableBufferPointer { sp in
+            for h in 0..<heads {
+                let off = h * hd
+                // scores[n,m] = scale · Q_h · K_h^T
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                            Int32(n), Int32(m), Int32(hd), scale,
+                            qp.baseAddress! + off, Int32(Dq),
+                            kp.baseAddress! + off, Int32(Dq), 0.0,
+                            sp.baseAddress!, Int32(m))
+                // row-softmax over the m keys
+                for i in 0..<n {
+                    let base = i * m
+                    var mx = -Float.greatestFiniteMagnitude
+                    for j in 0..<m { mx = max(mx, sp[base + j]) }
+                    var sum: Float = 0
+                    for j in 0..<m { let e = expf(sp[base + j] - mx); sp[base + j] = e; sum += e }
+                    let inv = 1.0 / sum
+                    for j in 0..<m { sp[base + j] *= inv }
+                }
+                // ctx_h[n,hd] = P · V_h
+                cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                            Int32(n), Int32(hd), Int32(m), 1.0,
+                            sp.baseAddress!, Int32(m),
+                            vp.baseAddress! + off, Int32(Dq), 0.0,
+                            cp.baseAddress! + off, Int32(Dq))
+            }
+        }}}}}
+        return ctx
     }
 
     /// speech_prompted_text_encoder — exact CPU port of the ONNX subgraph.
@@ -1019,27 +1075,8 @@ final class SupertonicEngine: @unchecked Sendable {
         applyRope(&Q, L, L)
         applyRope(&K, T, T)
         let scale: Float = 1.0 / 16.0
-        var ctx = [Float](repeating: 0, count: L * C)
-        var scores = [Float](repeating: 0, count: T)
-        for head in 0..<heads {
-            let ho = head * hd
-            for i in 0..<L {
-                var mx = -Float.greatestFiniteMagnitude
-                for j in 0..<T {
-                    var dot: Float = 0
-                    for d in 0..<hd { dot += Q[i * C + ho + d] * K[j * C + ho + d] }
-                    let sc = dot * scale; scores[j] = sc; if sc > mx { mx = sc }
-                }
-                var sum: Float = 0
-                for j in 0..<T { let e = exp(scores[j] - mx); scores[j] = e; sum += e }
-                let inv = 1.0 / sum
-                for d in 0..<hd {
-                    var acc: Float = 0
-                    for j in 0..<T { acc += scores[j] * V[j * C + ho + d] }
-                    ctx[i * C + ho + d] = acc * inv
-                }
-            }
-        }
+        let ctx = blasCrossAttn(Q: Q, K: K, V: V, n: L, m: T, Dq: C,
+                                heads: heads, hd: hd, scale: scale, tanhK: false)
         let O = cpuMatmul(ctx, Wo, bo, M: L, K: C, N: C)      // [L,512]
         return try residualNormCM(O: O, residualR: hR, L: L, C: C, normPrefix: normPrefix)
     }
@@ -1063,27 +1100,8 @@ final class SupertonicEngine: @unchecked Sendable {
         let K = cpuMatmul(styleK, Wk, bk, M: S, K: Dqk, N: Dqk)  // [50,256]
         let Vv = cpuMatmul(styleV, Wv, bv, M: S, K: Dqk, N: Dqk) // [50,256]
         let scale: Float = 1.0 / 16.0
-        var ctx = [Float](repeating: 0, count: L * Dqk)
-        var scores = [Float](repeating: 0, count: S)
-        for head in 0..<heads {
-            let ho = head * hd
-            for i in 0..<L {
-                var mx = -Float.greatestFiniteMagnitude
-                for s in 0..<S {
-                    var dot: Float = 0
-                    for d in 0..<hd { dot += Q[i * Dqk + ho + d] * tanh(K[s * Dqk + ho + d]) }
-                    let sc = dot * scale; scores[s] = sc; if sc > mx { mx = sc }
-                }
-                var sum: Float = 0
-                for s in 0..<S { let e = exp(scores[s] - mx); scores[s] = e; sum += e }
-                let inv = 1.0 / sum
-                for d in 0..<hd {
-                    var acc: Float = 0
-                    for s in 0..<S { acc += scores[s] * Vv[s * Dqk + ho + d] }
-                    ctx[i * Dqk + ho + d] = acc * inv
-                }
-            }
-        }
+        let ctx = blasCrossAttn(Q: Q, K: K, V: Vv, n: L, m: S, Dq: Dqk,
+                                heads: heads, hd: hd, scale: scale, tanhK: true)
         let O = cpuMatmul(ctx, Wo, bo, M: L, K: Dqk, N: C)    // [L,512]
         return try residualNormCM(O: O, residualR: hR, L: L, C: C, normPrefix: normPrefix)
     }
@@ -1410,25 +1428,42 @@ final class SupertonicEngine: @unchecked Sendable {
     }
 
     // Row-major matmul: out[M,N] = A[M,K] · B[K,N] (+bias). B is already [K,N].
+    // Uses the register-blocked GEMM (64×64 output tile, 4×4 per thread) with a
+    // fused activation epilogue — several× the arithmetic intensity of the naive
+    // one-output-per-thread kernel that dominated the flow-matching loop.
     private func matmulRowMajor(A: MTLBuffer, B: MTLBuffer, bias: MTLBuffer?, out: MTLBuffer, M: Int, K: Int, N: Int, act: String = "none") {
         struct P { var M: UInt32; var K: UInt32; var N: UInt32; var use_bias: UInt32 }
         var p = P(M: UInt32(M), K: UInt32(K), N: UInt32(N), use_bias: bias != nil ? 1 : 0)
         let name: String
         switch act {
-        case "gelu": name = "matmul_gelu_kernel"
-        case "relu": name = "matmul_relu_kernel"
-        default: name = "matmul_kernel"
+        case "gelu": name = "reuse_matmul_gelu_kernel"
+        case "relu": name = "reuse_matmul_relu_kernel"
+        default: name = "reuse_matmul_kernel"
         }
-        let tg = 16
+        let BM = 64, BN = 64
         dispatch(name, [A, B, bias ?? emptyMask, out], &p, 16,
-                 gridX: (M + tg - 1) / tg, gridY: (N + tg - 1) / tg, wgX: tg, wgY: tg)
+                 gridX: (N + BN - 1) / BN, gridY: (M + BM - 1) / BM, wgX: 256, wgY: 1)
     }
+
+    // Cache of transposed constant weights ([N,K] → [K,N]). The weight buffers are
+    // immutable, so the transpose only needs to happen once per weight, not once per
+    // matmul call (the flow-matching loop reuses each weight 16× per generation).
+    private var transposeCache: [ObjectIdentifier: MTLBuffer] = [:]
 
     // Row-major matmul where the weight is stored transposed [N, K] (PyTorch Linear /
     // conv1x1 [outCh, inCh]). Computes out[M,N] = A[M,K] · W^T. Transpose W to [K,N] first.
     private func matmulRowMajorWT(A: MTLBuffer, Wt: MTLBuffer, bias: MTLBuffer?, out: MTLBuffer, M: Int, K: Int, N: Int, act: String = "none") {
-        let Bkn = empty(K * N)
-        dispatchTranspose(input: Wt, out: Bkn, rows: N, cols: K)   // [N,K] -> [K,N]
+        let key = ObjectIdentifier(Wt)
+        let Bkn: MTLBuffer
+        if let cached = transposeCache[key] {
+            Bkn = cached
+        } else {
+            let t = empty(K * N)
+            dispatchTranspose(input: Wt, out: t, rows: N, cols: K)   // [N,K] -> [K,N]
+            flushAndWait()                                          // materialize once
+            transposeCache[key] = t
+            Bkn = t
+        }
         matmulRowMajor(A: A, B: Bkn, bias: bias, out: out, M: M, K: K, N: N, act: act)
     }
 

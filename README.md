@@ -52,25 +52,63 @@ Supertonic 3 is an iterative flow-matching ODE-based text-to-speech model. Its e
 
 ## Performance
 
-Benchmarks measured on Apple Silicon (Release build) for an 84-character English test sentence:
+Benchmarks measured on an **Apple M2 Max** (Release build, 8 ODE steps) for a 92-token
+English test sentence producing **5.5 s** of 44.1 kHz audio.
 
 ### End-to-End Latency
 
 | Pipeline | End-to-End Time | Audio Generated | Realtime Factor (RTF) |
 |---|---:|---:|---:|
-| **Supertonic 3 (Metal)** | **1,205 ms** | 5.43 s @ 44.1 kHz | **4.5×** (at 8 steps) |
+| **Supertonic 3 (Metal)** | **~950 ms** | 5.5 s @ 44.1 kHz | **~5.8×** (at 8 steps) |
 
 ### Stage Breakdown
 
 | Stage | Latency | Notes |
 |---|---:|---|
-| **Duration Predictor** | 1.2 ms | Lightweight MLP |
-| **Text Encoder** | 8.0 ms | ConvNeXt + Relative-Position Attention |
-| **Flow Matching Loop** | **1,094 ms** | 8 steps of the 64M parameter vector field (137 ms/step) |
-| **Vocoder** | 76.0 ms | Causal Convolutions & ISTFT head |
-| **Total** | **1,179 ms** | (Excluding audio enqueue overhead) |
+| **Duration Predictor** | ~18 ms | Lightweight MLP |
+| **Text Encoder** | ~114 ms | ConvNeXt + Relative-Position Attention |
+| **Flow Matching Loop** | **~800 ms** | 8 steps of the 64M parameter vector field (~50 ms/step, ×2 for CFG) |
+| **Vocoder** | ~47 ms | Causal Convolutions & ISTFT head |
 
-> **Realtime Factor (RTF)** = (seconds of audio generated) ÷ (synthesis latency). An RTF of 4.5× means 1 second of speech is synthesized in ~220 ms. The flow-matching ODE steps function as a speed-to-quality control knob (fewer steps = faster).
+> **Realtime Factor (RTF)** = (seconds of audio generated) ÷ (synthesis latency). RTF ~5.8×
+> means 1 second of speech is synthesized in ~170 ms. The flow-matching ODE steps are a
+> speed-to-quality control knob (fewer steps = faster).
+
+### Optimization history
+
+The flow-matching loop originally ran at **~8,670 ms (RTF 0.62×, slower than realtime)** — a
+severe CPU stall. Three changes brought it to ~800 ms (**~9× faster**) with **bit-identical**
+output (verified by the `ST_VALIDATE` harness: `vfield[0] corr=1.0000`):
+
+1. **BLAS cross-attention** — the two per-block cross-attentions ran as scalar single-threaded
+   Swift triple-loops (~10 GMAC of serial work per generation, the actual hang). Now Accelerate
+   `cblas_sgemm` GEMMs (Q·Kᵀ, softmax, P·V). *Largest win.*
+2. **Register-blocked fused GEMM** — ConvNeXt pointwise convs moved from a naive
+   one-output-per-thread kernel to a 64×64-tile / 4×4-per-thread GEMM (`reuse_matmul_{gelu,relu}`)
+   with the activation fused into the epilogue.
+3. **Transposed-weight cache** — constant weights were re-transposed on every matmul call
+   (~900 redundant dispatches/generation); now transposed once and cached.
+
+### Next optimization opportunities (ranked by expected win)
+
+1. **Move cross-attention Q/K/V/out projections onto the GPU (~150–300 ms).** The attentions
+   are BLAS now, but each `vfVelocity` still does `readBuf`/`makeBuf` round-trips that stall the
+   GPU pipeline (CPU↔GPU sync per block). Keeping projections on-device (they're plain matmuls,
+   weights already resident) removes the flushes and the largest remaining serial gap.
+2. **Batch conditional + unconditional CFG passes (~up to 2× on flow matching).** Each step runs
+   `vfVelocity` twice (cond + uncond) sequentially. Stacking them into one batch-of-2 doubles GPU
+   occupancy for the small `L≈79` sequence and halves dispatch/launch overhead.
+3. **fp16 storage + `simdgroup_matrix` GEMM (~1.5–2× on matmuls).** The GEMM is fp32 scalar FMA;
+   Apple GPUs have hardware `simdgroup_float8x8` / fp16 matrix units. Store weights and feature
+   maps as `half` and accumulate in fp32 for a large matmul throughput gain.
+4. **Persistent command buffer / fewer encoders (~30–80 ms).** `flushAndWait` is called on every
+   `readBuf`; batching more work per command buffer and reading back only at stage boundaries cuts
+   encoder churn and driver overhead.
+5. **Fuse LayerNorm + the dwconv/residual epilogue (~20–40 ms).** ConvNeXt does dwconv → transpose
+   → LayerNorm → matmul → gamma·residual as separate dispatches with intermediate buffers; fusing
+   the norm and residual passes removes several elementwise round-trips per layer.
+6. **Text-encoder CPU `speechPromptedEncoder` → BLAS/GPU (~50–90 ms).** Still a scalar port; the
+   same BLAS treatment as the vector-field attentions would shrink the ~114 ms text-encoder stage.
 
 ---
 

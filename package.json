@@ -12,9 +12,9 @@
     "outdated": "bunx npm-check-updates --interactive"
   },
   "dependencies": {
+    "@anudit/kitten-tts-webgpu": "0.2.1",
     "@preact/signals": "^2.9.2",
     "fflate": "^0.8.3",
-    "@anudit/kitten-tts-webgpu": "^0.2.0",
     "lucide-preact": "^1.23.0",
     "paddleocr-webgpu": "^1.4.0",
     "pdfjs-dist": "^6.1.200",

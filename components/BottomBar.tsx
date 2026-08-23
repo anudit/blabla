@@ -6,7 +6,7 @@ import { TT, staticStyles, VOICES, THEMES, THEME_META } from '../theme';
 import {
   isPlayingSignal, playbackStateSignal, ttsStatusSignal,
   isModelReadySignal, currentSentenceIndexSignal,
-  volumeSignal,
+  volumeSignal, pipActiveSignal,
 } from '../signals';
 
 const hexToRgba = (hex: string, alpha: number) => {
@@ -34,6 +34,8 @@ interface BottomBarProps {
   onTestAudio: () => void;
   onReset: () => void;
   onLogoClick: () => void;
+  onTogglePip: () => void;
+  canPip: boolean;
 }
 
 export default function BottomBar({
@@ -45,10 +47,12 @@ export default function BottomBar({
   sentencesLength,
   fontSize, onFontSizeChange,
   onTestAudio, onReset, onLogoClick,
+  onTogglePip, canPip,
 }: BottomBarProps) {
   const isPlaying     = isPlayingSignal.value;
   const isModelReady  = isModelReadySignal.value;
   const playbackState = playbackStateSignal.value;
+  const pipActive     = pipActiveSignal.value;
 
   const [isSpeedMenuOpen, setIsSpeedMenuOpen]     = useState(false);
   const [isMenuOpen, setIsMenuOpen]               = useState(false);
@@ -142,8 +146,13 @@ export default function BottomBar({
       border: `1px solid ${glassBorder}`,
       boxShadow: glassShadow(12),
     }}>
-      <button onClick={onLogoClick} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center' }}>
-        <img src="./180.png" style={{ width: '32px', height: '32px' }} alt="logo" />
+      <button
+        onClick={() => { const next = !isMenuOpen; closeAll(); setIsMenuOpen(next); }}
+        onDblClick={onLogoClick}
+        style={iconButtonStyle}
+        title="Menu"
+      >
+        <Icon name="menu" size={24} />
       </button>
 
       <button onClick={() => { const next = !isSpeedMenuOpen; closeAll(); setIsSpeedMenuOpen(next); }} style={speedButtonStyle}>
@@ -158,9 +167,16 @@ export default function BottomBar({
         {playbackState === 'Buffering' ? <Icon name="loader-circle" size={20} color="white" style={{ animation: 'spin 0.8s linear infinite' }} /> : isPlaying ? <Icon name="pause" size={20} fill="white" /> : <Icon name="play" size={20} fill="white" style={{ marginLeft: '2px' }} />}
       </button>
 
-      <button onClick={() => { const next = !isMenuOpen; closeAll(); setIsMenuOpen(next); }} style={iconButtonStyle}>
-        <Icon name="menu" size={24} />
-      </button>
+      {canPip && (
+        <button
+          onClick={onTogglePip}
+          disabled={!hasSentences}
+          style={{ ...iconButtonStyle, opacity: hasSentences ? 1 : 0.35, cursor: hasSentences ? 'pointer' : 'not-allowed', color: pipActive ? '#b47a32' : t.barSpeedBg }}
+          title={pipActive ? 'Close mini player' : 'Open mini player'}
+        >
+          <Icon name="pip" size={20} />
+        </button>
+      )}
 
       <button onClick={() => { const next = !isThemePickerOpen; closeAll(); setIsThemePickerOpen(next); }} style={iconButtonStyle} title="Choose theme">
         <Icon name="palette" size={20} />
@@ -289,7 +305,7 @@ function SettingsMenu({
   const statusDot = isModelReady && !usingFallback ? '#22c55e' : usingFallback ? '#f59e0b' : '#3b82f6';
 
   return (
-    <div style={{ ...popoverBase, right: '2.5rem', width: '248px' }}>
+    <div style={{ ...popoverBase, left: '0', width: '248px' }}>
       <div style={{ ...row, gap: '0.5rem' }}>
         <div style={{ width: '6px', height: '6px', borderRadius: '50%', flexShrink: 0, backgroundColor: statusDot }} />
         <span style={{ fontSize: '0.75rem', color: t.textMuted, flex: 1 }}>{ttsStatus}</span>

@@ -8,7 +8,7 @@ import {
   isModelReadySignal, currentSentenceIndexSignal, restartSignal,
   sentencesSignal, fileTypeSignal, playbackSpeedSignal,
   selectedVoiceSignal, currentFileIdSignal, currentFileNameSignal,
-  outlineSignal, offlineReadySignal,
+  outlineSignal, offlineReadySignal, pipActiveSignal,
   volumeSignal,
 } from './signals';
 import { THEMES, TT } from './theme';
@@ -17,6 +17,7 @@ import { calculateWordTimings, extractWords, parseOcrPageText } from './utils';
 import {
   loadMarkdown, loadText, loadEPUB, loadPDF, loadMOBI, loadDOCX
 } from './loaders';
+import { PipSession, pipSupported } from './pip';
 import { getBookmarks, saveBookmark, removeBookmark } from './components/BookmarkHistory';
 import type { BookmarkEntry } from './components/BookmarkHistory';
 
@@ -86,8 +87,20 @@ export default function App() {
   const lastActiveWordRef = useRef<HTMLElement | null>(null);
   const prevIndexRef = useRef<number>(-1);
 
+  // Picture-in-Picture: a live canvas track + a live audio track off the TTS
+  // graph, both streamed into a hidden <video> handed to the PiP window.
+  const outputNode = useRef<GainNode | null>(null);
+  const pipDest = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const pipRef = useRef<PipSession | null>(null);
+  const pipWordRef = useRef(-1);
+  const pipBusy = useRef(false);
+  const sinkAttached = useRef(false);
+  const pipWordsRef = useRef<{ idx: number; words: string[] }>({ idx: -1, words: [] });
+
   const t = THEMES[themeName];
   const isDarkMode = t.isDark;
+  const themeRef = useRef(t);
+  themeRef.current = t;
 
   const activeHeaderId = useComputed(() => {
     const idx = currentSentenceIndexSignal.value;
@@ -97,6 +110,7 @@ export default function App() {
   });
 
   const hasSentences = useComputed(() => sentencesSignal.value.length > 0);
+  const canPip = useMemo(() => pipSupported(), []);
 
   const modelFetchFailedRef = useRef(false);
 
@@ -149,6 +163,7 @@ export default function App() {
 
     return () => {
       stopAllAudio();
+      pipRef.current?.destroy();
       workerRef.current?.terminate();
       ocrWorkerRef.current?.terminate();
       if (audioContext.current) audioContext.current.close();
@@ -308,12 +323,25 @@ export default function App() {
     return audioContext.current;
   };
 
+  // Single master output. Everything plays into it, so PiP can re-route the
+  // whole graph to a MediaStream (and back) without touching the play path.
+  const getOutputNode = () => {
+    const ctx = getAudioContext();
+    if (!outputNode.current || outputNode.current.context !== ctx) {
+      outputNode.current = ctx.createGain();
+      pipDest.current = null;                        // a fresh context invalidates the tap
+      outputNode.current.connect(ctx.destination);
+      sinkAttached.current = false;
+    }
+    return outputNode.current;
+  };
+
   const playBufferDirectly = (buffer: AudioBuffer) => {
     const ctx = getAudioContext(), source = ctx.createBufferSource();
     source.buffer = buffer;
     const gainNode = ctx.createGain();
     gainNode.gain.value = volumeSignal.value;
-    source.connect(gainNode); gainNode.connect(ctx.destination);
+    source.connect(gainNode); gainNode.connect(getOutputNode());
     source.start(0);
     playbackStateSignal.value = "Playing"; source.onended = () => { playbackStateSignal.value = "Ready"; };
   };
@@ -336,7 +364,7 @@ export default function App() {
     playbackSessionId.current += 1;
     if (currentSource.current) { try { currentSource.current.stop(); } catch(e){} currentSource.current.disconnect(); currentSource.current = null; }
     window.speechSynthesis.cancel(); if (nativeTimeout.current) clearTimeout(nativeTimeout.current);
-    if (audioContext.current && audioContext.current.state === 'running') audioContext.current.suspend();
+    if (audioContext.current && audioContext.current.state === 'running' && !sinkAttached.current) audioContext.current.suspend();
     audioCache.current.clear(); pendingFetches.current.clear();
     audioResolvers.current.forEach(r => r(null as any)); audioResolvers.current.clear();
     playbackStateSignal.value = "Stopped"; isWaitingForAudio.current = false;
@@ -394,20 +422,24 @@ export default function App() {
 
     const gainNode = ctx.createGain();
     gainNode.gain.value = volumeSignal.value;
-    const source = ctx.createBufferSource(); source.buffer = buffer; source.connect(gainNode); gainNode.connect(ctx.destination);
+    const source = ctx.createBufferSource(); source.buffer = buffer; source.connect(gainNode); gainNode.connect(getOutputNode());
     source.onended = () => { if (wordRafRef.current) cancelAnimationFrame(wordRafRef.current); clearWordHighlight(); restoreWordSpans(); currentSource.current = null; if (isPlayingSignal.peek() && currentSession === playbackSessionId.current) advanceSentence(); };
     currentSource.current = source; playbackStateSignal.value = "Playing";
     wordTimingsRef.current = calculateWordTimings(text, buffer.duration);
     let st = ctx.currentTime; if (nextStartTimeRef.current > st && nextStartTimeRef.current < st + 0.5) st = nextStartTimeRef.current;
     audioStartRef.current = st; nextStartTimeRef.current = st + buffer.duration;
     source.start(st);
-    if (fileTypeSignal.peek() !== 'pdf') {
+    const domWords = fileTypeSignal.peek() !== 'pdf';
+    if (domWords || pipOn()) {
       const animate = () => {
         if (currentSource.current !== source) return;
         const elap = ctx.currentTime - audioStartRef.current;
         const active = wordTimingsRef.current.find(t => elap >= t.start && elap < t.end);
-        clearWordHighlight();
-        if (active) { const el = document.getElementById(`word-${unit.lines[0]}-${active.index}`); if (el) { el.classList.add('word-highlight-active'); lastActiveWordRef.current = el; } }
+        if (domWords) {
+          clearWordHighlight();
+          if (active) { const el = document.getElementById(`word-${unit.lines[0]}-${active.index}`); if (el) { el.classList.add('word-highlight-active'); lastActiveWordRef.current = el; } }
+        }
+        if (pipOn()) { pipWordRef.current = active ? active.index : -1; drawPipFrame(); }
         if (elap < buffer!.duration) wordRafRef.current = requestAnimationFrame(animate);
       };
       wordRafRef.current = requestAnimationFrame(animate);
@@ -431,10 +463,135 @@ export default function App() {
 
   const togglePlay = useCallback(() => {
     if (!isModelReadySignal.peek()) return;
+    attachMediaSink();
     if (currentSentenceIndexSignal.peek() === -1 && sentencesSignal.peek().length > 0) { currentSentenceIndexSignal.value = 0; isPlayingSignal.value = true; }
     else if (isPlayingSignal.peek()) { isPlayingSignal.value = false; stopAllAudio(); }
     else { isPlayingSignal.value = true; playbackStateSignal.value = "Starting"; }
   }, []);
+
+  // --- System media controls ------------------------------------------------
+  // Hardware play/pause (the F8 / Touch Bar key on macOS), the Now Playing
+  // widget and the PiP window's own transport all arrive through here.
+
+  const seekSentence = useCallback((delta: number) => {
+    const sents = sentencesSignal.peek();
+    const next = Math.max(0, Math.min(sents.length - 1, currentSentenceIndexSignal.peek() + delta));
+    if (!sents.length) return;
+    isPlayingSignal.value = false;
+    stopAllAudio();
+    currentSentenceIndexSignal.value = next;
+    isPlayingSignal.value = true;
+  }, []);
+
+  useEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    const set = (a: any, h: any) => { try { ms.setActionHandler(a, h); } catch {} };
+    set('play', () => { if (!isPlayingSignal.peek()) togglePlay(); });
+    set('pause', () => { if (isPlayingSignal.peek()) togglePlay(); });
+    set('nexttrack', () => seekSentence(1));
+    set('previoustrack', () => seekSentence(-1));
+    set('seekforward', () => seekSentence(1));
+    set('seekbackward', () => seekSentence(-1));
+    return () => ['play', 'pause', 'nexttrack', 'previoustrack', 'seekforward', 'seekbackward'].forEach(a => set(a, null));
+  }, []);
+
+  useSignalEffect(() => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    const playing = isPlayingSignal.value, name = currentFileNameSignal.value, voice = selectedVoiceSignal.value;
+    ms.playbackState = playing ? 'playing' : 'paused';
+    if (name && 'MediaMetadata' in window) {
+      ms.metadata = new MediaMetadata({ title: name, artist: `${voice} · blabla`, artwork: [{ src: '/180.png', sizes: '180x180', type: 'image/png' }] });
+    }
+  });
+
+  // --- Picture-in-Picture --------------------------------------------------
+  // The floating window is a live canvas track (the sentence being spoken, with
+  // the active word lit) plus a live audio track tapped off the master output,
+  // so the locally generated speech streams straight into it.
+
+  // pipActiveSignal, not pip.active: frames must already be flowing before
+  // requestPictureInPicture() will accept the element.
+  const pipOn = () => !!pipRef.current && pipActiveSignal.peek();
+
+  const drawPipFrame = useCallback((force = false) => {
+    const pip = pipRef.current;
+    if (!pipOn()) return;
+    const sents = sentencesSignal.peek(), idx = currentSentenceIndexSignal.peek();
+    const cur = sents[idx];
+    if (!cur) { pipWordsRef.current = { idx: -1, words: [] }; }
+    else if (pipWordsRef.current.idx !== idx) pipWordsRef.current = { idx, words: extractWords(cur.text) };
+    const th = themeRef.current;
+    pip!.render({
+      prev: idx > 0 ? (sents[idx - 1]?.text || '') : '',
+      words: pipWordsRef.current.words,
+      wordIndex: pipWordsRef.current.idx === idx ? pipWordRef.current : -1,
+      next: sents[idx + 1]?.text || '',
+    }, { bg: th.bg, text: th.text, textMuted: th.textMuted, accent: '#b47a32' }, force);
+  }, []);
+
+  const ensureSession = () => {
+    if (!pipRef.current) {
+      pipRef.current = new PipSession(
+        (play) => { if (play !== isPlayingSignal.peek()) togglePlay(); },
+        () => { pipActiveSignal.value = false; pipRef.current?.stop(); },
+      );
+    }
+    return pipRef.current;
+  };
+
+  /**
+   * Move playback off the AudioContext's own destination and onto a hidden
+   * media element fed by a MediaStream tap. Identical audio, but the page now
+   * has a media session, so the system play/pause key reaches the reader.
+   * Needs user activation; on refusal we simply stay on ctx.destination.
+   */
+  const attachMediaSink = useCallback(async () => {
+    if (sinkAttached.current || !pipSupported()) return;
+    const ctx = getAudioContext();
+    const out = getOutputNode();
+    const dest = pipDest.current || (pipDest.current = ctx.createMediaStreamDestination());
+    out.disconnect();
+    out.connect(dest);
+    sinkAttached.current = true;
+    if (!(await ensureSession().attach(dest.stream))) {
+      out.disconnect();
+      out.connect(ctx.destination);
+      sinkAttached.current = false;
+    }
+  }, []);
+
+  const togglePip = useCallback(async () => {
+    if (pipBusy.current) return;
+    if (pipRef.current?.active) { pipActiveSignal.value = false; await pipRef.current.stop(); return; }
+    if (!pipSupported()) return;
+    pipBusy.current = true;
+    try {
+      await attachMediaSink();
+      if (!sinkAttached.current) return;             // no sink, no stream to show
+      pipActiveSignal.value = true;
+      pipWordRef.current = -1;
+      await ensureSession().start(() => drawPipFrame(true));
+      drawPipFrame(true);
+    } catch (err) {
+      console.warn('[PiP] could not open', err);
+      pipActiveSignal.value = false;
+      await pipRef.current?.stop();
+    } finally {
+      pipBusy.current = false;
+    }
+  }, []);
+
+  // Repaint on sentence / state changes so the window keeps up while buffering,
+  // paused, or when the reader jumps to another line.
+  useSignalEffect(() => {
+    currentSentenceIndexSignal.value; playbackStateSignal.value; sentencesSignal.value;
+    const playing = isPlayingSignal.value;
+    if (!pipOn()) return;
+    pipRef.current!.syncPlaying(playing);
+    drawPipFrame();
+  });
 
   const handleTestAudio = useCallback(() => {
     if (!isModelReadySignal.peek()) return; stopAllAudio();
@@ -871,7 +1028,7 @@ export default function App() {
       <OfflineToast />
       {eggPhase && <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}><div style={{ width: '300px', height: '300px', borderRadius: '50%', backgroundColor: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', animation: eggPhase === 'in' ? 'eggBounceIn 0.55s forwards' : 'eggFadeOut 0.6s forwards' }}><img src="./180.png" style={{ width: '250px', height: '250px' }} /></div></div>}
       <ScrollToCurrentButton />
-      <Suspense fallback={null}><BottomBar t={t} isDarkMode={isDarkMode} themeName={themeName} onThemeChange={(name: ThemeName) => { setThemeName(name); localStorage.setItem('theme', name); }} playbackSpeed={playbackSpeedSignal.value} hasSentences={hasSentences.value} onTogglePlay={togglePlay} onSpeedChange={(s: number) => { playbackSpeedSignal.value = s; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} usingFallback={usingFallback.current} selectedVoice={selectedVoiceSignal.value} onVoiceChange={(e: any) => { selectedVoiceSignal.value = e.target.value; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} sentencesLength={sentencesSignal.value.length} fontSize={fontSize} onFontSizeChange={(d: number) => { const n = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + d)).toFixed(2)); setFontSize(n); localStorage.setItem('fontSize', String(n)); }} onTestAudio={handleTestAudio} onReset={resetReader}           onLogoClick={() => { if (!eggPhase) { setEggPhase('in'); const t1 = window.setTimeout(() => { setEggPhase('out'); const t2 = window.setTimeout(() => setEggPhase(null), 600); eggTimersRef.current.push(t2); }, 2400); eggTimersRef.current.push(t1); } }} /></Suspense>
+      <Suspense fallback={null}><BottomBar t={t} isDarkMode={isDarkMode} themeName={themeName} onThemeChange={(name: ThemeName) => { setThemeName(name); localStorage.setItem('theme', name); }} playbackSpeed={playbackSpeedSignal.value} hasSentences={hasSentences.value} onTogglePlay={togglePlay} onSpeedChange={(s: number) => { playbackSpeedSignal.value = s; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} usingFallback={usingFallback.current} selectedVoice={selectedVoiceSignal.value} onVoiceChange={(e: any) => { selectedVoiceSignal.value = e.target.value; stopAllAudio(); if (isPlayingSignal.peek()) restartSignal.value++; }} sentencesLength={sentencesSignal.value.length} fontSize={fontSize} onFontSizeChange={(d: number) => { const n = parseFloat(Math.max(0.8, Math.min(1.6, fontSize + d)).toFixed(2)); setFontSize(n); localStorage.setItem('fontSize', String(n)); }} onTestAudio={handleTestAudio} onReset={resetReader} onTogglePip={togglePip} canPip={canPip}           onLogoClick={() => { if (!eggPhase) { setEggPhase('in'); const t1 = window.setTimeout(() => { setEggPhase('out'); const t2 = window.setTimeout(() => setEggPhase(null), 600); eggTimersRef.current.push(t2); }, 2400); eggTimersRef.current.push(t1); } }} /></Suspense>
     </div>
   );
 }

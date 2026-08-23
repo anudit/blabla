@@ -1,15 +1,19 @@
 // components/icons.tsx — extracted from lucide-preact v1.17.0 (ISC).
-// All 17 icons used by the app; tree-shake friendly single export.
+// All 18 icons used by the app; tree-shake friendly single export.
 
 import type { JSX } from "preact";
 
-type IconName = "target"|"loader-circle"|"check"|"play"|"pause"|"menu"|"palette"|"beaker"|"clock"|"trash-2"|"book-open"|"file-text"|"globe"|"text-align-justify"|"x"|"upload"|"clipboard"|"bookmark"|"chevron-left"|"chevron-right"|"volume";
+type IconName = "target"|"loader-circle"|"check"|"play"|"pause"|"menu"|"palette"|"beaker"|"clock"|"trash-2"|"book-open"|"file-text"|"globe"|"text-align-justify"|"x"|"upload"|"clipboard"|"bookmark"|"chevron-left"|"chevron-right"|"volume"|"pip";
 type IconTuple = [string, Record<string, string | number>];
 const ICONS: Record<IconName, IconTuple[]> = {
   target: [
     ["circle",{cx:"12", cy:"12", r:"10", key:"1mglay"}],
     ["circle",{cx:"12", cy:"12", r:"6", key:"1vlfrh"}],
     ["circle",{cx:"12", cy:"12", r:"2", key:"1c9p78"}],
+  ],
+  pip: [
+    ["path",{d:"M21 9V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4", key:"daa4of"}],
+    ["rect",{width:"10", height:"7", x:"12", y:"13", rx:"2", key:"1ol0lm"}],
   ],
   "loader-circle": [
     ["path",{d:"M21 12a9 9 0 1 1-6.219-8.56", key:"13zald"}],

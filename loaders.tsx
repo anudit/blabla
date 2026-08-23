@@ -511,8 +511,8 @@ export const loadPDF = async (
 ) => {
   setIsDocLoading(true);
   try {
-    const pdfjsLib = await import('pdfjs-dist/build/pdf.min.mjs');
-    pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+    const pdfjsLib = await import('./vendor/pdf/pdf.mjs');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
     const loadingTask = pdfjsLib.getDocument({ data });
     const doc = await loadingTask.promise;
     (doc as any).destroy = () => loadingTask.destroy();

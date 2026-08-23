@@ -8,6 +8,8 @@ async function buildAndGzip(entrypoint: string) {
     minify: process.env.NODE_ENV === "production",
     define: {
       "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "development"),
+      "process.env.TTS_DEBUG": JSON.stringify(process.env.TTS_DEBUG || ""),
+      "process.env.TTS_DEBUG_NODES": JSON.stringify(process.env.TTS_DEBUG_NODES || ""),
     },
   });
   const bytes = new Uint8Array(await build.outputs[0].arrayBuffer());
@@ -33,9 +35,21 @@ const server = serve({
     "/ocr.worker.js": () => buildAndGzip("./ocr.worker.ts"),
 
     // 3. Serve Static Assets
-    "/pdf.worker.min.mjs": Bun.file("node_modules/pdfjs-dist/build/pdf.worker.min.mjs"),
+    "/pdf.worker.mjs": Bun.file("./vendor/pdf/pdf.worker.mjs"),
     "/manifest.json": Bun.file("./manifest.json"),
-    "/sw.js": Bun.file("./sw.js"),
+    // Dev has no precomputed app shell (that's a build.ts step). An EMPTY
+    // shell is unsafe here: sw.js treats non-shell assets as cache-first, so
+    // every dev request to /bundle.js and /tts.worker.js — both rebuilt
+    // fresh on every request — would get pinned to whatever was cached on
+    // first load and never update again. List the same paths build.ts does
+    // for production so they keep the network-first treatment in dev too.
+    "/sw.js": async () => new Response(
+      (await Bun.file("./sw.js").text()).replace(
+        "__APP_SHELL_PLACEHOLDER__",
+        JSON.stringify(["/", "/index.html", "/bundle.js", "/tts.worker.js", "/ocr.worker.js"]),
+      ),
+      { headers: { "Content-Type": "application/javascript" } },
+    ),
     // "/logo.png": Bun.file("./logo.png"),
     "/16.png": Bun.file("./16.png"),
     "/32.png": Bun.file("./32.png"),

@@ -58,11 +58,11 @@ await cp("./sw.js", "./dist/sw.js");
 await cp("./sitemap.xml", "./dist/sitemap.xml");
 await cp("./robots.txt", "./dist/robots.txt");
 
-// Critical: Copy the PDF worker from node_modules to dist
-// This ensures pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs' works
+// Lean pdf.js build (see scripts/build-pdfjs-lean.ts). The worker is served as
+// a static file; the main-thread lib is bundled in via loaders.tsx.
 await cp(
-  "./node_modules/pdfjs-dist/build/pdf.worker.min.mjs",
-  "./dist/pdf.worker.min.mjs"
+  "./vendor/pdf/pdf.worker.mjs",
+  "./dist/pdf.worker.mjs"
 );
 
 console.log("Injecting file list into Service Worker...");
@@ -74,7 +74,7 @@ const baseShell = [
     '/index.html',
     '/180.png',
     '/manifest.json',
-    '/pdf.worker.min.mjs',
+    '/pdf.worker.mjs',
     // Workers are built via separate build() calls without a metafile, so they
     // never appear in meta.outputs. List them explicitly so the service worker
     // treats them as network-first app-shell assets — new worker bundles then

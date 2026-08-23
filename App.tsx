@@ -115,18 +115,17 @@ export default function App() {
   const modelFetchFailedRef = useRef(false);
 
   useEffect(() => {
-    const ctx = getAudioContext();
-    ctx.resume().catch(console.warn);
     workerRef.current = new Worker("/tts.worker.js", { type: 'module' });
     workerRef.current.onmessage = (e) => {
       const { status, audio, error, fetchFailed, text, lineIndex, device, dtype } = e.data;
       if (status === 'ready') {
-        ttsStatusSignal.value = `Ready (${device}/${dtype})`;
+        ttsStatusSignal.value = `Ready (${device || 'webgpu'}/${dtype || 'fp32'})`;
         isModelReadySignal.value = true;
         modelFetchFailedRef.current = false;
-        workerRef.current?.postMessage({ type: 'generate', text: 'Warm up.', lineIndex: -1, voice: 'Bella', speed: 1.0 });
       } else if (status === 'models_cached') {
         offlineReadySignal.value = true;
+      } else if (status === 'loading' && e.data.message) {
+        ttsStatusSignal.value = e.data.message;
       } else if (status === 'complete') {
         try {
           const ctx = getAudioContext();
@@ -318,7 +317,13 @@ export default function App() {
   });
 
   const getAudioContext = () => {
-    if (!audioContext.current || audioContext.current.state === 'closed') audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    // Let the context run at the device's native rate (44.1/48kHz) rather
+    // than forcing 24000 (the TTS output rate) — AudioBufferSourceNode
+    // already resamples a 24kHz buffer cleanly on playback, and running the
+    // context itself at an unusual rate produced audible garbling when the
+    // graph was routed through the MediaStreamDestination/hidden-<video>
+    // sink used for OS media-key support (pipelines tuned for 44.1/48kHz).
+    if (!audioContext.current || audioContext.current.state === 'closed') audioContext.current = new (window.AudioContext || (window as any).webkitAudioContext)();
     if (audioContext.current.state !== 'running') audioContext.current.resume().catch(console.warn);
     return audioContext.current;
   };
@@ -420,6 +425,7 @@ export default function App() {
     }
     if (currentSession !== playbackSessionId.current || !isPlayingSignal.peek() || !buffer) return;
 
+    if (ctx.state !== 'running') await ctx.resume().catch(console.warn);
     const gainNode = ctx.createGain();
     gainNode.gain.value = volumeSignal.value;
     const source = ctx.createBufferSource(); source.buffer = buffer; source.connect(gainNode); gainNode.connect(getOutputNode());
@@ -452,8 +458,10 @@ export default function App() {
     currentSentenceIndexSignal.value = next;
   };
 
-  const handleLineClick = useCallback((lineId: number) => {
+  const handleLineClick = useCallback(async (lineId: number) => {
     isPlayingSignal.value = false; stopAllAudio();
+    const ctx = getAudioContext();
+    if (ctx.state !== 'running') await ctx.resume().catch(console.warn);
     const idx = sentencesSignal.peek().findIndex(s => s.lines.includes(lineId));
     if (idx !== -1) {
       currentSentenceIndexSignal.value = idx; isPlayingSignal.value = true;
@@ -461,12 +469,16 @@ export default function App() {
     }
   }, []);
 
-  const togglePlay = useCallback(() => {
+  const togglePlay = useCallback(async () => {
     if (!isModelReadySignal.peek()) return;
-    attachMediaSink();
-    if (currentSentenceIndexSignal.peek() === -1 && sentencesSignal.peek().length > 0) { currentSentenceIndexSignal.value = 0; isPlayingSignal.value = true; }
-    else if (isPlayingSignal.peek()) { isPlayingSignal.value = false; stopAllAudio(); }
-    else { isPlayingSignal.value = true; playbackStateSignal.value = "Starting"; }
+    if (isPlayingSignal.peek()) { isPlayingSignal.value = false; stopAllAudio(); }
+    else {
+      const ctx = getAudioContext();
+      if (ctx.state !== 'running') await ctx.resume().catch(console.warn);
+      attachMediaSink();
+      if (currentSentenceIndexSignal.peek() === -1 && sentencesSignal.peek().length > 0) { currentSentenceIndexSignal.value = 0; }
+      isPlayingSignal.value = true; playbackStateSignal.value = "Starting";
+    }
   }, []);
 
   // --- System media controls ------------------------------------------------
@@ -617,6 +629,11 @@ export default function App() {
   const triggerFallback = useCallback(() => { if (!usingFallback.current) { usingFallback.current = true; ttsStatusSignal.value = "Fallback (Native)"; isWaitingForAudio.current = false; audioResolvers.current.forEach(r => r(null as any)); audioResolvers.current.clear(); } }, []);
 
   const handleFileDrop = async (e: any) => {
+    // Same reasoning as handleUrlLoad: prime/resume the AudioContext
+    // synchronously here, before the async file-parsing work below, so it
+    // still counts as within this drop/click gesture for Chrome's autoplay
+    // policy.
+    getAudioContext();
     if (e.preventDefault) e.preventDefault(); setIsDragOver(false);
     const file = e.dataTransfer?.files[0] || e.target?.files?.[0];
     if (file) {
@@ -891,6 +908,13 @@ export default function App() {
   }, [ocrCurrentPage, pdfDoc, isOcrMode, pages]);
 
   const handleUrlLoad = async (u?: string) => {
+    // Prime/resume the AudioContext synchronously, before the network fetch
+    // below — this function runs synchronously up to its first `await`, so
+    // this still counts as within the caller's click/user-gesture for
+    // Chrome's autoplay policy. Doing it after the fetch (i.e. once playback
+    // is actually ready to start) is too late: the gesture window has
+    // expired by then, and resume() silently fails, producing dead silence.
+    getAudioContext();
     const inputUrl = (u || urlInputValue).trim(); if (!inputUrl) return;
     try { new URL(inputUrl); } catch { setUrlError('Invalid URL'); return; }
 

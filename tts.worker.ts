@@ -1,10 +1,10 @@
-// tts.worker.ts — Kitten TTS WebGPU (kitten-tts-mini-0.8, ~78M)
-import { KittenTTSEngine, textToInputIds } from '@anudit/kitten-tts-webgpu';
+// tts.worker.ts — Inflect-Micro-v2 TTS via pure WebGPU kernels (~38M, 24 kHz)
+import { InflectTTSEngine, textToInputIds, edgeFade, splitText, boundaryPauseSeconds } from './inflect-tts/index.ts';
 
-const MODEL_REPO = 'kitten-tts-mini-0.8';
-const ONNX_URL = `https://huggingface.co/KittenML/${MODEL_REPO}/resolve/main/kitten_tts_mini_v0_8.onnx`;
-const VOICES_URL = `https://huggingface.co/KittenML/${MODEL_REPO}/resolve/main/voices.npz`;
-const MODEL_DB = 'kitten-tts-models-v2';
+const ONNX_BASE = 'https://huggingface.co/owensong/Inflect-Micro-v2-ONNX/resolve/main/onnx';
+const DURATION_URL = `${ONNX_BASE}/duration.onnx`;
+const DECODE_URL = `${ONNX_BASE}/decode.onnx`;
+const MODEL_DB = 'inflect-tts-models-v1';
 
 // IDB helpers — IndexedDB stores raw ArrayBuffer so there are no CORS or
 // redirect restrictions (unlike Cache Storage, which rejects cross-origin
@@ -33,68 +33,99 @@ function idbPut(db: IDBDatabase, key: string, buf: ArrayBuffer): Promise<void> {
   });
 }
 
-async function fetchCached(db: IDBDatabase, remoteUrl: string, cacheKey: string, mimeType: string): Promise<string> {
+async function fetchCached(db: IDBDatabase, remoteUrl: string, cacheKey: string): Promise<string> {
   const cached = await idbGet(db, cacheKey);
-  if (cached) return URL.createObjectURL(new Blob([cached], { type: mimeType }));
+  if (cached) return URL.createObjectURL(new Blob([cached], { type: 'application/octet-stream' }));
   const res = await fetch(remoteUrl);
   if (!res.ok) throw new Error(`Failed to fetch ${remoteUrl}: ${res.status}`);
   const buf = await res.arrayBuffer();
   await idbPut(db, cacheKey, buf);
-  return URL.createObjectURL(new Blob([buf], { type: mimeType }));
+  return URL.createObjectURL(new Blob([buf], { type: 'application/octet-stream' }));
 }
 
-let engine: KittenTTSEngine | null = null;
+let engine: InflectTTSEngine | null = null;
+let generateChain: Promise<void> = Promise.resolve();
 
-self.addEventListener('message', async (e: MessageEvent<any>) => {
-  const { type } = e.data;
-  try {
-    if (type === 'init') {
-      if (engine) return;
-
-      if (!navigator.gpu) {
-        throw new Error("WebGPU is not supported in this browser.");
-      }
-
-      engine = new KittenTTSEngine();
-      self.postMessage({ status: 'loading', message: 'Initializing WebGPU...' });
-      await engine.init();
-
-      const db = await openModelDB();
-      const alreadyCached = !!(await idbGet(db, 'kitten_tts_mini_v0_8.onnx'));
-      self.postMessage({ status: 'loading', message: alreadyCached ? 'Loading Model...' : 'Downloading 78M Model...' });
-
-      const [onnxBlobUrl, voicesBlobUrl] = await Promise.all([
-        fetchCached(db, ONNX_URL, 'kitten_tts_mini_v0_8.onnx', 'application/octet-stream'),
-        fetchCached(db, VOICES_URL, 'kitten_tts_mini_v0_8_voices.npz', 'application/octet-stream'),
-      ]);
-
-      // Both model files are now in cache — app is fully offline-capable
-      self.postMessage({ status: 'models_cached' });
-
-      await engine.loadModel(onnxBlobUrl, voicesBlobUrl);
-
-      console.log("[KittenTTS Worker] Ready: device=webgpu, dtype=fp32");
-      self.postMessage({ status: 'ready', device: 'webgpu', dtype: 'fp32' });
+async function runGenerate(text: string, lineIndex: number | undefined, speed: number, notify: boolean) {
+  if (!engine) throw new Error('TTS not initialized');
+  const sr = engine.sampleRateValue;
+  const chunks = splitText(text);
+  const pieces: Float32Array[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (i) pieces.push(new Float32Array(Math.round(sr * boundaryPauseSeconds(chunks[i - 1]))));
+    let ids: number[];
+    try {
+      ({ ids } = await textToInputIds(chunks[i]));
+    } catch {
+      continue;
     }
-
-    else if (type === 'generate') {
-      const { text, lineIndex, voice = 'Bella', speed = 1.0 } = e.data;
-      if (!engine) throw new Error('TTS not initialized');
-
-      const { ids } = await textToInputIds(text);
-      const { waveform } = await engine.generate(ids, voice, speed, text.length);
-      const audio = waveform.slice(0, Math.max(0, waveform.length - 5000));
-      self.postMessage({ status: 'complete', audio, text, lineIndex }, [audio.buffer]);
-    }
-  } catch (err: any) {
-    console.error('[KittenTTS Worker]', err);
-    // Reset engine on init failures so the main thread can retry (e.g. after going back online)
-    if (type === 'init') engine = null;
-    const isFetchError = err instanceof TypeError && err.message.toLowerCase().includes('fetch');
-    self.postMessage({
-      status: 'error',
-      error: err?.message || String(err) || 'Unknown error',
-      fetchFailed: isFetchError,
-    });
+    if (ids.length < 3) continue;
+    const { waveform } = await engine.generate(ids, { speed });
+    pieces.push(edgeFade(waveform, sr));
   }
+  if (!notify) return;
+  if (!pieces.length) throw new Error('The text frontend produced no speakable tokens.');
+  let total = 0;
+  for (const p of pieces) total += p.length;
+  const audio = new Float32Array(total);
+  let off = 0;
+  for (const p of pieces) { audio.set(p, off); off += p.length; }
+  self.postMessage({ status: 'complete', audio, text, lineIndex }, [audio.buffer]);
+}
+
+self.addEventListener('message', (e: MessageEvent<any>) => {
+  const { type } = e.data;
+  generateChain = generateChain.then(async () => {
+    try {
+      if (type === 'init') {
+        if (engine) return;
+
+        engine = new InflectTTSEngine();
+        self.postMessage({ status: 'loading', message: 'Initializing WebGPU...' });
+        await engine.init();
+
+        const db = await openModelDB();
+        const alreadyCached = !!(await idbGet(db, 'duration.onnx'));
+        self.postMessage({ status: 'loading', message: alreadyCached ? 'Loading Model...' : 'Downloading 38M Model...' });
+
+        const [durationUrl, decodeUrl] = await Promise.all([
+          fetchCached(db, DURATION_URL, 'duration.onnx'),
+          fetchCached(db, DECODE_URL, 'decode.onnx'),
+        ]);
+
+        self.postMessage({ status: 'models_cached' });
+
+        await engine.loadModel(durationUrl, decodeUrl);
+
+        // Compile shaders, JIT the duration graph, and load espeak WASM
+        // before the UI can post real lines — overlapping generates share
+        // GPU buffers and garbled the first spoken sentence.
+        self.postMessage({ status: 'loading', message: 'Warming up…' });
+        await runGenerate('Warm up.', -1, 1.0, false);
+
+        console.log('[InflectTTS Worker] Ready');
+        self.postMessage({ status: 'ready', device: navigator.gpu ? 'webgpu' : 'cpu', dtype: 'fp32' });
+      } else if (type === 'generate') {
+        const { text, lineIndex, speed = 1.0 } = e.data;
+        try {
+          await runGenerate(text, lineIndex, speed, true);
+        } catch (err) {
+          // A bad line can leave GPU activations in the buffer pool; rebuild
+          // once so the rest of the book is not permanently garbled.
+          console.warn('[InflectTTS Worker] generate failed, recovering GPU', err);
+          await engine?.recoverGpu();
+          await runGenerate(text, lineIndex, speed, true);
+        }
+      }
+    } catch (err: any) {
+      console.error('[InflectTTS Worker]', err);
+      if (type === 'init') engine = null;
+      const isFetchError = err instanceof TypeError && err.message.toLowerCase().includes('fetch');
+      self.postMessage({
+        status: 'error',
+        error: err?.message || String(err) || 'Unknown error',
+        fetchFailed: isFetchError,
+      });
+    }
+  });
 });

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'preact/hooks';
+import { useState, useEffect, useRef } from 'preact/hooks';
 import type { JSX } from 'preact';
 import Icon from './icons';
 import type { ThemeTokens, ThemeName } from '../theme';
@@ -15,6 +15,20 @@ const hexToRgba = (hex: string, alpha: number) => {
   const b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 };
+
+const smoothStep = (a: number, b: number, t: number) => {
+  const x = Math.max(0, Math.min(1, (t - a) / (b - a)));
+  return x * x * (3 - 2 * x);
+};
+
+const roundedRectSDF = (x: number, y: number, width: number, height: number, radius: number) => {
+  const qx = Math.abs(x) - width + radius;
+  const qy = Math.abs(y) - height + radius;
+  return Math.min(Math.max(qx, qy), 0) + Math.sqrt(Math.max(qx, 0) ** 2 + Math.max(qy, 0) ** 2) - radius;
+};
+
+const supportsSvgBackdropFilter = () =>
+  typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('backdrop-filter', 'url(#f)');
 
 interface BottomBarProps {
   t: ThemeTokens;
@@ -60,6 +74,74 @@ export default function BottomBar({
   const [memGb, setMemGb]   = useState<number | null>(null);
   const [cpuPct, setCpuPct] = useState<number | null>(null);
 
+  // Liquid glass (SVG displacement) setup
+  const svgBackdrop = useRef(supportsSvgBackdropFilter());
+  const filterId    = useRef('lg-' + Math.random().toString(36).slice(2, 9)).current;
+  const barRef      = useRef<HTMLDivElement>(null);
+  const canvasRef   = useRef<HTMLCanvasElement>(null);
+  const feImageRef  = useRef<SVGFEImageElement>(null);
+  const feDispRef   = useRef<SVGFEDisplacementMapElement>(null);
+  const [dims, setDims] = useState({ w: 0, h: 0 });
+
+  useEffect(() => {
+    if (!svgBackdrop.current) return;
+    const el = barRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect();
+      const w = Math.round(r.width);
+      const h = Math.round(r.height);
+      setDims((prev) => (prev.w !== w || prev.h !== h ? { w, h } : prev));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const { w, h } = dims;
+    if (!svgBackdrop.current || !w || !h || !canvasRef.current || !feImageRef.current || !feDispRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    canvas.width = w;
+    canvas.height = h;
+    const data = new Uint8ClampedArray(w * h * 4);
+    const aspect = w / h;
+    const hw = aspect / 2 - 0.04;
+    const hh = 0.5 - 0.04;
+    const radius = Math.min(hw, hh);
+    let maxScale = 0;
+    const raw: number[] = [];
+    for (let i = 0; i < data.length; i += 4) {
+      const x = (i / 4) % w;
+      const y = Math.floor(i / 4 / w);
+      const cx = ((x + 0.5) / w - 0.5) * aspect;
+      const cy = (y + 0.5) / h - 0.5;
+      const d = roundedRectSDF(cx, cy, hw, hh, radius);
+      const disp = smoothStep(0.16, -0.08, d);
+      const tx = (cx * disp) / aspect + 0.5;
+      const ty = cy * disp + 0.5;
+      const dx = tx * w - x;
+      const dy = ty * h - y;
+      maxScale = Math.max(maxScale, Math.abs(dx), Math.abs(dy));
+      raw.push(dx, dy);
+    }
+    maxScale *= 0.5;
+    if (maxScale <= 0) return;
+    let idx = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      data[i]     = (raw[idx++] / maxScale + 0.5) * 255;
+      data[i + 1] = (raw[idx++] / maxScale + 0.5) * 255;
+      data[i + 2] = 0;
+      data[i + 3] = 255;
+    }
+    ctx.putImageData(new ImageData(data, w, h), 0, 0);
+    const url = canvas.toDataURL();
+    feImageRef.current.setAttributeNS('http://www.w3.org/1999/xlink', 'href', url);
+    feImageRef.current.setAttribute('href', url);
+    feDispRef.current.setAttribute('scale', String(maxScale));
+  }, [dims.w, dims.h]);
+
   useEffect(() => {
     if (!isMenuOpen) return;
     let lastTick = performance.now();
@@ -78,11 +160,13 @@ export default function BottomBar({
 
   const iconButtonStyle: JSX.CSSProperties = {
     padding: '0.5rem', borderRadius: '0.375rem', border: 'none', cursor: 'pointer',
-    backgroundColor: 'transparent', color: t.barSpeedBg, display: 'flex', alignItems: 'center', justifyContent: 'center', transition: TT,
+    backgroundColor: 'transparent', color: t.barSpeedBg, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.28))', transition: TT,
   };
 
   const speedButtonStyle: JSX.CSSProperties = {
-    fontSize: '0.8rem', fontWeight: 700, color: t.barSpeedBg,
+    fontSize: '0.95rem', fontWeight: 700, color: t.barSpeedBg,
+    textShadow: isDarkMode ? '0 1px 2px rgba(0,0,0,0.4)' : '0 1px 1px rgba(255,255,255,0.35)',
     background: 'transparent', border: 'none',
     padding: '0.25rem 0.5rem', borderRadius: '0.375rem', minWidth: '2.5rem', cursor: 'pointer', transition: TT,
   };
@@ -106,7 +190,9 @@ export default function BottomBar({
     position: 'absolute', bottom: 'calc(100% + 10px)', overflow: 'hidden',
     borderRadius: '0.875rem', backgroundColor: t.menuBg,
     border: `1px solid ${t.menuBorder}`,
-    boxShadow: isDarkMode ? '0 8px 24px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)' : '0 8px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)',
+    boxShadow: isDarkMode
+      ? '0 8px 24px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.3)'
+      : '0 8px 24px rgba(0,0,0,0.1), 0 2px 6px rgba(0,0,0,0.06)',
   };
 
   const playButtonStyle: JSX.CSSProperties = {
@@ -136,23 +222,55 @@ export default function BottomBar({
   };
 
   return (
-    <div style={{
-      position: 'fixed', bottom: '1.5rem', left: '50%', transform: 'translateX(-50%)',
-      padding: '0.45rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.45rem',
-      zIndex: 50, borderRadius: '999px', whiteSpace: 'nowrap', transition: TT,
-      background: `${lensSheen(isDarkMode ? 0.3 : 0.48)}, ${hexToRgba(t.barBg, 0.22)}`,
-      backdropFilter: 'blur(32px) saturate(220%) brightness(1.08)',
-      WebkitBackdropFilter: 'blur(32px) saturate(220%) brightness(1.08)',
-      border: `1px solid ${glassBorder}`,
-      boxShadow: glassShadow(12),
-    }}>
+    <>
+      {svgBackdrop.current && (
+        <svg width="0" height="0" style={{ position: 'fixed', pointerEvents: 'none' }} aria-hidden="true">
+          <defs>
+            <filter
+              id={filterId}
+              filterUnits="userSpaceOnUse"
+              colorInterpolationFilters="sRGB"
+              x="0"
+              y="0"
+              width={dims.w || 1}
+              height={dims.h || 1}
+            >
+              <feImage ref={feImageRef} x="0" y="0" width={dims.w || 1} height={dims.h || 1} result="map" />
+              <feDisplacementMap
+                ref={feDispRef}
+                in="SourceGraphic"
+                in2="map"
+                scale="0"
+                xChannelSelector="R"
+                yChannelSelector="G"
+              />
+            </filter>
+          </defs>
+        </svg>
+      )}
+      {svgBackdrop.current && <canvas ref={canvasRef} style={{ display: 'none' }} />}
+      <div
+        ref={barRef}
+        style={{
+          position: 'fixed', bottom: '1.5rem', left: '50%', transform: 'translateX(-50%)',
+          padding: '0.45rem 0.85rem', display: 'flex', alignItems: 'center', gap: '0.45rem',
+          zIndex: 50, borderRadius: '999px', whiteSpace: 'nowrap', transition: TT,
+          background: `${lensSheen(isDarkMode ? 0.26 : 0.4)}, ${hexToRgba(t.barBg, 0.18)}`,
+          backdropFilter: svgBackdrop.current
+            ? `url(#${filterId}) blur(1.5px) saturate(180%) brightness(1.06)`
+            : 'blur(32px) saturate(220%) brightness(1.08)',
+          WebkitBackdropFilter: 'blur(32px) saturate(220%) brightness(1.08)',
+          border: `1px solid ${glassBorder}`,
+          boxShadow: glassShadow(12),
+        }}
+      >
       <button
         onClick={() => { const next = !isMenuOpen; closeAll(); setIsMenuOpen(next); }}
         onDblClick={onLogoClick}
         style={iconButtonStyle}
         title="Menu"
       >
-        <Icon name="menu" size={24} />
+        <Icon name="menu" size={22} />
       </button>
 
       <button onClick={() => { const next = !isSpeedMenuOpen; closeAll(); setIsSpeedMenuOpen(next); }} style={speedButtonStyle}>
@@ -231,7 +349,8 @@ export default function BottomBar({
           popoverBase={popoverBase}
         />
       )}
-    </div>
+      </div>
+    </>
   );
 }
 

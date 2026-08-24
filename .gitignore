@@ -33,3 +33,4 @@ tts_metal.swiftmodule
 clone
 tools
 docs
+*.onnx

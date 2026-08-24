@@ -8,11 +8,16 @@
 //  The graph is created once at 48 kHz and never reconfigured — reconnecting an
 //  AVAudioEngine (engine.stop()/connect) on the main actor was a source of severe
 //  main-thread hangs between utterances. All audio therefore arrives at 48 kHz
-//  (the producer resamples the raw 24 kHz TTS output when enhancement is off).
+//  (the producer resamples the raw model output when needed).
 //
 //  `reserveSlot(limit:)` provides backpressure so the producer can generate ahead
 //  of playback with a bounded look-ahead window instead of synthesizing the whole
 //  document up front.
+//
+//  Reader mode adds *tagged* buffers: each scheduled buffer carries a sentence id
+//  and fires a completion callback when it finishes playing, which drives the
+//  reader's sentence-advance/karaoke/bookmark logic. A master GainNode provides
+//  user volume for both modes.
 //
 
 import Foundation
@@ -30,10 +35,13 @@ final class AudioPlayer {
     private var generation = 0       // bumped on stop() to invalidate stale completions
     private var userPaused = false
 
+    // Tagged completions (reader mode): sentence id per scheduled buffer, FIFO.
+    private var tagQueue: [(tag: Int, onDone: ((Int) -> Void)?)] = []
+
     // Backpressure: producers awaiting a free look-ahead slot.
     private var slotWaiters: [CheckedContinuation<Void, Never>] = []
 
-    /// Called on the main actor when the last scheduled buffer finishes playing.
+    /// Called on the main actor when the last scheduled (untagged) buffer finishes playing.
     var onAllFinished: (() -> Void)?
 
     private init() {
@@ -47,9 +55,19 @@ final class AudioPlayer {
     var isActive: Bool { pending > 0 }
     var isPaused: Bool { userPaused }
     var queueDepth: Int { pending }
+    /// Session token — producers compare against their captured value to detect stops.
+    var currentGeneration: Int { generation }
+
+    // MARK: - Volume
+
+    var volume: Float {
+        get { player.volume }
+        set { player.volume = max(0, min(1, newValue)) }
+    }
+
+    // MARK: - Backpressure
 
     /// Suspend until fewer than `limit` buffers are queued (or the session is stopped).
-    /// Lets the producer stay at most `limit` chunks ahead of playback.
     func reserveSlot(limit: Int) async {
         let gen = generation
         while pending >= limit && gen == generation {
@@ -72,21 +90,27 @@ final class AudioPlayer {
         }
     }
 
-    /// Append a chunk (already at 48 kHz) to the playback queue. Plays immediately
-    /// unless paused.
-    func enqueue(_ samples: [Float]) {
+    private func makeBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
         guard !samples.isEmpty,
               let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                                            frameCapacity: AVAudioFrameCount(samples.count)) else { return }
+                                            frameCapacity: AVAudioFrameCount(samples.count)) else { return nil }
         buffer.frameLength = AVAudioFrameCount(samples.count)
         let channel = buffer.floatChannelData![0]
         samples.withUnsafeBufferPointer { p in
             for i in 0..<samples.count { channel[i] = max(-1.0, min(1.0, p[i])) }
         }
+        return buffer
+    }
 
+    // MARK: - Untagged playback (menu-bar selection reading)
+
+    /// Append a chunk (already at 48 kHz) to the playback queue. Plays immediately
+    /// unless paused.
+    func enqueue(_ samples: [Float]) {
+        guard let buffer = makeBuffer(samples) else { return }
         startEngineIfNeeded()
-        let gen = generation
         pending += 1
+        let gen = generation
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in self?.bufferFinished(gen) }
         }
@@ -103,6 +127,38 @@ final class AudioPlayer {
         releaseWaiters()                          // a look-ahead slot opened up
     }
 
+    // MARK: - Tagged playback (reader mode)
+
+    /// Schedule a sentence's audio; `onDone(tag)` fires on the main actor once that
+    /// sentence has fully played back.
+    func enqueueTagged(_ samples: [Float], tag: Int, onDone: ((Int) -> Void)? = nil) {
+        guard let buffer = makeBuffer(samples) else { return }
+        startEngineIfNeeded()
+        pending += 1
+        tagQueue.append((tag, onDone))
+        let gen = generation
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in self?.taggedBufferFinished(gen) }
+        }
+        if !userPaused { player.play() }
+    }
+
+    private func taggedBufferFinished(_ gen: Int) {
+        guard gen == generation else { return }
+        let entry = tagQueue.isEmpty ? nil : tagQueue.removeFirst()
+        pending -= 1
+        if pending <= 0 {
+            pending = 0
+            if entry?.onDone == nil { onAllFinished?() }
+        }
+        releaseWaiters()
+        if let entry = entry, let cb = entry.onDone {
+            cb(entry.tag)
+        }
+    }
+
+    // MARK: - Transport
+
     func pause() {
         userPaused = true
         player.pause()
@@ -115,9 +171,19 @@ final class AudioPlayer {
         player.play()
     }
 
+    /// Drop everything currently queued without invalidating this session.
+    func flushQueue() {
+        tagQueue.removeAll()
+        pending = 0
+        player.stop()
+        releaseWaiters()
+        generation += 1   // invalidate stale callbacks from flushed buffers
+    }
+
     func stop() {
         generation += 1
         pending = 0
+        tagQueue.removeAll()
         userPaused = false
         player.stop()
         releaseWaiters()                          // unblock any producer waiting on a slot

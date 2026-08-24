@@ -2,10 +2,10 @@
 //  tts_metalApp.swift
 //  tts-metal
 //
-//  Created by Anudit Nagar on 15/07/26.
-//
-//  Menu-bar (agent) app: no dock icon, no window — a single status-bar item whose
-//  icon reflects playback state and whose popover hosts the controls.
+//  Menu-bar agent app hosting two surfaces:
+//   1. the menu-bar popover (selection reading via ⌥⌘R), and
+//   2. the BlaBla document reader window (PDF/EPUB/MOBI/DOCX/MD/TXT/URL),
+//      both powered by the shared Supertonic 3 Metal engine.
 //
 
 import SwiftUI
@@ -21,5 +21,42 @@ struct tts_metalApp: App {
             Image(systemName: controller.menuBarIcon)
         }
         .menuBarExtraStyle(.window)
+
+        Window("BlaBla Reader", id: "blabla-reader") {
+            ReaderRootView()
+                .frame(minWidth: 760, minHeight: 560)
+                .onAppear { NSApp.activate(ignoringOtherApps: true) }
+        }
+        .defaultSize(width: 980, height: 720)
+        .defaultLaunchBehavior(.presented)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("Open Document…") { openDocumentPanel() }
+                    .keyboardShortcut("o")
+                Button("Paste from Clipboard") { pasteIntoReader() }
+                    .keyboardShortcut("v", modifiers: [.command, .shift])
+            }
+        }
+    }
+
+    private func openDocumentPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { @MainActor in ReaderControllerHolder.reader.loadFileURL(url) }
+        }
+    }
+
+    private func pasteIntoReader() {
+        guard let text = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
+        Task { @MainActor in
+            if text.range(of: #"^https?://\S+$"#, options: .regularExpression) != nil {
+                ReaderControllerHolder.reader.loadURL(text)
+            } else {
+                ReaderControllerHolder.reader.loadText(text)
+            }
+        }
     }
 }

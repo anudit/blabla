@@ -33,13 +33,13 @@ final class TtsController: ObservableObject {
         didSet { UserDefaults.standard.set(speed, forKey: "speed") }
     }
 
-    @Published private(set) var supertonicReady: Bool = false
+    private var supertonicReady: Bool = false
     /// Supertonic voice (M1..M5, F1..F5).
     @Published var supertonicVoice: String = UserDefaults.standard.string(forKey: "stVoice") ?? "M1" {
         didSet { UserDefaults.standard.set(supertonicVoice, forKey: "stVoice") }
     }
 
-    private var supertonic: SupertonicEngine?
+    private let hub = EngineHub.shared
     private let audio = AudioPlayer.shared
     private var loaded = false
 
@@ -105,44 +105,21 @@ final class TtsController: ObservableObject {
     // MARK: - Model load
 
     private func load() async {
-        statusText = "Loading Metal device…"
-        guard let device = MTLCreateSystemDefaultDevice() else {
-            fail("Metal not available."); return
-        }
-        guard let queue = device.makeCommandQueue() else {
-            fail("Could not create command queue."); return
+        statusText = "Loading model…"
+        hub.ensureLoaded()
+
+        while !hub.ready && !hub.failed {
+            statusText = hub.statusText
+            try? await Task.sleep(nanoseconds: 200_000_000)
         }
 
-        statusText = "Loading Supertonic models…"
-        // Load Supertonic 3 (Metal)
-        let stEng = SupertonicEngine(device: device, queue: queue)
-        let stOk = await Task.detached(priority: .utility) { () -> Bool in
-            do { try stEng.load(); return true }
-            catch { print("[Supertonic] Metal load failed: \(error)"); return false }
-        }.value
-
-        if stOk {
-            supertonic = stEng
+        if hub.ready {
             supertonicReady = true
             loaded = true
             phase = .idle
             statusText = "Ready — select text, then press ⌥⌘R"
         } else {
-            fail("Supertonic load failed.")
-        }
-
-        // Supertonic 3 on-device smoke test (off unless SUPERTONIC_SELFTEST=1).
-        if ProcessInfo.processInfo.environment["SUPERTONIC_SELFTEST"] == "1" {
-            statusText = "Supertonic self-test…"
-            await Task.detached(priority: .utility) {
-                let st = SupertonicEngine(device: device, queue: queue)
-                st.selfTest()
-            }.value
-        }
-        // Stage-by-stage numerical validation against /tmp/st_ref (ST_VALIDATE=1).
-        if ProcessInfo.processInfo.environment["ST_VALIDATE"] == "1" {
-            let st = SupertonicEngine(device: device, queue: queue)
-            st.validate()
+            fail(hub.statusText)
         }
     }
 
@@ -218,7 +195,7 @@ final class TtsController: ObservableObject {
     }
 
     func speak(_ rawText: String) {
-        guard loaded, let stEngine = supertonic else { return }
+        guard loaded, hub.ready else { return }
         let chunks = TextChunker.chunk(rawText)
         guard !chunks.isEmpty else { return }
 
@@ -229,9 +206,8 @@ final class TtsController: ObservableObject {
         statusText = chunks.count > 1 ? "Synthesizing \(chunks.count) chunks…" : "Synthesizing…"
 
         let rate = Float(speed)
-        // The audio graph runs at a fixed 48 kHz; everything we enqueue is 48 kHz.
-        let outRate = TtsConfig.enhancedSampleRate
         let stVoice = supertonicVoice
+        let gen = audio.currentGeneration
         speakTask = Task { @MainActor in
             for (index, chunk) in chunks.enumerated() {
                 if Task.isCancelled { return }
@@ -239,22 +215,18 @@ final class TtsController: ObservableObject {
                 // so generation of the next sentence overlaps playback of the current one
                 // without synthesizing the whole document up front.
                 await audio.reserveSlot(limit: 5)
-                if Task.isCancelled { return }
+                if Task.isCancelled || gen != audio.currentGeneration { return }
                 let wave: [Float]
                 do {
-                    wave = try await Task.detached(priority: .userInitiated) { () -> [Float] in
-                        // Supertonic 3 path (Metal compute, 44.1 kHz → resample to 48 kHz graph).
-                        let w = try stEngine.generate(chunk, voiceName: stVoice, speed: max(0.7, min(2.0, rate * 1.05)))
-                        if w.isEmpty { return [] }
-                        return Resampler.resample(w, from: Double(stEngine.sampleRate), to: outRate)
-                    }.value
+                    wave = try await hub.generate(chunk, voice: stVoice, speed: rate)
+                    if wave.isEmpty { continue }
                 } catch {
                     statusText = "Error: \(error.localizedDescription)"
                     continue
                 }
-                if Task.isCancelled { return }
+                if Task.isCancelled || gen != audio.currentGeneration { return }
                 enqueuedChunks += 1
-                if !wave.isEmpty { audio.enqueue(wave) }
+                audio.enqueue(wave)
                 if phase == .generating && !audio.isPaused { phase = .speaking }
                 if chunks.count > 1 {
                     statusText = "Speaking \(index + 1) of \(chunks.count)…"

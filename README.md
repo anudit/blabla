@@ -1,12 +1,17 @@
 # tts-metal
 
-A native macOS **menu-bar text-to-speech reader** that runs the **Supertonic 3** latent flow-matching model entirely on-device using **Metal compute shaders** — no Python, no ONNX Runtime, no Core ML. 
+A native macOS **text-to-speech suite** that runs the **Supertonic 3** latent flow-matching model entirely on-device using **Metal compute shaders** — no Python, no ONNX Runtime, no Core ML.
 
-Select text anywhere in the system, press **⌥⌘R**, and it speaks the selection in a high-fidelity voice.
+Two surfaces, one engine:
+
+1. **Menu-bar selection reader** — select text anywhere in the system, press **⌥⌘R**, and it speaks the selection.
+2. **BlaBla document reader** — a full private AI reading window (ported from the BlaBla web app): drop a PDF / EPUB / MOBI / DOCX / Markdown / TXT file or paste a URL, and it reads the document aloud with sentence karaoke highlighting, auto-scroll, TOC navigation, auto-resume bookmarks, a floating mini player, and media-key control. Everything stays on-device.
 
 ```
-selection / text ──▶ Tokenizer ──▶ Supertonic 3 (Metal) ──▶ Resampler (Lanczos) ──▶ AVAudioEngine (48 kHz)
-                     65k table        44.1 kHz audio            upsample               gapless queue
+selection / document ──▶ Loaders ──▶ Sentence stream ──▶ Normalizer ──▶ Supertonic 3 (Metal) ──▶ Resampler ──▶ AVAudioEngine
+                        (PDF/EPUB/   (click-to-jump ids)   (numbers,        44.1 kHz audio          (Lanczos)    gapless queue
+                         MOBI/DOCX/                        money, dates,
+                         MD/URL)                           abbreviations)
 ```
 
 ---
@@ -18,6 +23,18 @@ selection / text ──▶ Tokenizer ──▶ Supertonic 3 (Metal) ──▶ Re
 - **Zero-Shot Voice Cloning**: Dynamically estimates and applies speaker embeddings from reference voice styles defined in JSON configs.
 - **Expression Tags**: Supports expressive synthesis using prompt tags like `<laugh>`, `<breath>`, and `<sigh>`.
 - **High-Fidelity Output**: Generates native 44.1 kHz full-band audio, which is resampled on-the-fly to 48 kHz for gapless playback using a high-quality Lanczos sinc filter.
+
+### BlaBla document reader (ported from the BlaBla web app)
+
+| Feature | Details |
+|---|---|
+| **Formats** | PDF (PDFKit text layer), EPUB (spine + nav/NCX TOC), MOBI/AZW (PalmDOC LZ77), DOCX, Markdown (frontmatter, code, tables, lists), TXT, URL fetch, clipboard paste |
+| **Reader UI** | Rendered blocks, click any sentence to jump playback, sentence + word karaoke highlighting, auto-scroll tracking, scroll-to-current button, TOC outline sidebar |
+| **Playback** | 3-sentence look-ahead prefetch, sliding-window backpressure, gapless tagged scheduling, punctuation-aware pauses (`. , : ; ! ?`) |
+| **Text frontend** | Abbreviations, money, dates, times, phone numbers, versions, ordinals, dotted acronyms, big-number expansion |
+| **Resume** | Auto-save bookmarks (≤20 history entries, progress bars) keyed by file identity/URL |
+| **System integration** | Now Playing + media keys (play/pause, ±1 sentence) via MPRemoteCommandCenter, floating always-on-top mini player |
+| **Settings** | Voice (M1–M5/F1–F5/david-deep), speed 1×–2×, volume, font size 0.8–1.6, 6 reader themes, test voice, reset document |
 
 ---
 

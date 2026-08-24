@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var controller: TtsController
+    @Environment(\.openWindow) private var openWindow
     @State private var draft: String = ""
 
     var body: some View {
@@ -136,6 +137,13 @@ struct ContentView: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
             Spacer()
+            Button {
+                openWindow(id: "blabla-reader")
+                NSApp.activate(ignoringOtherApps: true)
+            } label: {
+                Label("BlaBla Reader", systemImage: "book")
+            }
+            .controlSize(.small)
             Button("Quit") { NSApp.terminate(nil) }
                 .controlSize(.small)
         }

@@ -578,29 +578,35 @@ struct DocumentReaderView: View {
         }
     }
 
+    /// `scrollProxy?.scrollTo` alone only reaches a block the `LazyVStack`
+    /// has already mounted — a search hit can be anywhere in the document,
+    /// almost always far outside that range, so it would silently no-op
+    /// (counter updates, page doesn't move). Walk to it the same way
+    /// `scrollToResume` does for bookmark resume.
+    private func scrollToSentence(_ sentenceID: Int, in doc: ReaderDocument) {
+        guard let proxy = scrollProxy, doc.sentences.indices.contains(sentenceID) else { return }
+        walkScroll(proxy: proxy, toBlock: doc.sentences[sentenceID].blockIndex, from: 0)
+    }
+
     private func updateFindMatches(query: String) {
         guard let doc = reader.document else { return }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { findMatches = []; findCurrent = 0; return }
         findMatches = doc.sentences.filter { $0.text.localizedCaseInsensitiveContains(q) }.map(\.id)
         findCurrent = 0
-        if let first = findMatches.first, let target = scrollTargetID(forSentence: first, in: doc) {
-            scrollProxy?.scrollTo(target, anchor: .center)
+        if let first = findMatches.first {
+            scrollToSentence(first, in: doc)
         }
     }
     private func findNext() {
         guard !findMatches.isEmpty, let doc = reader.document else { return }
         findCurrent = (findCurrent + 1) % findMatches.count
-        if let target = scrollTargetID(forSentence: findMatches[findCurrent], in: doc) {
-            scrollProxy?.scrollTo(target, anchor: .center)
-        }
+        scrollToSentence(findMatches[findCurrent], in: doc)
     }
     private func findPrev() {
         guard !findMatches.isEmpty, let doc = reader.document else { return }
         findCurrent = (findCurrent - 1 + findMatches.count) % findMatches.count
-        if let target = scrollTargetID(forSentence: findMatches[findCurrent], in: doc) {
-            scrollProxy?.scrollTo(target, anchor: .center)
-        }
+        scrollToSentence(findMatches[findCurrent], in: doc)
     }
 
     private func sentenceID(_ index: Int) -> String { "s-\(index)" }

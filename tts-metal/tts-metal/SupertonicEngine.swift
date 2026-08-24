@@ -190,8 +190,9 @@ final class SupertonicEngine: @unchecked Sendable {
                 status = .error("\(file).onnx missing from bundle"); return false
             }
             let data = try Data(contentsOf: url, options: .alwaysMapped)
-            let tensors = try OnnxParser(data).parseInitializers()
-            try uploadWeights(tensors, into: ns)
+            try OnnxParser(data).parseInitializers { tensor in
+                autoreleasepool { self.uploadWeight(tensor, into: ns) }
+            }
             print("[Supertonic] \(file): \(W[ns]!.count) weight buffers")
         }
 
@@ -262,23 +263,22 @@ final class SupertonicEngine: @unchecked Sendable {
         print("[Supertonic] compiled \(pipelines.count) pipelines")
     }
 
-    private func uploadWeights(_ tensors: [String: OnnxTensor], into ns: String) throws {
-        for (name, t) in tensors {
-            if name.hasSuffix("_scale") || name.hasSuffix("_zero_point") { continue }
-            let total = t.dims.reduce(1, *)
-            if total == 0 || t.rawData.isEmpty { continue }
-            let floats: [Float]
-            switch t.dataType {
-            case OnnxDtype.float32: floats = OnnxDequant.float32Data(t.rawData)
-            case OnnxDtype.float16: floats = OnnxDequant.float16Array(t.rawData)
-            case OnnxDtype.int64: continue
-            default: continue    // int8/uint8 quant handled in a later pass if present
-            }
-            guard let buf = device.makeBuffer(bytes: floats, length: floats.count * 4,
-                                              options: [.storageModeShared]) else { continue }
-            buf.label = "\(ns).\(name)"
-            W[ns]![name] = Weight(buf: buf, shape: t.dims)
+    private func uploadWeight(_ t: OnnxTensor, into ns: String) {
+        let name = t.name
+        if name.hasSuffix("_scale") || name.hasSuffix("_zero_point") { return }
+        let total = t.dims.reduce(1, *)
+        if total == 0 || t.rawData.isEmpty { return }
+        let floats: [Float]
+        switch t.dataType {
+        case OnnxDtype.float32: floats = OnnxDequant.float32Data(t.rawData)
+        case OnnxDtype.float16: floats = OnnxDequant.float16Array(t.rawData)
+        case OnnxDtype.int64: return
+        default: return    // int8/uint8 quant handled in a later pass if present
         }
+        guard let buf = device.makeBuffer(bytes: floats, length: floats.count * 4,
+                                          options: [.storageModeShared]) else { return }
+        buf.label = "\(ns).\(name)"
+        W[ns]![name] = Weight(buf: buf, shape: t.dims)
     }
 
     private func loadTokenizer() throws {

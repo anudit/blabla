@@ -30,8 +30,16 @@ final class OnnxParser {
         self.buffer = data
     }
 
-    func parseInitializers() throws -> [String: OnnxTensor] {
-        var result: [String: OnnxTensor] = [:]
+    /// Streams each initializer tensor to `onTensor` as it's parsed, rather
+    /// than collecting the whole model into a `[String: OnnxTensor]` first —
+    /// keeps the peak transient allocation to one tensor's size instead of a
+    /// whole model's (parsing e.g. vector_estimator.onnx into a dictionary
+    /// up front peaks at ~256MB of `Data` copies alive simultaneously).
+    /// Callers should wrap `onTensor` in an `autoreleasepool` if it converts
+    /// `rawData` through Foundation APIs that may allocate autoreleased
+    /// objects, so each tensor's scratch memory is freed before the next one
+    /// is parsed rather than accumulating until the loop's pool drains.
+    func parseInitializers(onTensor: (OnnxTensor) throws -> Void) throws {
         let count = buffer.count
         guard let graphRange = findField(targetField: 7, start: 0, end: count) else {
             throw NSError(domain: "OnnxParser", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not find graph"])
@@ -44,14 +52,13 @@ final class OnnxParser {
                 let tStart = len.end
                 let tEnd = tStart + Int(len.value)
                 if let tensor = try parseTensorProto(start: tStart, end: tEnd), !tensor.name.isEmpty {
-                    result[tensor.name] = tensor
+                    try onTensor(tensor)
                 }
                 offset = tEnd
             } else {
                 offset = try skipField(tag)
             }
         }
-        return result
     }
 
     private func parseTensorProto(start: Int, end: Int) throws -> OnnxTensor? {

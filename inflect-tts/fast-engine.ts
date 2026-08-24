@@ -17,8 +17,12 @@
  */
 import { parseOnnxModel } from './onnx-proto.ts';
 import { rawDataToTyped, DTYPES } from './tensor.ts';
-import { conv1dShader, convTranspose1dShader, unaryShader, packF32, MAX_WG } from './shaders-core.ts';
+import {
+  conv1dShader, convTranspose1dShader, unaryShader, packF32, MAX_WG,
+  CONV_TIME_PER_GROUP,
+} from './shaders-core.ts';
 import { gatedTanhSigmoidShader, elemMaskShader, channelReverseShader } from './shaders-fast.ts';
+import { GpuScratch } from './gpu-pool.ts';
 
 interface FTensor { buffer: any; C: number; T: number }
 
@@ -50,11 +54,12 @@ export class InflectFastEngine {
   private enc: any = null;
   private tempBuffers: any[] = [];
   private deadBuffers: any[] = [];
-  private bufferPool = new Map<number, any[]>();
+  private scratch!: GpuScratch;
   poisoned = false;
 
   async init(device: any): Promise<void> {
     this.device = device;
+    this.scratch = new GpuScratch(device);
     // STORAGE (128) is required: this buffer stands in for unused bindings
     // (e.g. elemOp's null mask/b operand) whose shader declares them as
     // storage bindings — without it, bind group creation is rejected and
@@ -98,14 +103,12 @@ export class InflectFastEngine {
     if (this.device && this.enc) {
       this.device.queue.submit([this.enc.finish()]);
       this.enc = null;
-      for (const b of this.tempBuffers) b.destroy();
+      // The uniforms are only safe to write again now that the encoder that
+      // referenced them has been submitted.
+      this.scratch.recycleUniforms(this.tempBuffers);
       this.tempBuffers = [];
     }
-    for (const b of this.deadBuffers) {
-      let pool = this.bufferPool.get(b.size);
-      if (!pool) { pool = []; this.bufferPool.set(b.size, pool); }
-      pool.push(b);
-    }
+    for (const b of this.deadBuffers) this.scratch.release(b);
     this.deadBuffers = [];
   }
 
@@ -125,19 +128,12 @@ export class InflectFastEngine {
     this.tempBuffers = [];
     for (const b of this.deadBuffers) try { b.destroy(); } catch {}
     this.deadBuffers = [];
-    for (const [, pool] of this.bufferPool) {
-      for (const b of pool) try { b.destroy(); } catch {}
-    }
-    this.bufferPool.clear();
+    this.scratch.clear();
     this.poisoned = false;
   }
 
   private uniform(words: Uint32Array): any {
-    const buf = this.device.createBuffer({
-      size: Math.max(256, Math.ceil(words.byteLength / 256) * 256),
-      usage: 64 | 8,
-    });
-    this.device.queue.writeBuffer(buf, 0, words);
+    const buf = this.scratch.uniform(words);
     this.tempBuffers.push(buf);
     return buf;
   }
@@ -161,12 +157,7 @@ export class InflectFastEngine {
   }
 
   private allocGpu(C: number, T: number): FTensor {
-    const size = Math.max(16, Math.ceil((C * T * 4) / 4) * 4);
-    const pool = this.bufferPool.get(size);
-    const buffer = pool && pool.length > 0
-      ? pool.pop()
-      : this.device.createBuffer({ size, usage: 128 | 8 | 4 });
-    return { buffer, C, T };
+    return { buffer: this.scratch.acquire(Math.max(16, C * T * 4)), C, T };
   }
 
   private uploadTensor(data: Float32Array, C: number, T: number): FTensor {
@@ -205,8 +196,15 @@ export class InflectFastEngine {
     pass.end();
   }
 
-  private dispatchConv(p: any, buffers: any[], meta: Uint32Array, time: number, channels: number): void {
-    const tile = MAX_WG * 8;
+  /**
+   * `timePerGroup` is how many output time steps one workgroup covers on x:
+   * conv1d has each thread do CONV_TIME_PER_THREAD of them, convTranspose1d
+   * still does one per thread.
+   */
+  private dispatchConv(
+    p: any, buffers: any[], meta: Uint32Array, time: number, channels: number, timePerGroup: number,
+  ): void {
+    const tile = MAX_WG * timePerGroup;
     const ty = Math.ceil(channels / 8);
     for (let tOff = 0; tOff < time; tOff += tile) {
       meta[8] = tOff;
@@ -214,7 +212,7 @@ export class InflectFastEngine {
       const enc = this.enc_();
       const pass = enc.beginComputePass();
       pass.setPipeline(p); pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(Math.ceil(Math.min(tile, time - tOff) / 8), ty, 1);
+      pass.dispatchWorkgroups(Math.ceil(Math.min(tile, time - tOff) / timePerGroup), ty, 1);
       pass.end();
     }
   }
@@ -233,7 +231,7 @@ export class InflectFastEngine {
     const meta = new Uint32Array(64);
     meta[0] = x.T; meta[1] = x.C; meta[2] = Cout; meta[3] = x.T; meta[4] = k; meta[5] = dil; meta[6] = pad; meta[7] = biasName ? 1 : 0;
     const p = this.pipeline('conv1d', conv1dShader());
-    this.dispatchConv(p, [x.buffer, wt.buffer, out.buffer, bias], meta, x.T, Cout);
+    this.dispatchConv(p, [x.buffer, wt.buffer, out.buffer, bias], meta, x.T, Cout, CONV_TIME_PER_GROUP);
     return out;
   }
 
@@ -246,7 +244,7 @@ export class InflectFastEngine {
     const meta = new Uint32Array(64);
     meta[0] = Wout; meta[1] = x.C; meta[2] = Cout; meta[3] = x.T; meta[4] = k; meta[5] = stride; meta[6] = pad; meta[7] = biasName ? 1 : 0;
     const p = this.pipeline('convT1d', convTranspose1dShader());
-    this.dispatchConv(p, [x.buffer, wt.buffer, out.buffer, bias], meta, Wout, Cout);
+    this.dispatchConv(p, [x.buffer, wt.buffer, out.buffer, bias], meta, Wout, Cout, 8);
     return out;
   }
 

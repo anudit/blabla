@@ -19,11 +19,13 @@ import * as cpu from './ops-cpu.ts';
 import {
   binaryShader, unaryShader, matmulShader, conv1dShader,
   convTranspose1dShader, layerNormShader, softmaxShader, packF32, MAX_WG,
+  CONV_TIME_PER_GROUP,
 } from './shaders-core.ts';
 import {
   transposeShader, sliceShader, concat2Shader, padShader, gatherShader,
   compareShader, whereShader, fillShader,
 } from './shaders-copy.ts';
+import { GpuScratch } from './gpu-pool.ts';
 
 export { parseOnnxModel };
 export type { ParsedGraph };
@@ -76,10 +78,10 @@ export class GraphExecutor {
   private tempBuffers: any[] = [];
   private deadBuffers: any[] = [];
   private protectedBuffers = new Set<any>();
-  // Buffer pool: reuse GPU buffers by byte size instead of destroy+reallocate.
-  // Avoids per-node createBuffer/destroy churn, which is what made frequent
-  // flushing (needed to bound peak memory) prohibitively slow.
-  private bufferPool = new Map<number, any[]>();
+  // Reuse GPU buffers instead of destroy+reallocate. Avoids per-node
+  // createBuffer/destroy churn, which is what made frequent flushing (needed to
+  // bound peak memory) prohibitively slow. See gpu-pool.ts.
+  private scratch!: GpuScratch;
   poisoned = false;
   debugTargets: string[] | null = null;
 
@@ -93,6 +95,7 @@ export class GraphExecutor {
   async init(device: any): Promise<void> {
     this.device = device;
     if (device) {
+      this.scratch = new GpuScratch(device);
       // STORAGE (128) included: this stands in for unused storage bindings
       // in bind() — without it, a caller passing a null buffer entry would
       // fail bind-group validation (currently unexercised, but unsafe).
@@ -110,7 +113,9 @@ export class GraphExecutor {
     if (this.device && this.enc) {
       this.device.queue.submit([this.enc.finish()]);
       this.enc = null;
-      for (const b of this.tempBuffers) b.destroy();
+      // Uniforms only become writable again once the encoder that referenced
+      // them has been submitted.
+      this.scratch.recycleUniforms(this.tempBuffers);
       this.tempBuffers = [];
     }
     // GPU buffers whose last consumer already ran can only be reclaimed once
@@ -118,11 +123,7 @@ export class GraphExecutor {
     // Return them to the size-keyed pool instead of destroying — reuse avoids
     // GPU driver overhead from constant alloc/free churn, so flush() stays
     // cheap enough to call often (bounding peak memory without hurting speed).
-    for (const b of this.deadBuffers) {
-      let pool = this.bufferPool.get(b.size);
-      if (!pool) { pool = []; this.bufferPool.set(b.size, pool); }
-      pool.push(b);
-    }
+    for (const b of this.deadBuffers) this.scratch.release(b);
     this.deadBuffers = [];
   }
 
@@ -143,10 +144,7 @@ export class GraphExecutor {
     this.tempBuffers = [];
     for (const b of this.deadBuffers) try { b.destroy(); } catch {}
     this.deadBuffers = [];
-    for (const [, pool] of this.bufferPool) {
-      for (const b of pool) try { b.destroy(); } catch {}
-    }
-    this.bufferPool.clear();
+    this.scratch?.clear();
     this.poisoned = false;
   }
 
@@ -160,11 +158,7 @@ export class GraphExecutor {
   }
 
   private uniform(words: Uint32Array): any {
-    const buf = this.device.createBuffer({
-      size: Math.max(256, Math.ceil(words.byteLength / 256) * 256),
-      usage: 64 | 8, // UNIFORM | COPY_DST
-    });
-    this.device.queue.writeBuffer(buf, 0, words);
+    const buf = this.scratch.uniform(words);
     this.tempBuffers.push(buf);
     return buf;
   }
@@ -194,13 +188,7 @@ export class GraphExecutor {
   }
 
   private allocGpu(type: DType, dims: number[]): GpuTensor {
-    const bytes = Math.max(16, numel(dims) * 4);
-    const size = Math.ceil(bytes / 4) * 4;
-    const pool = this.bufferPool.get(size);
-    const buffer = pool && pool.length > 0
-      ? pool.pop()
-      : this.device.createBuffer({ size, usage: 128 | 8 | 4 }); // GPUBufferUsage.STORAGE | COPY_DST | COPY_SRC
-    return { buffer, dims, type };
+    return { buffer: this.scratch.acquire(Math.max(16, numel(dims) * 4)), dims, type };
   }
 
   async download(g: GpuTensor): Promise<CpuTensor> {
@@ -657,7 +645,10 @@ export class GraphExecutor {
           const enc = this.enc ?? (this.enc = this.device.createCommandEncoder());
           const pass = enc.beginComputePass();
           pass.setPipeline(p); pass.setBindGroup(0, bg);
-          pass.dispatchWorkgroups(Math.ceil(Wout / 8), Math.ceil(M / 8), Math.min(65535, x.t.dims[0])); pass.end();
+          // conv1d covers CONV_TIME_PER_GROUP outputs per workgroup on x;
+          // convTranspose1d is still one per thread.
+          const perGroup = op === 'Conv' ? CONV_TIME_PER_GROUP : 8;
+          pass.dispatchWorkgroups(Math.ceil(Wout / perGroup), Math.ceil(M / 8), Math.min(65535, x.t.dims[0])); pass.end();
           this.store(cells, node.outputs[0], { loc: 'gpu', t: go });
         } else {
           const tx = await this.toCpu(x), tw = await this.toCpu(w);

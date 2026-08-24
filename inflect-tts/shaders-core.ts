@@ -125,8 +125,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }`;
 }
 
+/**
+ * Time steps computed per conv thread. Each thread keeps one weight value in a
+ * register and applies it to `CONV_TIME_PER_THREAD` consecutive outputs, so the
+ * kernel reads the weight tensor 4x less often and launches 4x fewer threads.
+ * Both dispatch sites (fast-engine's dispatchConv and the executor's generic
+ * Conv case) must divide their time extent by this.
+ */
+export const CONV_TIME_PER_THREAD = 4;
+
+/** Time steps covered by one conv workgroup (workgroup_size(8,8,1) on x). */
+export const CONV_TIME_PER_GROUP = 8 * CONV_TIME_PER_THREAD;
+
 // Conv1d (stride=1, group=1). X[N,C,W] W[M,C,k] -> Y[N,M,Wout]
 // meta: [0]=Wout [1]=C [2]=M [3]=Win [4]=k [5]=dil [6]=pad0 [7]=biasFlag
+//       [8]=time offset of this tile, in output elements
 export function conv1dShader(): string {
   return /* wgsl */ `
 ${META_BIND}
@@ -145,29 +158,47 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let dil = getMeta(5u);
   let pad0 = getMeta(6u);
   let biasFlag = getMeta(7u);
-  let t = gid.x + getMeta(8u);
   let row = gid.y;
   let n = gid.z;
-  if (t >= Wout || row >= M) { return; }
-  var acc = 0.0;
+  let t0 = getMeta(8u) + gid.x * ${CONV_TIME_PER_THREAD}u;
+  if (t0 >= Wout || row >= M) { return; }
+  let iWin = i32(Win);
+  var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0;
   for (var c = 0u; c < C; c++) {
     let xb = (n * C + c) * Win;
     let wb = (row * C + c) * k;
     for (var kk = 0u; kk < k; kk++) {
       // ONNX Conv: in = t * stride + kk * dilation - pad  (stride=1 here)
-      let s = i32(t) - i32(pad0) + i32(kk * dil);
-      if (s >= 0 && s < i32(Win)) {
-        acc += x[xb + u32(s)] * w[wb + kk];
+      let wv = w[wb + kk];
+      let s = i32(t0) - i32(pad0) + i32(kk * dil);
+      if (s >= 0 && s + 3 < iWin) {
+        // Interior: all four taps are in range, so skip the per-tap bounds test.
+        let xo = xb + u32(s);
+        a0 += x[xo] * wv;
+        a1 += x[xo + 1u] * wv;
+        a2 += x[xo + 2u] * wv;
+        a3 += x[xo + 3u] * wv;
+      } else {
+        if (s >= 0 && s < iWin) { a0 += x[xb + u32(s)] * wv; }
+        let s1 = s + 1; if (s1 >= 0 && s1 < iWin) { a1 += x[xb + u32(s1)] * wv; }
+        let s2 = s + 2; if (s2 >= 0 && s2 < iWin) { a2 += x[xb + u32(s2)] * wv; }
+        let s3 = s + 3; if (s3 >= 0 && s3 < iWin) { a3 += x[xb + u32(s3)] * wv; }
       }
     }
   }
-  if (biasFlag == 1u) { acc += bias[row]; }
-  out[(n * M + row) * Wout + t] = acc;
+  var b = 0.0;
+  if (biasFlag == 1u) { b = bias[row]; }
+  let ob = (n * M + row) * Wout + t0;
+  out[ob] = a0 + b;
+  if (t0 + 1u < Wout) { out[ob + 1u] = a1 + b; }
+  if (t0 + 2u < Wout) { out[ob + 2u] = a2 + b; }
+  if (t0 + 3u < Wout) { out[ob + 3u] = a3 + b; }
 }`;
 }
 
 // ConvTranspose1d (group=1). X[N,C,W] W[C,M,k] -> Y[N,M,Wout]
 // meta: [0]=Wout [1]=C [2]=M [3]=Win [4]=k [5]=stride [6]=pad0 [7]=biasFlag
+//       [8]=time offset of this tile, in output elements
 export function convTranspose1dShader(): string {
   return /* wgsl */ `
 ${META_BIND}
@@ -190,18 +221,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let row = gid.y;
   let n = gid.z;
   if (t >= Wout || row >= M) { return; }
+  // A tap contributes only when (t + pad - kk) is a non-negative multiple of
+  // stride, i.e. kk = p (mod stride). Walking kk in stride-sized steps from
+  // that residue visits exactly the contributing taps — the naive loop over all
+  // k tested and discarded (stride - 1) of every stride taps, which for the two
+  // 8x upsample stages meant 7 of every 8 iterations did nothing.
+  let p = i32(t) + i32(pad0);
+  let istride = i32(stride);
+  let ik = i32(k);
+  let iWin = i32(Win);
+  let kk0 = p % istride;
   var acc = 0.0;
   for (var c = 0u; c < C; c++) {
     let xb = (n * C + c) * Win;
     let wb = (c * M + row) * k;
-    for (var kk = 0u; kk < k; kk++) {
-      let num = i32(t) + i32(pad0) - i32(kk);
-      if (num >= 0 && u32(num) % stride == 0u) {
-        let u = u32(num) / stride;
-        if (u < Win) {
-          acc += x[xb + u] * w[wb + kk];
-        }
+    var kk = kk0;
+    var u = (p - kk0) / istride; // drops by 1 for every stride added to kk
+    while (kk < ik) {
+      if (u >= 0 && u < iWin) {
+        acc += x[xb + u32(u)] * w[wb + u32(kk)];
       }
+      kk += istride;
+      u -= 1;
     }
   }
   if (biasFlag == 1u) { acc += bias[row]; }

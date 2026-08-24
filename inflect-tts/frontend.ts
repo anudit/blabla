@@ -262,30 +262,78 @@ function applyPhonemeOverrides(phonemeText: string): string {
 }
 
 /**
+ * Punctuation eSpeak treats as a phrase boundary. xenova/phonemizer splits the
+ * input on these marks and returns the pieces with the marks stripped, so they
+ * have to be re-attached by hand — the reference frontend runs EspeakBackend
+ * with preserve_punctuation=True and the model is trained on phoneme strings
+ * that carry them.
+ */
+const BOUNDARY_MARKS = /([;:,.!?\u00a1\u00bf\u2014\u2026]+)/;
+
+/** Does this piece contain anything eSpeak would actually pronounce? */
+function isSpeakable(piece: string): boolean {
+  return /[\p{L}\p{N}]/u.test(piece);
+}
+
+/**
  * English text to IPA phonemes via espeak-ng WASM.
- * Mirrors Inflect-Micro-v2 `run_vits_frontend`: phonemize the full
- * normalized string with punctuation preserved (EspeakBackend
- * preserve_punctuation=True, with_stress=True). xenova/phonemizer splits on
- * .?! and drops those marks, so reinsert them between returned fragments.
+ * Mirrors Inflect-Micro-v2 `run_vits_frontend`: phonemize with punctuation
+ * preserved (EspeakBackend preserve_punctuation=True, with_stress=True).
+ *
+ * Each boundary-delimited piece is phonemized on its own and the original mark
+ * is spliced back in at the position it came from. Phonemizing the whole string
+ * in one call and zipping the returned fragments against the marks does not
+ * work: eSpeak breaks on `,;:` as well as `.!?`, and keeps `.` inside a piece
+ * when it reads as an abbreviation, so fragment N does not correspond to mark N
+ * — commas came back as full stops and sentence-final marks were dropped.
  */
 export async function textToPhonemes(text: string): Promise<string> {
   const normalized = text.trim();
   if (!normalized) return '';
 
-  const result = await phonemize(normalized, 'en-us');
-  const fragments = (Array.isArray(result) ? result : [String(result)])
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (!fragments.length) return '';
+  const pieces = normalized.split(BOUNDARY_MARKS);
+  // Even indices are text, odd indices the captured separators.
+  const spoken: number[] = [];
+  for (let i = 0; i < pieces.length; i += 2) {
+    if (isSpeakable(pieces[i])) spoken.push(i);
+  }
+  if (!spoken.length) return '';
 
-  const marks = normalized.match(/[.!?]+/g) ?? [];
+  const fragments = new Map<number, string>();
+  // Fast path: one eSpeak call for the whole string. eSpeak only ever breaks on
+  // marks that are already piece boundaries here, so it can merge pieces but
+  // never split one — an exact count match therefore means fragment k belongs
+  // to spoken piece k. Any other count falls back to phonemizing piece by piece.
+  const joined = collect(await phonemize(normalized, 'en-us'));
+  if (joined.length === spoken.length) {
+    spoken.forEach((idx, k) => fragments.set(idx, joined[k]));
+  } else {
+    for (const idx of spoken) {
+      const one = collect(await phonemize(pieces[idx].trim(), 'en-us')).join(' ');
+      if (one) fragments.set(idx, one);
+    }
+  }
+
   let phonemized = '';
-  for (let i = 0; i < fragments.length; i++) {
-    if (i) phonemized += ' ';
-    phonemized += fragments[i];
-    if (marks[i]) phonemized += marks[i];
+  for (let i = 0; i < pieces.length; i++) {
+    if (i % 2 === 1) {
+      // Separators sit flush against the phonemes they follow, as eSpeak's own
+      // preserve_punctuation output does — but only after something spoken.
+      if (phonemized) phonemized += pieces[i].trim();
+      continue;
+    }
+    const fragment = fragments.get(i);
+    if (!fragment) continue;
+    if (phonemized) phonemized += ' ';
+    phonemized += fragment;
   }
   return applyPhonemeOverrides(phonemized);
+}
+
+function collect(result: string[] | string): string[] {
+  return (Array.isArray(result) ? result : [String(result)])
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**

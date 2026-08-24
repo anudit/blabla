@@ -113,8 +113,12 @@ export class InflectTTSEngine {
     options: GenerateOptions = {},
   ): Promise<{ waveform: Float32Array }> {
     if (!this.duration || !(this.decode || this.fastDecode)) throw new Error('Engine not loaded — call loadModel() first');
-    this.duration.purgePool();
-    this.fastDecode?.purgePool();
+    // Only purge after a failed run. Purging unconditionally threw away every
+    // pooled activation buffer on entry, so each utterance re-allocated its
+    // whole working set from the driver; the pool's size classes (gpu-pool.ts)
+    // make those buffers reusable across utterances of different lengths.
+    if (this.duration.poisoned) this.duration.purgePool();
+    if (this.fastDecode?.poisoned) this.fastDecode.purgePool();
     const { speed = 1.0, variation = 0.667, seed = 0 } = options;
     if (!inputIds.length) throw new Error('Text must be a non-empty string.');
 
@@ -195,11 +199,19 @@ export class InflectTTSEngine {
   }
 }
 
-/** Split long text into <=280-char chunks at sentence/punctuation boundaries. */
+/**
+ * Split long text into <=280-char chunks at sentence boundaries.
+ *
+ * Only `.!?` end a chunk. `;` and `:` are clause-internal: now that the text
+ * frontend keeps punctuation in the phoneme stream, the model voices the short
+ * break they call for itself, and breaking the utterance there instead would
+ * drop the prosodic link across the clause boundary and add a synthetic pause
+ * on top of the one the model already produced.
+ */
 export function splitText(text: string, limit = 280): string[] {
   const normalized = text.replace(/\s+/g, ' ').trim();
   const sentences = normalized
-    .split(/(?<=[.!?;:])\s+/)
+    .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
 

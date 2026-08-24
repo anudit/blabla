@@ -17,6 +17,10 @@ import { GraphExecutor } from './executor.ts';
 import { InflectFastEngine } from './fast-engine.ts';
 import type { CpuTensor } from './tensor.ts';
 
+// See executor.ts — `process` is undefined in the browser worker.
+const TTS_DEBUG =
+  typeof process !== 'undefined' && !!process.env?.TTS_DEBUG;
+
 export interface GenerateOptions {
   /** Speaking speed multiplier. Default `1.0`. length_scale = 1/speed. */
   speed?: number;
@@ -135,7 +139,7 @@ export class InflectTTSEngine {
     const logsP = durOut.get('logs_p_exp')!;
     const yMask = durOut.get('y_mask')!;
 
-    if (process.env.TTS_DEBUG) {
+    if (TTS_DEBUG) {
       const stat = (name: string, t: CpuTensor) => {
         const a = t.data as Float32Array;
         let mx = 0;

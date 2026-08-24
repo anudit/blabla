@@ -31,6 +31,12 @@ export type { ParsedGraph };
 /** Tensors smaller than this many elements run on the CPU. */
 const SMALL = 4096;
 
+// `process` does not exist in browsers/workers — read env flags defensively so a
+// debug check never throws a ReferenceError mid-graph.
+const env: Record<string, string | undefined> =
+  typeof process !== 'undefined' && process.env ? process.env : {};
+const TTS_DEBUG = !!env.TTS_DEBUG;
+
 export interface GpuTensor {
   buffer: any; // GPUBuffer
   dims: number[];
@@ -79,7 +85,7 @@ export class GraphExecutor {
 
   constructor(modelBuffer: ArrayBuffer) {
     this.graph = parseOnnxModel(modelBuffer);
-    const dbg = typeof process !== 'undefined' ? process.env.TTS_DEBUG_NODES : undefined;
+    const dbg = env.TTS_DEBUG_NODES;
     this.debugTargets = dbg ? dbg.split('|') : null;
   }
 
@@ -320,7 +326,7 @@ export class GraphExecutor {
       const node = nodes[ni];
       try {
         await this.execNode(node, ni, cells, outputNames);
-        if (process.env.TTS_DEBUG && this.debugTargets?.length) {
+        if (TTS_DEBUG && this.debugTargets?.length) {
           const hit = node.outputs.find((o) => this.debugTargets!.includes(o));
           if (hit && cells.has(hit)) {
             const t = await this.toCpu(cells.get(hit)!);

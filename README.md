@@ -2,6 +2,8 @@
 
 A native macOS **text-to-speech suite** that runs the **Supertonic 3** latent flow-matching model entirely on-device using **Metal compute shaders** — no Python, no ONNX Runtime, no Core ML.
 
+open ./tts-metal/build/Build/Products/Release/Blabla.app
+
 Two surfaces, one engine:
 
 1. **Menu-bar selection reader** — select text anywhere in the system, press **⌥⌘R**, and it speaks the selection.

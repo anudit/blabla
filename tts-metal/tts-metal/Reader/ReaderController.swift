@@ -487,9 +487,11 @@ final class ReaderController: ObservableObject {
             idx = i
             break
         }
-        // Clamp advancement to +1 per tick to avoid skipping short words on
-        // long sentences where frac may jump >1 word width in one frame.
-        if idx > activeWordIndex + 1 { idx = activeWordIndex + 1 }
+        // No +1-per-tick clamp here: at higher playback speeds a sentence's
+        // real duration can shrink below wordCount/60s, so a hard per-tick
+        // cap would make the highlight permanently unable to catch up to the
+        // real audio position — it would trail off and never reach the final
+        // word(s) before the sentence ends and activeWordIndex resets.
         if activeWordIndex != idx {
             activeWordIndex = idx
         }
@@ -511,12 +513,17 @@ final class ReaderController: ObservableObject {
         return n > 0 ? [Float](repeating: 0, count: n) : []
     }
 
-    /// 5 ms linear fade at both edges to prevent clicks.
+    /// 20 ms raised-cosine (equal-power) fade at both edges so consecutive
+    /// sentence buffers blend into each other instead of clicking at the
+    /// splice point. A short linear ramp still has an abrupt slope change at
+    /// its ends, which is audible as a click; the cosine curve tapers the
+    /// envelope's derivative to zero too, so back-to-back buffers (one fading
+    /// out, the next fading in) meet smoothly.
     private func edgeFade(_ samples: inout [Float]) {
-        let fadeLen = min(Int(0.005 * TtsConfig.enhancedSampleRate), samples.count / 2)
+        let fadeLen = min(Int(0.020 * TtsConfig.enhancedSampleRate), samples.count / 2)
         guard fadeLen > 0 else { return }
         for i in 0..<fadeLen {
-            let g = Float(i) / Float(fadeLen)
+            let g = Float(0.5 * (1 - cos(Double.pi * Double(i) / Double(fadeLen))))
             samples[i] *= g
             samples[samples.count - 1 - i] *= g
         }

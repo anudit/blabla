@@ -166,7 +166,22 @@ final class HTMLToBlocks {
         case "div", "section", "article", "header", "footer", "main", "nav", "aside",
              "ul", "ol", "dl", "dt", "dd", "figure", "figcaption", "body", "html", "span":
             if ["ul", "ol"].contains(name) && !closing { closeParagraph() }
-            if ["div", "section", "article", "figure"].contains(name) && closing { closeParagraph() }
+            if ["div", "section", "article", "figure"].contains(name) {
+                if closing {
+                    closeParagraph()
+                } else {
+                    // Some exporters (e.g. Calibre) wrap every paragraph in a
+                    // styled <div> instead of <p>. Without opening a paragraph
+                    // here, that div's text is accumulated but never flushed
+                    // (closeParagraph() is a no-op while paragraphOpen is
+                    // false), so the whole document silently parses to zero
+                    // blocks. Treat block-level div/section/article/figure
+                    // like <p>: flush whatever's pending, then start capturing
+                    // this element's own text as a paragraph.
+                    closeParagraph()
+                    paragraphOpen = true
+                }
+            }
 
         default:
             break

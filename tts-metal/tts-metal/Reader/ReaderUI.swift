@@ -417,6 +417,7 @@ struct DocumentReaderView: View {
     @State private var findMatches: [Int] = []          // sentence ids containing query
     @State private var findCurrent = 0
     @FocusState private var findFocused: Bool
+    @State private var scrollProxy: ScrollViewProxy?
     /// Bound to the `ScrollView` via `.scrollPosition(id:)`. Unlike
     /// `ScrollViewReader.scrollTo`, this is honored even when the target row
     /// is deep inside a `LazyVStack` and hasn't been mounted/measured yet —
@@ -435,7 +436,6 @@ struct DocumentReaderView: View {
                     GeometryReader { geo in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 18) {
-                                findBar(proxy: proxy, doc: doc)
                                 titleHeader(doc)
                                 // One block per LazyVStack item (each still
                                 // wrapped in its own plain VStack so FlowLayout
@@ -467,7 +467,10 @@ struct DocumentReaderView: View {
                         }
                         .scrollPosition(id: $initialScrollTarget, anchor: .center)
                     }
-                    .onAppear { scrollToResume(proxy: proxy, doc: doc) }
+                    .onAppear {
+                        scrollProxy = proxy
+                        scrollToResume(proxy: proxy, doc: doc)
+                    }
                     .onChange(of: doc.sourceID) { _, _ in scrollToResume(proxy: proxy, doc: doc) }
                     .onChange(of: reader.currentIndex) { _, newIndex in
                         guard let target = scrollTargetID(forSentence: newIndex, in: doc) else { return }
@@ -520,37 +523,42 @@ struct DocumentReaderView: View {
             }
         }
         .background(Color(hex: theme.bg))
-        .overlay(alignment: .top) {
+        .overlay {
             // Hidden Cmd+F trigger — registers the keyboard shortcut for the window
             Button { isFindVisible = true; findFocused = true } label: { EmptyView() }
                 .keyboardShortcut("f", modifiers: .command)
                 .hidden()
         }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                findToolbarField
+            }
+        }
     }
 
-    // MARK: - Find (Cmd+F)
+    // MARK: - Find (Cmd+F) — lives in the toolbar next to the Home button
 
     @ViewBuilder
-    private func findBar(proxy: ScrollViewProxy, doc: ReaderDocument) -> some View {
+    private var findToolbarField: some View {
         if isFindVisible {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Color(hex: theme.textMuted))
                 TextField("Find", text: $findQuery)
                     .textFieldStyle(.plain)
                     .focused($findFocused)
-                    .frame(width: 220)
+                    .frame(width: 160)
                     .onChange(of: findQuery) { _, new in
-                        updateFindMatches(query: new, doc: doc, proxy: proxy)
+                        updateFindMatches(query: new)
                     }
-                    .onSubmit { findNext(proxy: proxy) }
+                    .onSubmit { findNext() }
                 if !findQuery.isEmpty {
                     Text(findMatches.isEmpty ? "No results" : "\(findCurrent + 1)/\(findMatches.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(Color(hex: theme.textMuted))
-                    Button { findPrev(proxy: proxy) } label: {
+                    Button { findPrev() } label: {
                         Image(systemName: "chevron.up").font(.system(size: 11, weight: .bold))
                     }.buttonStyle(.plain).disabled(findMatches.isEmpty)
-                    Button { findNext(proxy: proxy) } label: {
+                    Button { findNext() } label: {
                         Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold))
                     }.buttonStyle(.plain).disabled(findMatches.isEmpty)
                 }
@@ -558,34 +566,40 @@ struct DocumentReaderView: View {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(Color(hex: theme.textMuted))
                 }.buttonStyle(.plain)
             }
-            .padding(.horizontal, 12).padding(.vertical, 8)
+            .padding(.horizontal, 10).padding(.vertical, 4)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(hex: theme.dropBorder).opacity(0.5)))
             .onExitCommand { isFindVisible = false; findQuery = ""; findMatches = [] }
+        } else {
+            Button { isFindVisible = true; findFocused = true } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .help("Find (⌘F)")
         }
     }
 
-    private func updateFindMatches(query: String, doc: ReaderDocument, proxy: ScrollViewProxy) {
+    private func updateFindMatches(query: String) {
+        guard let doc = reader.document else { return }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { findMatches = []; findCurrent = 0; return }
         findMatches = doc.sentences.filter { $0.text.localizedCaseInsensitiveContains(q) }.map(\.id)
         findCurrent = 0
         if let first = findMatches.first, let target = scrollTargetID(forSentence: first, in: doc) {
-            proxy.scrollTo(target, anchor: .center)
+            scrollProxy?.scrollTo(target, anchor: .center)
         }
     }
-    private func findNext(proxy: ScrollViewProxy) {
+    private func findNext() {
         guard !findMatches.isEmpty, let doc = reader.document else { return }
         findCurrent = (findCurrent + 1) % findMatches.count
         if let target = scrollTargetID(forSentence: findMatches[findCurrent], in: doc) {
-            proxy.scrollTo(target, anchor: .center)
+            scrollProxy?.scrollTo(target, anchor: .center)
         }
     }
-    private func findPrev(proxy: ScrollViewProxy) {
+    private func findPrev() {
         guard !findMatches.isEmpty, let doc = reader.document else { return }
         findCurrent = (findCurrent - 1 + findMatches.count) % findMatches.count
         if let target = scrollTargetID(forSentence: findMatches[findCurrent], in: doc) {
-            proxy.scrollTo(target, anchor: .center)
+            scrollProxy?.scrollTo(target, anchor: .center)
         }
     }
 

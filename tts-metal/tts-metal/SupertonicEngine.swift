@@ -83,7 +83,16 @@ final class SupertonicEngine: @unchecked Sendable {
 
     // MARK: - Weights
 
-    struct Weight { let buf: MTLBuffer; let shape: [Int]; var count: Int { shape.reduce(1, *) } }
+    struct Weight {
+        var buf: MTLBuffer
+        let shape: [Int]
+        // Set once `buf` has been swapped for its GPU-transposed copy (see
+        // `weightBufWT`) — the original [outCh,inCh] layout is never read
+        // again after that, so it's replaced rather than kept alongside a
+        // second copy.
+        var transposed = false
+        var count: Int { shape.reduce(1, *) }
+    }
     // Namespaced by model: weights["te"]["char_embedder..."] etc.
     private var W: [String: [String: Weight]] = ["te": [:], "dp": [:], "vf": [:], "vo": [:]]
     private var filmWeights: [Weight] = []
@@ -828,13 +837,13 @@ final class SupertonicEngine: @unchecked Sendable {
         if let g = weightBuf(ns, "\(prefix).norm.norm.weight"), let bb = weightBuf(ns, "\(prefix).norm.norm.bias") {
             dispatchLayerNorm(input: dwT, gamma: g, beta: bb, out: normed, rows: B * T, C: C)
         }
-        guard let w1 = weightBuf(ns, "\(prefix).pwconv1.weight"), let b1 = weightBuf(ns, "\(prefix).pwconv1.bias"),
-              let w2 = weightBuf(ns, "\(prefix).pwconv2.weight"), let b2 = weightBuf(ns, "\(prefix).pwconv2.bias")
+        guard weightBuf(ns, "\(prefix).pwconv1.weight") != nil, let b1 = weightBuf(ns, "\(prefix).pwconv1.bias"),
+              weightBuf(ns, "\(prefix).pwconv2.weight") != nil, let b2 = weightBuf(ns, "\(prefix).pwconv2.bias")
         else { return x }
         let hid = empty(B * T * inter)
-        matmulRowMajorWT(A: normed, Wt: w1, bias: b1, out: hid, M: B * T, K: C, N: inter, act: "gelu")
+        matmulRowMajorWT(A: normed, ns: ns, name: "\(prefix).pwconv1.weight", bias: b1, out: hid, M: B * T, K: C, N: inter, act: "gelu")
         let proj = empty(B * T * C)
-        matmulRowMajorWT(A: hid, Wt: w2, bias: b2, out: proj, M: B * T, K: inter, N: C)
+        matmulRowMajorWT(A: hid, ns: ns, name: "\(prefix).pwconv2.weight", bias: b2, out: proj, M: B * T, K: inter, N: C)
         let out = empty(B * C * T)
         if let gamma = weightBuf(ns, "\(prefix).gamma") {
             dispatchGammaResidualBatched(h: proj, residual: residual, gamma: gamma, out: out, C: C, T: T, batch: B)
@@ -848,12 +857,12 @@ final class SupertonicEngine: @unchecked Sendable {
 
     // Batched conv1x1 (pointwise): [B, inCh, L] → [B, outCh, L] via one [B·L, outCh] matmul.
     private func conv1x1Batched(ns: String, prefix: String, x: MTLBuffer, inCh: Int, outCh: Int, L: Int, batch B: Int) throws -> MTLBuffer {
-        guard let w = weightBuf(ns, "\(prefix).weight") else { return x }
+        guard weightBuf(ns, "\(prefix).weight") != nil else { return x }
         let bias = weightBuf(ns, "\(prefix).bias")
         let xt = empty(B * L * inCh)                                 // [B·L, inCh]
         dispatchTransposeBatched(input: x, out: xt, rows: inCh, cols: L, batch: B)
         let outT = empty(B * L * outCh)
-        matmulRowMajorWT(A: xt, Wt: w, bias: bias, out: outT, M: B * L, K: inCh, N: outCh)
+        matmulRowMajorWT(A: xt, ns: ns, name: "\(prefix).weight", bias: bias, out: outT, M: B * L, K: inCh, N: outCh)
         let out = empty(B * outCh * L)                              // [B, outCh, L]
         dispatchTransposeBatched(input: outT, out: out, rows: L, cols: outCh, batch: B)
         return out
@@ -942,14 +951,14 @@ final class SupertonicEngine: @unchecked Sendable {
             dispatchLayerNorm(input: dwT, gamma: g, beta: b, out: normed, rows: T, C: C)
         }
         // pwconv1 C→I (+GELU), pwconv2 I→C   (pointwise = row-major matmul over C)
-        guard let w1 = weightBuf(ns, "\(prefix).pwconv1.weight"), let b1 = weightBuf(ns, "\(prefix).pwconv1.bias"),
-              let w2 = weightBuf(ns, "\(prefix).pwconv2.weight"), let b2 = weightBuf(ns, "\(prefix).pwconv2.bias")
+        guard weightBuf(ns, "\(prefix).pwconv1.weight") != nil, let b1 = weightBuf(ns, "\(prefix).pwconv1.bias"),
+              weightBuf(ns, "\(prefix).pwconv2.weight") != nil, let b2 = weightBuf(ns, "\(prefix).pwconv2.bias")
         else { return x }
         // weights are [I, C, 1] and [C, I, 1]; interpret as [I,C] and [C,I], transpose for row-major matmul
         let hid = empty(T * inter)
-        matmulRowMajorWT(A: normed, Wt: w1, bias: b1, out: hid, M: T, K: C, N: inter, act: "gelu")
+        matmulRowMajorWT(A: normed, ns: ns, name: "\(prefix).pwconv1.weight", bias: b1, out: hid, M: T, K: C, N: inter, act: "gelu")
         let proj = empty(T * C)
-        matmulRowMajorWT(A: hid, Wt: w2, bias: b2, out: proj, M: T, K: inter, N: C)
+        matmulRowMajorWT(A: hid, ns: ns, name: "\(prefix).pwconv2.weight", bias: b2, out: proj, M: T, K: inter, N: C)
         // gamma · h[T,C] + residual[C,T]  → [C, T]
         let out = empty(C * T)
         if let gamma = weightBuf(ns, "\(prefix).gamma") {
@@ -970,10 +979,10 @@ final class SupertonicEngine: @unchecked Sendable {
         // q/k/v via conv_q/k/v (1x1 conv == linear). Falls back to identity if weights absent.
         let hd = C / heads
         func proj(_ which: String) -> MTLBuffer {
-            guard let w = weightBuf(ns, "attn_encoder.attn_layers.\(layer).conv_\(which).weight") else { return x }
+            guard weightBuf(ns, "attn_encoder.attn_layers.\(layer).conv_\(which).weight") != nil else { return x }
             let b = weightBuf(ns, "attn_encoder.attn_layers.\(layer).conv_\(which).bias")
             let out = empty(T * C)
-            matmulRowMajorWT(A: x, Wt: w, bias: b, out: out, M: T, K: C, N: C)
+            matmulRowMajorWT(A: x, ns: ns, name: "attn_encoder.attn_layers.\(layer).conv_\(which).weight", bias: b, out: out, M: T, K: C, N: C)
             return out
         }
         let q = proj("q"), k = proj("k"), v = proj("v")
@@ -998,10 +1007,10 @@ final class SupertonicEngine: @unchecked Sendable {
         }
         // out proj conv_o
         var o = attn
-        if let wo = weightBuf(ns, "attn_encoder.attn_layers.\(layer).conv_o.weight") {
+        if weightBuf(ns, "attn_encoder.attn_layers.\(layer).conv_o.weight") != nil {
             let bo = weightBuf(ns, "attn_encoder.attn_layers.\(layer).conv_o.bias")
             let out = empty(T * C)
-            matmulRowMajorWT(A: attn, Wt: wo, bias: bo, out: out, M: T, K: C, N: C)
+            matmulRowMajorWT(A: attn, ns: ns, name: "attn_encoder.attn_layers.\(layer).conv_o.weight", bias: bo, out: out, M: T, K: C, N: C)
             o = out
         }
         if layer == 3 {
@@ -1027,14 +1036,14 @@ final class SupertonicEngine: @unchecked Sendable {
                 if let b2 = b2 { printBufStats("layer 3 b2 bias", b2, count: C) }
             }
             let hid = empty(T * filter)
-            matmulRowMajorWT(A: h, Wt: w1, bias: b1, out: hid, M: T, K: C, N: filter, act: "relu")
+            matmulRowMajorWT(A: h, ns: ns, name: "attn_encoder.ffn_layers.\(layer).conv_1.weight", bias: b1, out: hid, M: T, K: C, N: filter, act: "relu")
             if layer == 3 {
                 saveBin("/tmp/layer3_h.bin", h, count: T * C)
                 printBufStats("layer 3 FFN hid", hid, count: T * filter)
                 saveBin("/tmp/layer3_hid.bin", hid, count: T * filter)
             }
             let out = empty(T * C)
-            matmulRowMajorWT(A: hid, Wt: w2, bias: b2, out: out, M: T, K: filter, N: C)
+            matmulRowMajorWT(A: hid, ns: ns, name: "attn_encoder.ffn_layers.\(layer).conv_2.weight", bias: b2, out: out, M: T, K: filter, N: C)
             ff = out
         }
         if layer == 3 {
@@ -1269,11 +1278,11 @@ final class SupertonicEngine: @unchecked Sendable {
     private func conv1x1(ns: String, prefix: String, x: MTLBuffer, inCh: Int, outCh: Int, L: Int) throws -> MTLBuffer {
         // weight [outCh, inCh, 1] → treat as [outCh, inCh]. Compute row-major over L:
         // out[L, outCh] = x^T[L, inCh] · W^T ; then to channel-major.
-        guard let w = weightBuf(ns, "\(prefix).weight") else { return x }
+        guard weightBuf(ns, "\(prefix).weight") != nil else { return x }
         let b = weightBuf(ns, "\(prefix).bias")
         let xt = try toRowMajor(x, rows: inCh, cols: L)     // [L, inCh]
         let outT = empty(L * outCh)
-        matmulRowMajorWT(A: xt, Wt: w, bias: b, out: outT, M: L, K: inCh, N: outCh)
+        matmulRowMajorWT(A: xt, ns: ns, name: "\(prefix).weight", bias: b, out: outT, M: L, K: inCh, N: outCh)
         return try toChannelMajor(outT, rows: L, cols: outCh)
     }
 
@@ -1314,8 +1323,12 @@ final class SupertonicEngine: @unchecked Sendable {
 
     // MARK: - Weight lookup
 
-    private func weightBuf(_ ns: String, _ contains: String) -> MTLBuffer? {
-        if let w = W[ns]?[contains] { return w.buf }
+    /// Resolves a caller-supplied name (which may need alias/substring
+    /// matching against the ONNX initializer names) to the exact key stored
+    /// in `W[ns]`. Shared by `weightBuf` and `weightBufWT` so both agree on
+    /// which dictionary entry a given name refers to.
+    private func resolvedWeightKey(_ ns: String, _ contains: String) -> String? {
+        if W[ns]?[contains] != nil { return contains }
 
         // Resolve via alias map
         let normalized = contains
@@ -1324,23 +1337,45 @@ final class SupertonicEngine: @unchecked Sendable {
             .replacingOccurrences(of: "speech_prompted_text_encoder.", with: "")
             .replacingOccurrences(of: "tts.ae.", with: "")
 
-        if let alias = weightAliasMap[normalized] {
-            if let w = W[ns]?[alias] { return w.buf }
+        if let alias = weightAliasMap[normalized], W[ns]?[alias] != nil {
+            return alias
         }
 
         if normalized.hasSuffix(".weight") {
             let matmulKey = normalized.replacingOccurrences(of: ".weight", with: ".MatMul.weight")
-            if let alias = weightAliasMap[matmulKey] {
-                if let w = W[ns]?[alias] { return w.buf }
+            if let alias = weightAliasMap[matmulKey], W[ns]?[alias] != nil {
+                return alias
             }
         }
 
         // suffix / substring match
         if let hit = W[ns]?.first(where: { $0.key.hasSuffix(contains) || $0.key.contains(contains) }) {
             print("[WeightBuf] matched '\(contains)' to '\(hit.key)'")
-            return hit.value.buf
+            return hit.key
         }
         return nil
+    }
+
+    private func weightBuf(_ ns: String, _ contains: String) -> MTLBuffer? {
+        guard let key = resolvedWeightKey(ns, contains) else { return nil }
+        return W[ns]?[key]?.buf
+    }
+
+    /// Like `weightBuf`, but for weights consumed via `matmulRowMajorWT`.
+    /// Transposes [outCh,inCh] -> [inCh,outCh] once and swaps the stored
+    /// buffer for the transposed copy (rather than caching it alongside the
+    /// original) — the untransposed layout is never read again after this,
+    /// so replacing it in place avoids permanently doubling that weight's
+    /// GPU memory.
+    private func weightBufWT(_ ns: String, _ contains: String, K: Int, N: Int) -> MTLBuffer? {
+        guard let key = resolvedWeightKey(ns, contains) else { return nil }
+        guard let entry = W[ns]?[key] else { return nil }
+        if entry.transposed { return entry.buf }
+        let t = empty(K * N)
+        dispatchTranspose(input: entry.buf, out: t, rows: N, cols: K)   // [N,K] -> [K,N]
+        flushAndWait()                                                  // materialize once
+        W[ns]![key] = Weight(buf: t, shape: entry.shape, transposed: true)
+        return t
     }
     private func findWeight(_ ns: String, contains: String, and: String? = nil) -> String? {
         W[ns]?.keys.first(where: { $0.contains(contains) && (and == nil || $0.contains(and!)) })
@@ -1518,25 +1553,25 @@ final class SupertonicEngine: @unchecked Sendable {
                  gridX: (N + BN - 1) / BN, gridY: (M + BM - 1) / BM, wgX: 256, wgY: 1)
     }
 
-    // Cache of transposed constant weights ([N,K] → [K,N]). The weight buffers are
-    // immutable, so the transpose only needs to happen once per weight, not once per
-    // matmul call (the flow-matching loop reuses each weight 16× per generation).
-    private var transposeCache: [ObjectIdentifier: MTLBuffer] = [:]
-
+    // Weights consumed here are PyTorch Linear / conv1x1 style [outCh, inCh]
+    // and need one-time transposition to [inCh, outCh] to serve as a GPU
+    // matmul's B operand (the flow-matching loop reuses each weight 16× per
+    // generation, so this only needs to happen once per weight, not once per
+    // matmul call). `weightBufWT` performs that transpose and *replaces* the
+    // stored weight buffer in place — the original [outCh,inCh] copy is
+    // never read again by anything else (verified: every other consumer of
+    // model weights either reads a distinctly-named tensor, e.g. dwconv/
+    // gamma/norm weights, or — for the few weights that go through the
+    // non-WT `matmulRowMajor` path — is stored under ONNX MatMul's own
+    // [in,out] convention and never touches this path at all) — so keeping
+    // both copies around forever (the previous `transposeCache` design) was
+    // pure waste: roughly 2× the resident GPU memory for every weight that
+    // flows through here.
+    //
     // Row-major matmul where the weight is stored transposed [N, K] (PyTorch Linear /
-    // conv1x1 [outCh, inCh]). Computes out[M,N] = A[M,K] · W^T. Transpose W to [K,N] first.
-    private func matmulRowMajorWT(A: MTLBuffer, Wt: MTLBuffer, bias: MTLBuffer?, out: MTLBuffer, M: Int, K: Int, N: Int, act: String = "none") {
-        let key = ObjectIdentifier(Wt)
-        let Bkn: MTLBuffer
-        if let cached = transposeCache[key] {
-            Bkn = cached
-        } else {
-            let t = empty(K * N)
-            dispatchTranspose(input: Wt, out: t, rows: N, cols: K)   // [N,K] -> [K,N]
-            flushAndWait()                                          // materialize once
-            transposeCache[key] = t
-            Bkn = t
-        }
+    // conv1x1 [outCh, inCh]). Computes out[M,N] = A[M,K] · W^T.
+    private func matmulRowMajorWT(A: MTLBuffer, ns: String, name: String, bias: MTLBuffer?, out: MTLBuffer, M: Int, K: Int, N: Int, act: String = "none") {
+        guard let Bkn = weightBufWT(ns, name, K: K, N: N) else { return }
         matmulRowMajor(A: A, B: Bkn, bias: bias, out: out, M: M, K: K, N: N, act: act)
     }
 

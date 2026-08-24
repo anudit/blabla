@@ -125,7 +125,10 @@ struct ReaderDocument {
                 let spoken = TTSTextNormalizer.cleanForTtsFast(blocks[bi].speechText)
                 buf[bi] = SentenceSplitter.extract(spoken).compactMap { s -> String? in
                     let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !t.isEmpty else { return nil }
+                    // Drops junk like bare page numbers ("7", "28") that land
+                    // as their own block/sentence in scanned or Calibre-style
+                    // EPUB output — too short to be a real sentence.
+                    guard t.count > 3 else { return nil }
                     return t.hasPunctuationTerminal ? t : t + "."
                 }
             }
@@ -299,8 +302,24 @@ struct WordTiming: Equatable {
 }
 
 enum WordTimingCalculator {
+    // The reader view recomputes this for the active sentence on every
+    // 60fps karaoke tick (only `activeWordIndex` changed, not the sentence),
+    // so a single-entry memo avoids re-splitting/re-measuring the same
+    // string dozens of times a second. Bounded to one entry — only the
+    // currently-active sentence is ever queried repeatedly.
+    private static var lastSentence: String?
+    private static var lastResult: [WordTiming] = []
+
     /// Distributes duration proportionally to character counts (incl. trailing space).
     static func timings(for sentence: String) -> [WordTiming] {
+        if sentence == lastSentence { return lastResult }
+        let result = computeTimings(for: sentence)
+        lastSentence = sentence
+        lastResult = result
+        return result
+    }
+
+    private static func computeTimings(for sentence: String) -> [WordTiming] {
         let words = sentence.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard !words.isEmpty else { return [] }
         let counts = words.map { Double($0.count + 1) }

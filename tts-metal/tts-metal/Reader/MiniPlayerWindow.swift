@@ -183,7 +183,17 @@ struct MiniPlayerView: View {
 }
 
 extension Color {
+    // Karaoke highlighting re-renders every visible word on a 60fps timer
+    // tick, and each render re-parses the same handful of theme hex strings
+    // via Scanner — memoize so steady-state playback doesn't burn CPU on
+    // repeat string parsing.
+    private static var hexCache: [String: Color] = [:]
+
     init(hex: String) {
+        if let cached = Color.hexCache[hex] {
+            self = cached
+            return
+        }
         var h = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         if h.hasPrefix("#") { h.removeFirst() }
         var v: UInt64 = 0
@@ -192,5 +202,6 @@ extension Color {
         let g = Double((v >> 8) & 0xFF) / 255.0
         let b = Double(v & 0xFF) / 255.0
         self.init(red: r, green: g, blue: b)
+        Color.hexCache[hex] = self
     }
 }

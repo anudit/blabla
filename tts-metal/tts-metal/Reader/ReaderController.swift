@@ -113,8 +113,13 @@ final class ReaderController: ObservableObject {
         engineHub.ensureLoaded()
         if !engineHub.ready {
             statusText = engineHub.statusText
+            // Polled rather than awaited via Combine to keep this dependency-free;
+            // interval kept short since engine load is ~300ms total (see
+            // SupertonicEngine.load PerfLog output) — a coarser interval here
+            // was adding up to a poll period of pure wasted latency on top of
+            // the real model-load time before playback could even start.
             while !engineHub.ready && !engineHub.failed {
-                try? await Task.sleep(nanoseconds: 250_000_000)
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
             statusText = engineHub.statusText
         }

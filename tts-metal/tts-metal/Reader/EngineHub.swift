@@ -27,6 +27,11 @@ final class EngineHub: ObservableObject {
         guard !loadStarted else { return }
         loadStarted = true
 
+        // Overlaps AVAudioEngine's first-start hardware negotiation (100ms+)
+        // with the model load below, instead of paying it on the first
+        // sentence's time-to-first-audio.
+        AudioPlayer.shared.prewarm()
+
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue() else {
             statusText = "Metal not available."
@@ -37,6 +42,7 @@ final class EngineHub: ObservableObject {
         Task.detached(priority: .utility) { [weak self] () -> Void in
             do { try eng.load() }
             catch { print("[EngineHub] load failed: \(error)") }
+            eng.profile = true   // per-stage synthesis timings via PerfLog/print — see SupertonicEngine.generate
             await MainActor.run { [weak self] in
                 self?.engine = eng
                 if eng.status == .ready {
@@ -63,12 +69,15 @@ final class EngineHub: ObservableObject {
     /// Runs entirely off the main actor.
     func generate(_ text: String, voice: String, speed: Float) async throws -> [Float] {
         guard let eng = engine else { return [] }
-        return try await Task.detached(priority: .userInitiated) { () -> [Float] in
+        PerfLog.log("EngineHub.generate start (\(text.count) chars)")
+        let result = try await Task.detached(priority: .userInitiated) { () -> [Float] in
             let wave = try eng.generate(text, voiceName: voice,
                                         speed: max(0.7, min(2.0, speed * 1.05)))
             if wave.isEmpty { return [] }
             return Resampler.resample(wave, from: Double(eng.sampleRate),
                                       to: TtsConfig.enhancedSampleRate)
         }.value
+        PerfLog.log("EngineHub.generate done")
+        return result
     }
 }

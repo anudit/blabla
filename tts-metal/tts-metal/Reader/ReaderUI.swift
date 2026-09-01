@@ -34,6 +34,16 @@ struct ReaderRootView: View {
         .frame(minWidth: 760, minHeight: 560)
         .background(Color(hex: reader.theme.bg))
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    withAnimation { reader.outlineVisible.toggle() }
+                } label: {
+                    Label("Contents", systemImage: "sidebar.leading")
+                }
+                .help("Show table of contents")
+                .disabled(reader.document == nil)
+                .opacity(reader.document == nil ? 0.45 : 1)
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     reader.stopPlayback()
@@ -418,6 +428,12 @@ struct DocumentReaderView: View {
     @State private var findCurrent = 0
     @FocusState private var findFocused: Bool
     @State private var scrollProxy: ScrollViewProxy?
+    /// Bumped on every new `walkScroll` request so a stale chain (still
+    /// hopping toward a target that's since been superseded — e.g. the
+    /// user clicked a find arrow again, or typed another character, before
+    /// the previous walk finished) recognizes it's obsolete and stops
+    /// instead of fighting the newer walk for the final scroll position.
+    @State private var scrollWalkToken = 0
     /// Bound to the `ScrollView` via `.scrollPosition(id:)`. Unlike
     /// `ScrollViewReader.scrollTo`, this is honored even when the target row
     /// is deep inside a `LazyVStack` and hasn't been mounted/measured yet —
@@ -473,12 +489,14 @@ struct DocumentReaderView: View {
                     }
                     .onChange(of: doc.sourceID) { _, _ in scrollToResume(proxy: proxy, doc: doc) }
                     .onChange(of: reader.currentIndex) { _, newIndex in
+                        guard !isSearchActive else { return }
                         guard let target = scrollTargetID(forSentence: newIndex, in: doc) else { return }
                         if reader.isSpeaking || reader.state == .ready {
                             proxy.scrollTo(target, anchor: .center)
                         }
                     }
                     .onChange(of: reader.state) { old, new in
+                        guard !isSearchActive else { return }
                         if old == .paused && new == .playing,
                            let target = scrollTargetID(forSentence: reader.currentIndex, in: doc) {
                             proxy.scrollTo(target, anchor: .center)
@@ -491,7 +509,8 @@ struct DocumentReaderView: View {
                         // so the target may be unmounted — walk to it rather
                         // than a direct scrollTo. See scrollToResume.
                         if doc.sentences.indices.contains(reader.currentIndex) {
-                            walkScroll(proxy: proxy, toBlock: doc.sentences[reader.currentIndex].blockIndex, from: 0)
+                            scrollWalkToken += 1
+                            walkScroll(proxy: proxy, toBlock: doc.sentences[reader.currentIndex].blockIndex, from: 0, token: scrollWalkToken)
                         }
                     }
                     .onReceive(NotificationCenter.default.publisher(for: .scrollToBlock)) { note in
@@ -508,9 +527,10 @@ struct DocumentReaderView: View {
                         } label: {
                             Image(systemName: "target")
                                 .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(Color(hex: theme.barIconColor))
                                 .frame(width: 44, height: 44)
                                 .background(Color(hex: theme.barBg), in: Circle())
+                                .overlay(Circle().strokeBorder(Color(hex: theme.barBorder), lineWidth: 1))
                                 .shadow(radius: 5)
                         }
                         .buttonStyle(.plain)
@@ -585,7 +605,8 @@ struct DocumentReaderView: View {
     /// `scrollToResume` does for bookmark resume.
     private func scrollToSentence(_ sentenceID: Int, in doc: ReaderDocument) {
         guard let proxy = scrollProxy, doc.sentences.indices.contains(sentenceID) else { return }
-        walkScroll(proxy: proxy, toBlock: doc.sentences[sentenceID].blockIndex, from: 0)
+        scrollWalkToken += 1
+        walkScroll(proxy: proxy, toBlock: doc.sentences[sentenceID].blockIndex, from: 0, token: scrollWalkToken)
     }
 
     private func updateFindMatches(query: String) {
@@ -608,6 +629,13 @@ struct DocumentReaderView: View {
         findCurrent = (findCurrent - 1 + findMatches.count) % findMatches.count
         scrollToSentence(findMatches[findCurrent], in: doc)
     }
+
+    /// While a search is active, the normal playback autoscroll (which
+    /// follows every sentence as it's read) is suppressed — see the
+    /// `reader.currentIndex`/`reader.state` `.onChange` handlers above — so
+    /// find navigation keeps the view parked on the match the user is
+    /// looking at instead of it being yanked back to the playhead.
+    private var isSearchActive: Bool { !findQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private func sentenceID(_ index: Int) -> String { "s-\(index)" }
     private func blockID(_ index: Int) -> String { "b-\(index)" }
@@ -647,13 +675,23 @@ struct DocumentReaderView: View {
         let targetBlock = doc.sentences[index].blockIndex
         guard targetBlock > 0 else { return }
         initialScrollTarget = blockID(targetBlock)
-        walkScroll(proxy: proxy, toBlock: targetBlock, from: 0)
+        scrollWalkToken += 1
+        walkScroll(proxy: proxy, toBlock: targetBlock, from: 0, token: scrollWalkToken)
     }
 
     /// Steps the scroll position from `current` toward `toBlock` in a
     /// LazyVStack, one mountable stretch at a time — see `scrollToResume`.
+    /// `token` must still match `scrollWalkToken` at each hop: if a newer
+    /// walk was started in the meantime this chain is stale and stops,
+    /// rather than continuing to fire `scrollTo` calls that fight the
+    /// newer walk for the final position (this is what made repeated find
+    /// next/prev clicks — or fast typing — fail to land on the target).
     private func walkScroll(proxy: ScrollViewProxy, toBlock target: Int, from current: Int,
-                            step: Int = 24, hop: Int = 0) {
+                            step: Int = 24, hop: Int = 0, token: Int) {
+        guard token == scrollWalkToken else {
+            PerfLog.log("walkScroll aborted (superseded by newer walk)")
+            return
+        }
         guard hop < 2000 else {
             PerfLog.log("walkScroll aborted (too many hops)")
             return
@@ -664,7 +702,7 @@ struct DocumentReaderView: View {
         PerfLog.log("walkScroll hop \(hop) -> block \(next)\(reachedTarget ? " (target)" : "")")
         guard !reachedTarget else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            walkScroll(proxy: proxy, toBlock: target, from: next, step: step, hop: hop + 1)
+            walkScroll(proxy: proxy, toBlock: target, from: next, step: step, hop: hop + 1, token: token)
         }
     }
 

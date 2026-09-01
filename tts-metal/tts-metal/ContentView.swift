@@ -141,7 +141,7 @@ struct ContentView: View {
                 openWindow(id: "blabla-reader")
                 NSApp.activate(ignoringOtherApps: true)
             } label: {
-                Label("BlaBla Reader", systemImage: "book")
+                Label("BlaBla", systemImage: "book")
             }
             .controlSize(.small)
             Button("Quit") { NSApp.terminate(nil) }

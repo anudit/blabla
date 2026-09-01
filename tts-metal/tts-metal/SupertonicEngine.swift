@@ -161,6 +161,16 @@ final class SupertonicEngine: @unchecked Sendable {
     struct StageTime { let name: String; let ms: Double }
     private(set) var lastTimings: [StageTime] = []
     var profile = false
+    /// Gates `printBufStats`/`printArrStats`. Each call reads a Metal buffer
+    /// back to the CPU, which forces `flushAndWait()` — a synchronous
+    /// commit + `waitUntilCompleted` that drains the whole GPU-resident
+    /// pipeline early. There are ~20 such calls sprinkled through the text
+    /// encoder/flow-matching stages; left unconditional they turn what
+    /// should be one batched command buffer per stage into a dozen+ stall
+    /// points, which is most of why `generate()`'s per-stage times looked
+    /// so much higher than the underlying compute. Off by default; the
+    /// self-test/validate paths turn it on explicitly.
+    var verboseStats = false
 
     init(device: MTLDevice, queue: MTLCommandQueue) {
         self.device = device
@@ -171,12 +181,14 @@ final class SupertonicEngine: @unchecked Sendable {
 
     @discardableResult
     func load() throws -> Bool {
+        PerfLog.log("SupertonicEngine.load start")
         status = .loading("Compiling Metal shaders")
         guard let lib = device.makeDefaultLibrary() else {
             status = .error("default.metallib not found"); return false
         }
         library = lib
         compilePipelines()
+        PerfLog.log("compilePipelines done")
 
         let models: [(String, String)] = [
             ("te", "text_encoder"), ("dp", "duration_predictor"),
@@ -194,13 +206,16 @@ final class SupertonicEngine: @unchecked Sendable {
                 autoreleasepool { self.uploadWeight(tensor, into: ns) }
             }
             print("[Supertonic] \(file): \(W[ns]!.count) weight buffers")
+            PerfLog.log("\(file) weights uploaded")
         }
 
         status = .loading("Loading tokenizer")
         try loadTokenizer()
+        PerfLog.log("tokenizer loaded")
 
         status = .loading("Loading voices")
         try loadVoices()
+        PerfLog.log("voices loaded")
 
         // Cache film weights and biases
         let allVfInits = W["vf"]!
@@ -236,6 +251,7 @@ final class SupertonicEngine: @unchecked Sendable {
         print("[Supertonic] Cached \(filmWeights.count) film weights and \(filmBiases.count) film biases")
 
         status = .ready
+        PerfLog.log("SupertonicEngine.load done — ready")
         return true
     }
 
@@ -400,6 +416,7 @@ final class SupertonicEngine: @unchecked Sendable {
     }
 
     private func printBufStats(_ label: String, _ buf: MTLBuffer, count: Int) {
+        guard verboseStats else { return }
         let arr = readBuf(buf, count: count)
         let mean = arr.reduce(0, +) / Float(count)
         let variance = arr.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(count)
@@ -1160,7 +1177,7 @@ final class SupertonicEngine: @unchecked Sendable {
 
 
     private func printArrStats(_ label: String, _ a: [Float]) {
-        guard !a.isEmpty else { return }
+        guard verboseStats, !a.isEmpty else { return }
         var mn = a[0], mx = a[0], sum: Float = 0, sq: Float = 0
         for v in a { mn = min(mn, v); mx = max(mx, v); sum += v; sq += v * v }
         let mean = sum / Float(a.count)
@@ -1697,6 +1714,7 @@ final class SupertonicEngine: @unchecked Sendable {
     /// and compares each Metal stage element-wise, feeding reference inputs so a
     /// divergence localises to exactly one stage.
     func validate() {
+        verboseStats = true
         setvbuf(stdout, nil, _IONBF, 0)
         do { if status != .ready { try load() } } catch { print("[VALIDATE] load failed: \(error)"); exit(1) }
         let dir = "/tmp/st_ref/"

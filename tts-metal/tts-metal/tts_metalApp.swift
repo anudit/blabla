@@ -22,7 +22,7 @@ struct tts_metalApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("BlaBla Reader", id: "blabla-reader") {
+        Window("BlaBla", id: "blabla-reader") {
             ReaderRootView()
                 .frame(minWidth: 760, minHeight: 560)
                 .onAppear { NSApp.activate(ignoringOtherApps: true) }

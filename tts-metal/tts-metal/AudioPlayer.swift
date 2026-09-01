@@ -90,6 +90,17 @@ final class AudioPlayer {
         }
     }
 
+    /// Starts the audio hardware ahead of the first `enqueue`/`enqueueTagged`
+    /// call. `AVAudioEngine.start()` negotiates with the system's audio HAL
+    /// and can take well over 100ms the first time it runs — measured via
+    /// PerfLog, that cost otherwise landed entirely on the very first
+    /// sentence's time-to-first-audio. Call this once, early (e.g. while the
+    /// TTS model is still loading), so it overlaps with other startup work
+    /// instead of adding to playback latency.
+    func prewarm() {
+        startEngineIfNeeded()
+    }
+
     private func makeBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {
         guard !samples.isEmpty,
               let buffer = AVAudioPCMBuffer(pcmFormat: format,

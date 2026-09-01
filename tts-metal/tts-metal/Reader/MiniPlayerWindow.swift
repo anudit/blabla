@@ -106,6 +106,13 @@ struct MiniPlayerView: View {
                     .font(.caption)
                     .foregroundStyle(Color(hex: theme.textMuted))
                     .lineLimit(1).truncationMode(.tail)
+                Button { reader.miniPlayerVisible = false } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(Color(hex: theme.textMuted))
+                }
+                .buttonStyle(.plain)
+                .help("Close mini player")
             }
 
             // Fixed-height single-line focus (Spotify-like): only the active
@@ -124,19 +131,13 @@ struct MiniPlayerView: View {
                 Group {
                     if let cur = current {
                         let words = cur.text.split(separator: " ").map(String.init)
-                        Text(karaokeWords(words, active: reader.activeWordIndex))
-                            .font(.system(size: 17, weight: .bold, design: .serif))
-                            .lineSpacing(4)
-                            .multilineTextAlignment(.center)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .center)
+                        MiniPlayerCurrentLineView(words: words, activeWordIndex: reader.activeWordIndex, theme: theme)
                     } else {
                         Text("Nothing playing").foregroundStyle(Color(hex: theme.textMuted))
                             .font(.system(size: 14))
                     }
                 }
-                .frame(minHeight: 48, alignment: .center)
+                .frame(height: 48, alignment: .center)
 
                 if let nxt = nextText {
                     Text(nxt)
@@ -164,8 +165,39 @@ struct MiniPlayerView: View {
     private var icon: String {
         switch reader.state { case .playing, .generating: return "pause.fill"; default: return "play.fill" }
     }
+}
 
-    private func karaokeWords(_ words: [String], active: Int) -> AttributedString {
+/// Shows the active sentence two lines at a time, always keeping the row
+/// containing the karaoke-highlighted word visible. Longer sentences that
+/// used to hard-truncate past line 2 (`...`) instead page forward to the
+/// next two-line "window" once the highlight moves past what's currently
+/// shown — same idea as paging a teleprompter.
+private struct MiniPlayerCurrentLineView: View {
+    let words: [String]
+    let activeWordIndex: Int
+    let theme: ReaderTheme
+
+    var body: some View {
+        GeometryReader { geo in
+            let font = MiniPlayerLineWrap.serifBoldFont(size: 17)
+            let lineIndices = MiniPlayerLineWrap.lineIndices(words: words, font: font, width: geo.size.width)
+            let activeLine = lineIndices.indices.contains(activeWordIndex) ? lineIndices[activeWordIndex] : 0
+            let windowStart = (activeLine / 2) * 2
+            let startIdx = lineIndices.firstIndex(where: { $0 >= windowStart }) ?? 0
+            let endIdx = lineIndices.firstIndex(where: { $0 > windowStart + 1 }) ?? lineIndices.count
+            let visibleWords = Array(words[startIdx..<max(startIdx, endIdx)])
+            let localActive = activeWordIndex - startIdx
+
+            Text(karaokeWords(visibleWords, active: localActive, theme: theme))
+                .font(.system(size: 17, weight: .bold, design: .serif))
+                .lineSpacing(4)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+
+    private func karaokeWords(_ words: [String], active: Int, theme: ReaderTheme) -> AttributedString {
         var out = AttributedString()
         let accent = Color(hex: "#b47a32")
         for (i, w) in words.enumerated() {
@@ -179,6 +211,63 @@ struct MiniPlayerView: View {
             out += chunk
         }
         return out
+    }
+}
+
+/// Figures out which wrapped line each word of the mini-player's current
+/// sentence lands on, so the view can page forward by whole lines instead
+/// of truncating. Uses `NSLayoutManager` (the same line-breaking engine
+/// SwiftUI's `Text` sits on top of) to reproduce the exact wrap points for
+/// a given width/font rather than approximating with character counts.
+enum MiniPlayerLineWrap {
+    private static var lastKey: String?
+    private static var lastResult: [Int] = []
+
+    static func serifBoldFont(size: CGFloat) -> NSFont {
+        let base = NSFont.boldSystemFont(ofSize: size)
+        let serifDescriptor = base.fontDescriptor.withDesign(.serif) ?? base.fontDescriptor
+        return NSFont(descriptor: serifDescriptor, size: size) ?? base
+    }
+
+    /// Returns, for each word, the 0-based wrapped-line index it falls on.
+    static func lineIndices(words: [String], font: NSFont, width: CGFloat) -> [Int] {
+        guard width > 0, !words.isEmpty else { return Array(repeating: 0, count: words.count) }
+        let key = "\(words.joined(separator: " "))|\(Int(width.rounded()))|\(font.pointSize)"
+        if key == lastKey { return lastResult }
+        let result = compute(words: words, font: font, width: width)
+        lastKey = key
+        lastResult = result
+        return result
+    }
+
+    private static func compute(words: [String], font: NSFont, width: CGFloat) -> [Int] {
+        var text = ""
+        var wordStarts: [Int] = []
+        for (i, w) in words.enumerated() {
+            wordStarts.append(text.utf16.count)
+            text += w
+            if i < words.count - 1 { text += " " }
+        }
+
+        let storage = NSTextStorage(string: text, attributes: [.font: font])
+        let layoutManager = NSLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: CGSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layoutManager.addTextContainer(container)
+        layoutManager.ensureLayout(for: container)
+
+        var lineIndices = [Int](repeating: 0, count: words.count)
+        var lineNumber = 0
+        layoutManager.enumerateLineFragments(forGlyphRange: NSRange(location: 0, length: layoutManager.numberOfGlyphs)) { _, _, _, glyphRange, _ in
+            let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+            let lineEnd = charRange.location + charRange.length
+            for (i, start) in wordStarts.enumerated() where start >= charRange.location && start < lineEnd {
+                lineIndices[i] = lineNumber
+            }
+            lineNumber += 1
+        }
+        return lineIndices
     }
 }
 

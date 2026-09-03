@@ -115,7 +115,7 @@ enum DocLoader {
 
         // Extract main content: strip scripts/styles/nav/footer, then convert.
         let cleaned = stripChrome(body)
-        let parser = HTMLToBlocks()
+        let parser = HTMLToBlocks(baseURL: url)
         let result = parser.parse(cleaned)
         let docTitle = result.title ?? htmlTitle
 
@@ -310,10 +310,15 @@ enum MarkdownLoader {
             }
 
             // Images (block level)
-            if let m = trimmed.range(of: #"^!\[[^\]]*\]\([^)]+\)$"#, options: .regularExpression) {
+            if trimmed.range(of: #"^!\[[^\]]*\]\([^)]+\)$"#, options: .regularExpression) != nil {
                 closeParagraph(&blocks, current: currentPara); currentPara = ""
-                let alt = String(trimmed[trimmed.index(m.lowerBound, offsetBy: 2)...]).prefix(while: { $0 != "]" })
-                blocks.append(DocBlock(content: .image(alt: String(alt))))
+                let body = trimmed.dropFirst(2)
+                let alt = String(body.prefix(while: { $0 != "]" }))
+                // src is everything between the "](" and the closing ")",
+                // minus any optional "title" the Markdown syntax allows.
+                var src = String(body.drop(while: { $0 != "(" }).dropFirst().dropLast())
+                if let space = src.firstIndex(of: " ") { src = String(src[..<space]) }
+                blocks.append(DocBlock(content: .image(alt: alt, src: src)))
                 i += 1; continue
             }
 

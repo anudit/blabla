@@ -18,7 +18,12 @@ enum BlockContent: Equatable {
     case quote(String)
     case listItem(String)
     case table(rows: [[String]])
-    case image(alt: String)
+    /// `src` is the key into `ReaderDocument.resources` for embedded images
+    /// (EPUB/MOBI), or an absolute http(s) URL for web/markdown documents.
+    /// Empty when the source had no usable image reference.
+    case image(alt: String, src: String)
+    /// Figure caption / image credit — displayed, but never spoken.
+    case caption(String)
     case rule
     case frontmatter(title: String?, description: String?, image: String?)
 }
@@ -35,6 +40,33 @@ struct DocBlock {
         case .quote(let t):             return t
         case .listItem(let t):          return t
         case .table(let rows):          return rows.map { $0.joined(separator: ", ") }.joined(separator: ". ")
+        case .image:                    return ""
+        case .caption:                  return ""
+        case .rule:                     return ""
+        case .frontmatter:              return ""
+        }
+    }
+
+    /// What the reader puts on screen for this block: the publisher's own
+    /// wording, untouched by TTS normalization.
+    ///
+    /// `speechText` is deliberately *not* this string. It feeds the
+    /// synthesizer, so it has curly quotes flattened to ASCII, em dashes
+    /// turned into ", ", ellipses into "...", numerals spelled out — all
+    /// correct for speech and all wrong on a page. Rendering from
+    /// `speechText` (which the reader used to do, by displaying the
+    /// normalized sentence strings) is what made a typeset book read as
+    /// mangled plain text. Blocks that are shown but never spoken (captions,
+    /// code) have text here and none in `speechText`.
+    var displayText: String {
+        switch content {
+        case .heading(_, let t):        return t
+        case .paragraph(let t):         return t
+        case .code(let t):              return t
+        case .quote(let t):             return t
+        case .listItem(let t):          return t
+        case .caption(let t):           return t
+        case .table(let rows):          return rows.map { $0.joined(separator: "\t") }.joined(separator: "\n")
         case .image:                    return ""
         case .rule:                     return ""
         case .frontmatter:              return ""
@@ -57,6 +89,14 @@ struct RSentence: Identifiable, Equatable {
     let id: Int
     var text: String
     let blockIndex: Int
+    /// Where this sentence sits inside its block's `displayText`, as UTF-16
+    /// offsets. The reader lays out the block's original text once and uses
+    /// these ranges to highlight, hit-test and scroll to a sentence, so what
+    /// is spoken and what is shown stay in step even though the two strings
+    /// differ (see `DocBlock.displayText`).
+    let range: NSRange
+    /// The publisher's own text for this sentence — what is drawn on screen.
+    let displayText: String
 }
 
 enum FileTypeKind: String {
@@ -84,6 +124,9 @@ struct ReaderDocument {
     var frontmatter: BlockContent?
     var blocks: [DocBlock]
     var outline: [OutlineEntry]
+    /// Decoded bytes for embedded images, keyed by the `src` of an
+    /// `.image` block (the archive-relative path for EPUB/MOBI).
+    var resources: [String: Data] = [:]
     /// Page number each sentence starts on (PDF/OCR only; otherwise empty).
     var sentencePages: [Int] = []
     var pageCount: Int = 0
@@ -92,13 +135,14 @@ struct ReaderDocument {
     /// global sentence index) is instant; text is upgraded to fully
     /// normalized form in the background afterward.
     var sentences: [RSentence]
-    /// Sentence ids grouped by block index for rendering/tap-to-jump.
-    var sentencesByBlock: [Int: [(id: Int, text: String)]]
+    /// Sentences grouped by block index for rendering/tap-to-jump.
+    var sentencesByBlock: [Int: [RSentence]]
 
     init(title: String, fileType: FileTypeKind, sourceID: String, fileName: String,
          previewURL: String? = nil, sourceFilePath: String? = nil,
          frontmatter: BlockContent? = nil,
          blocks: [DocBlock], outline: [OutlineEntry],
+         resources: [String: Data] = [:],
          sentencePages: [Int] = [], pageCount: Int = 0) {
         self.title = title
         self.fileType = fileType
@@ -109,6 +153,7 @@ struct ReaderDocument {
         self.frontmatter = frontmatter
         self.blocks = blocks
         self.outline = outline
+        self.resources = resources
         self.sentencePages = sentencePages
         self.pageCount = pageCount
 
@@ -116,32 +161,44 @@ struct ReaderDocument {
         // of every other block (only the resulting global IDs need to be
         // assigned in order), so the CPU-bound regex work — the actual cost
         // of opening a book — runs across every core instead of serially.
-        var perBlock = [[String]](repeating: [], count: blocks.count)
+        // Sentences are split over the block's *display* text and keep the
+        // range they occupied there, then each one is normalized for speech
+        // individually. Splitting the normalized string instead (as this used
+        // to) threw away every offset into the original, which is why the
+        // reader could only show the normalized text back to the user.
+        var perBlock = [[(range: NSRange, spoken: String, display: String)]](repeating: [], count: blocks.count)
         perBlock.withUnsafeMutableBufferPointer { buf in
             DispatchQueue.concurrentPerform(iterations: blocks.count) { bi in
-                // Fast pass only: determines correct sentence boundaries/count
-                // without the (much costlier) money/date/time/phone/version/
-                // ordinal expansion — see TTSTextNormalizer.cleanForTtsFast.
-                let spoken = TTSTextNormalizer.cleanForTtsFast(blocks[bi].speechText)
-                buf[bi] = SentenceSplitter.extract(spoken).compactMap { s -> String? in
-                    let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !blocks[bi].speechText.isEmpty else { return }
+                let original = blocks[bi].displayText
+                let ns = original as NSString
+                buf[bi] = SentenceSplitter.extractRanges(original).compactMap { r in
+                    let display = ns.substring(with: r)
                     // Drops junk like bare page numbers ("7", "28") that land
                     // as their own block/sentence in scanned or Calibre-style
                     // EPUB output — too short to be a real sentence.
-                    guard t.count > 3 else { return nil }
-                    return t.hasPunctuationTerminal ? t : t + "."
+                    guard display.count > 3 else { return nil }
+                    // Fast pass only: determines the spoken form without the
+                    // (much costlier) money/date/time/phone/version/ordinal
+                    // expansion — see TTSTextNormalizer.cleanForTtsFast.
+                    let t = TTSTextNormalizer.cleanForTtsFast(display)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !t.isEmpty else { return nil }
+                    return (r, t.hasPunctuationTerminal ? t : t + ".", display)
                 }
             }
         }
 
         var out: [RSentence] = []
-        var byBlock: [Int: [(Int, String)]] = [:]
+        var byBlock: [Int: [RSentence]] = [:]
         out.reserveCapacity(blocks.count * 2)
         var nextID = 0
-        for (bi, texts) in perBlock.enumerated() {
-            for final in texts {
-                out.append(RSentence(id: nextID, text: final, blockIndex: bi))
-                byBlock[bi, default: []].append((nextID, final))
+        for (bi, items) in perBlock.enumerated() {
+            for item in items {
+                let s = RSentence(id: nextID, text: item.spoken, blockIndex: bi,
+                                  range: item.range, displayText: item.display)
+                out.append(s)
+                byBlock[bi, default: []].append(s)
                 nextID += 1
             }
         }
@@ -165,10 +222,10 @@ struct ReaderDocument {
                 buf[i].text = TTSTextNormalizer.expandNumericForms(buf[i].text)
             }
         }
-        var byBlock: [Int: [(id: Int, text: String)]] = [:]
+        var byBlock: [Int: [RSentence]] = [:]
         byBlock.reserveCapacity(sentencesByBlock.count)
         for s in upgraded {
-            byBlock[s.blockIndex, default: []].append((s.id, s.text))
+            byBlock[s.blockIndex, default: []].append(s)
         }
         copy.sentences = upgraded
         copy.sentencesByBlock = byBlock
@@ -264,6 +321,139 @@ enum SentenceSplitter {
         }
         return sentences.map { restore($0, stash).trimmingCharacters(in: .whitespacesAndNewlines) }
                         .filter { !$0.isEmpty }
+    }
+
+    /// Patterns whose sentence-terminal characters are false boundaries.
+    /// Same intent as `protect`, but these are used to *blank* the offending
+    /// characters in a same-length copy of the text rather than to swap them
+    /// for placeholders, so the resulting ranges still address the original.
+    private static let maskPatterns = [
+        #"!\[[^\]]*\]\([^)]*\)"#,               // markdown images
+        #"\[[^\]]*\]\([^)]*\)"#,                // markdown links
+        #"`[^`]+`"#,                              // inline code
+        #"<[^>]+>"#,                              // stray tags
+        #"\d+(?:[.,]\d+)+"#,                      // decimals / version numbers
+        // Initials & dotted acronyms — at least two dotted letters, so an
+        // ordinary sentence-final word ("cat.") isn't read as an acronym.
+        #"\b(?:[A-Za-z]\.){2,}[A-Za-z]?\.?"#,
+    ]
+
+    /// Abbreviations whose period is not a full stop ("Mr.", "approx.").
+    /// `cleanForTtsFast` expands these before splitting the spoken copy; the
+    /// displayed copy keeps them, so the boundary scan has to know about them
+    /// too — see `maskAbbreviationPeriods`.
+    private static let abbreviationWords: Set<String> = [
+        "mr", "mrs", "ms", "dr", "prof", "rev", "hon", "st", "vs", "etc",
+        "inc", "ltd", "co", "corp", "jr", "sr", "no", "nos", "fig", "figs",
+        "vol", "vols", "approx", "dept", "est", "eq", "ch", "chap", "ed",
+        "eds", "al", "ca", "cf", "pp", "p", "jan", "feb", "mar", "apr",
+        "jun", "jul", "aug", "sept", "sep", "oct", "nov", "dec",
+    ]
+
+    /// Same match set as the former `\b(?:mr|mrs|...)\.` alternation
+    /// (case-insensitive), but as a direct scan instead of a ~50-branch
+    /// regex — measured 3x slower than this loop on real book text, and was
+    /// by far the costliest single pattern here (it alone was ~90% of this
+    /// function's time on a full-length novel). A regex alternation forces
+    /// the engine to retry every branch at every word-boundary position in
+    /// the text; scanning for maximal `\w`-runs followed by "." and a set
+    /// lookup finds the same matches in one pass with no backtracking.
+    ///
+    /// `\w`-runs (not letter-runs) is what reproduces `\b`'s actual
+    /// semantics: `\b` requires a transition between a word character
+    /// (letter, digit or underscore) and a non-word character, so scanning by
+    /// letters alone would treat "2mr." as having the boundary the original
+    /// regex denies it (no boundary between a digit and a letter). A run that
+    /// includes a digit or underscore never matches the all-letter
+    /// `abbreviationWords` set regardless, so nothing extra is needed to
+    /// reject it — the set lookup already does that.
+    private static func maskAbbreviationPeriods(in units: inout [UInt16], terminals: Set<UInt16>) {
+        var runStart: Int? = nil
+        for i in 0..<units.count {
+            let u = units[i]
+            let isWordChar = (u >= 0x41 && u <= 0x5A) || (u >= 0x61 && u <= 0x7A)   // A-Z a-z
+                || (u >= 0x30 && u <= 0x39) || u == 0x5F                             // 0-9 _
+                || (u > 0x7F && Character(Unicode.Scalar(u) ?? Unicode.Scalar(0)).isLetter)
+            if isWordChar {
+                if runStart == nil { runStart = i }
+            } else {
+                if let start = runStart, u == 0x2E /* . */ {
+                    let word = String(decoding: units[start..<i], as: UTF16.self).lowercased()
+                    if abbreviationWords.contains(word), terminals.contains(units[i]) {
+                        units[i] = 0x20
+                    }
+                }
+                runStart = nil
+            }
+        }
+    }
+
+    /// Sentence ranges *within* `text`, as UTF-16 offsets into that exact
+    /// string.
+    ///
+    /// `extract` rewrites the text as it goes (placeholder swapping, then
+    /// trimming), so its output can no longer be located in the input. This
+    /// runs the same boundary scan over a mask that is character-for-character
+    /// the same length as the original — every non-terminal `.`/`!`/`?`/`…`
+    /// replaced by a space — so each match maps straight back onto the
+    /// publisher's own characters. That is what lets the reader lay out real
+    /// typography and still know where each spoken sentence begins and ends.
+    static func extractRanges(_ text: String) -> [NSRange] {
+        let ns = text as NSString
+        guard ns.length > 0 else { return [] }
+
+        var units = Array(text.utf16)
+        let terminals: Set<UInt16> = [0x2E, 0x21, 0x3F, 0x2026]   // . ! ? …
+        let full = NSRange(location: 0, length: ns.length)
+        for pattern in maskPatterns {
+            guard let re = RegexCache.regex(pattern, options: .caseInsensitive) else { continue }
+            re.enumerateMatches(in: text, range: full) { m, _, _ in
+                guard let m = m else { return }
+                for i in m.range.location..<m.range.upperBound where terminals.contains(units[i]) {
+                    units[i] = 0x20
+                }
+            }
+        }
+        maskAbbreviationPeriods(in: &units, terminals: terminals)
+        let masked = String(decoding: units, as: UTF16.self)
+        // Only BMP scalars were substituted, so this must hold; bail to a
+        // single whole-text sentence rather than emit ranges that don't line up.
+        guard (masked as NSString).length == ns.length,
+              let re = RegexCache.regex(#"[^.!?…]+[.!?…]+"#) else {
+            return trim(full, in: ns).map { [$0] } ?? []
+        }
+
+        var out: [NSRange] = []
+        var consumed = 0
+        func take(_ r: NSRange) {
+            if let t = trim(r, in: ns) { out.append(t) }
+        }
+        re.enumerateMatches(in: masked, range: full) { m, _, _ in
+            guard let m = m else { return }
+            if m.range.location > consumed {
+                take(NSRange(location: consumed, length: m.range.location - consumed))
+            }
+            take(m.range)
+            consumed = m.range.upperBound
+        }
+        if consumed < ns.length {
+            take(NSRange(location: consumed, length: ns.length - consumed))
+        }
+        return out
+    }
+
+    /// Shrinks a range past leading/trailing whitespace, returning nil if
+    /// nothing but whitespace is left.
+    private static func trim(_ r: NSRange, in ns: NSString) -> NSRange? {
+        func isSpace(_ i: Int) -> Bool {
+            guard let u = Unicode.Scalar(ns.character(at: i)) else { return false }
+            return CharacterSet.whitespacesAndNewlines.contains(u)
+        }
+        var lo = r.location
+        var hi = r.upperBound
+        while lo < hi, isSpace(lo) { lo += 1 }
+        while hi > lo, isSpace(hi - 1) { hi -= 1 }
+        return hi > lo ? NSRange(location: lo, length: hi - lo) : nil
     }
 
     private static func push(_ s: String, into arr: inout [String]) {

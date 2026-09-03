@@ -16,6 +16,7 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import AppKit
 
 // MARK: - Root
 
@@ -23,26 +24,28 @@ struct ReaderRootView: View {
     @ObservedObject private var reader = ReaderControllerHolder.reader
 
     var body: some View {
-        HStack(spacing: 0) {
-            if reader.outlineVisible && reader.document != nil {
-                OutlineSidebar()
-                    .frame(width: 250)
-                    .transition(.move(edge: .leading))
-            }
-            content
-        }
+        content
         .frame(minWidth: 760, minHeight: 560)
         .background(Color(hex: reader.theme.bg))
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
-                    withAnimation { reader.outlineVisible.toggle() }
+                    reader.outlineVisible.toggle()
                 } label: {
-                    Label("Contents", systemImage: "sidebar.leading")
+                    Label("Contents", systemImage: "list.bullet")
                 }
                 .help("Show table of contents")
                 .disabled(reader.document == nil)
                 .opacity(reader.document == nil ? 0.45 : 1)
+                // A popover, not a sidebar: inset as a sidebar it narrowed the
+                // reading column, and the column width is what the book's
+                // layout is built against — so every toggle re-rendered the
+                // whole book and lost the reader's place. Floating it over the
+                // text leaves the column untouched.
+                .popover(isPresented: $reader.outlineVisible, arrowEdge: .bottom) {
+                    OutlineSidebar()
+                        .frame(width: 300, height: 560)
+                }
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
@@ -424,127 +427,81 @@ struct DocumentReaderView: View {
     @ObservedObject private var reader = ReaderControllerHolder.reader
     @State private var isFindVisible = false
     @State private var findQuery = ""
-    @State private var findMatches: [Int] = []          // sentence ids containing query
+    @State private var findCount = 0
     @State private var findCurrent = 0
     @FocusState private var findFocused: Bool
-    @State private var scrollProxy: ScrollViewProxy?
-    /// Bumped on every new `walkScroll` request so a stale chain (still
-    /// hopping toward a target that's since been superseded — e.g. the
-    /// user clicked a find arrow again, or typed another character, before
-    /// the previous walk finished) recognizes it's obsolete and stops
-    /// instead of fighting the newer walk for the final scroll position.
-    @State private var scrollWalkToken = 0
-    /// Bound to the `ScrollView` via `.scrollPosition(id:)`. Unlike
-    /// `ScrollViewReader.scrollTo`, this is honored even when the target row
-    /// is deep inside a `LazyVStack` and hasn't been mounted/measured yet —
-    /// SwiftUI defers the jump until it can resolve the id — so it's what
-    /// actually restores a deep resume position. `scrollTo` retries are kept
-    /// alongside as a nudge once content settles, but this is the fix for
-    /// "doesn't jump to the resume line" for anything beyond the first screen.
-    @State private var initialScrollTarget: String?
+    /// Every jump the reader makes — bookmark resume, an outline click, a find
+    /// hit, the scroll-to-playhead button — goes through this one request. The
+    /// book is a single text view, so a jump is just "put this range on
+    /// screen"; the old step-by-step scroll walk existed only to coax a
+    /// LazyVStack into mounting rows it hadn't reached, and is gone with it.
+    @State private var scrollRequest = BookScrollRequest()
 
     private var theme: ReaderTheme { reader.theme }
 
     var body: some View {
         Group {
             if let doc = reader.document {
-                ScrollViewReader { proxy in
-                    GeometryReader { geo in
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 18) {
-                                titleHeader(doc)
-                                // One block per LazyVStack item (each still
-                                // wrapped in its own plain VStack so FlowLayout
-                                // gets a concrete width to wrap sentences
-                                // against). Previously blocks were batched 40
-                                // to a lazy item for fewer top-level rows, but
-                                // that made scrollTo/scrollPosition unable to
-                                // jump anywhere beyond the first batch —
-                                // LazyVStack only mounts items near the
-                                // current scroll position and can't be told
-                                // to jump into a batch it hasn't reached yet.
-                                // One-block-per-item is the pattern
-                                // ScrollViewReader/scrollPosition are actually
-                                // built to handle at book-length row counts.
-                                LazyVStack(alignment: .leading, spacing: 18) {
-                                    ForEach(Array(doc.blocks.enumerated()), id: \.offset) { bi, block in
-                                        VStack(alignment: .leading, spacing: 18) {
-                                            blockView(block, blockIndex: bi, doc: doc)
-                                                .id(blockID(bi))
-                                                .onAppear { PerfLog.log("block \(bi) mounted") }
-                                        }
-                                    }
-                                }
+                GeometryReader { geo in
+                    BookTextView(
+                        document: doc,
+                        theme: theme,
+                        fontScale: CGFloat(reader.fontSize),
+                        columnWidth: columnWidth(for: geo.size.width),
+                        activeSentenceID: doc.sentences.indices.contains(reader.currentIndex)
+                            ? reader.currentIndex : nil,
+                        activeWordFraction: reader.activeWordFraction,
+                        isPlaying: reader.isSpeaking,
+                        searchQuery: isFindVisible ? findQuery : "",
+                        searchCurrent: findCurrent,
+                        scrollRequest: scrollRequest,
+                        onSearchCount: { count in
+                            // Reported from inside the AppKit update pass, so
+                            // the SwiftUI state change is deferred a turn
+                            // rather than mutating state mid-render.
+                            DispatchQueue.main.async {
+                                findCount = count
+                                if findCurrent >= count { findCurrent = 0 }
+                                if count > 0 { bumpScroll() }
                             }
-                            .padding(.horizontal, 56)
-                            .padding(.vertical, 30)
-                            .frame(width: min(CGFloat(760), geo.size.width - 24))
-                            .frame(maxWidth: .infinity, alignment: .center)
-                        }
-                        .scrollPosition(id: $initialScrollTarget, anchor: .center)
-                    }
-                    .onAppear {
-                        scrollProxy = proxy
-                        scrollToResume(proxy: proxy, doc: doc)
-                    }
-                    .onChange(of: doc.sourceID) { _, _ in scrollToResume(proxy: proxy, doc: doc) }
-                    .onChange(of: reader.currentIndex) { _, newIndex in
-                        guard !isSearchActive else { return }
-                        guard let target = scrollTargetID(forSentence: newIndex, in: doc) else { return }
-                        if reader.isSpeaking || reader.state == .ready {
-                            proxy.scrollTo(target, anchor: .center)
-                        }
-                    }
-                    .onChange(of: reader.state) { old, new in
-                        guard !isSearchActive else { return }
-                        if old == .paused && new == .playing,
-                           let target = scrollTargetID(forSentence: reader.currentIndex, in: doc) {
-                            proxy.scrollTo(target, anchor: .center)
-                        }
-                        if old == .loadingDoc && new == .ready { scrollToResume(proxy: proxy, doc: doc) }
-                    }
-                    .onReceive(NotificationCenter.default.publisher(for: .scrollToCurrentSentence)) { _ in
-                        // The user may have manually scrolled far from the
-                        // current sentence (that's what this button is for),
-                        // so the target may be unmounted — walk to it rather
-                        // than a direct scrollTo. See scrollToResume.
-                        if doc.sentences.indices.contains(reader.currentIndex) {
-                            scrollWalkToken += 1
-                            walkScroll(proxy: proxy, toBlock: doc.sentences[reader.currentIndex].blockIndex, from: 0, token: scrollWalkToken)
-                        }
-                    }
-                    .onReceive(NotificationCenter.default.publisher(for: .scrollToBlock)) { note in
-                        if let bi = note.object as? Int {
-                            proxy.scrollTo(blockID(bi), anchor: .top)
-                        }
+                        },
+                        onActivateSentence: { reader.playFrom($0) }
+                    )
+                }
+                .ignoresSafeArea(edges: .bottom)
+                .onAppear { jump(toSentence: reader.currentIndex) }
+                .onChange(of: doc.sourceID) { _, _ in jump(toSentence: reader.currentIndex) }
+                .onChange(of: reader.currentIndex) { _, newIndex in
+                    // While a search is up, find navigation owns the scroll
+                    // position — otherwise every hit would be yanked back to
+                    // the playhead the moment the next sentence started.
+                    guard !isSearchActive, reader.isSpeaking || reader.state == .ready else { return }
+                    jump(toSentence: newIndex)
+                }
+                .onChange(of: reader.state) { old, new in
+                    guard !isSearchActive else { return }
+                    if (old == .paused && new == .playing) || (old == .loadingDoc && new == .ready) {
+                        jump(toSentence: reader.currentIndex)
                     }
                 }
-                .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 80) }
-                .overlay(alignment: .bottomTrailing) {
-                    if reader.state == .paused && reader.progress > 0 && reader.progress < 1 {
-                        Button {
-                            NotificationCenter.default.post(name: .scrollToCurrentSentence, object: nil)
-                        } label: {
-                            Image(systemName: "target")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(Color(hex: theme.barIconColor))
-                                .frame(width: 44, height: 44)
-                                .background(Color(hex: theme.barBg), in: Circle())
-                                .overlay(Circle().strokeBorder(Color(hex: theme.barBorder), lineWidth: 1))
-                                .shadow(radius: 5)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.trailing, 26)
-                        .padding(.bottom, 96)
+                .onChange(of: findCurrent) { _, _ in bumpScroll() }
+                .onReceive(NotificationCenter.default.publisher(for: .scrollToCurrentSentence)) { _ in
+                    jump(toSentence: reader.currentIndex)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .scrollToBlock)) { note in
+                    if let bi = note.object as? Int {
+                        scrollRequest = BookScrollRequest(token: scrollRequest.token + 1,
+                                                          sentenceID: nil, blockIndex: bi)
                     }
                 }
+                .overlay(alignment: .bottomTrailing) { scrollToPlayheadButton }
             } else {
                 LandingView()
             }
         }
         .background(Color(hex: theme.bg))
         .overlay {
-            // Hidden Cmd+F trigger — registers the keyboard shortcut for the window
+            // Hidden ⌘F trigger — registers the keyboard shortcut for the window
             Button { isFindVisible = true; findFocused = true } label: { EmptyView() }
                 .keyboardShortcut("f", modifiers: .command)
                 .hidden()
@@ -556,7 +513,71 @@ struct DocumentReaderView: View {
         }
     }
 
-    // MARK: - Find (Cmd+F) — lives in the toolbar next to the Home button
+    /// A measured column rather than the full window: past roughly 90
+    /// characters a line is hard to track back from, which is why books are
+    /// set in a column and not across the page.
+    private func columnWidth(for available: CGFloat) -> CGFloat {
+        min(680, max(320, available - 120))
+    }
+
+    @ViewBuilder
+    private var scrollToPlayheadButton: some View {
+        if reader.state == .paused && reader.progress > 0 && reader.progress < 1 {
+            Button {
+                NotificationCenter.default.post(name: .scrollToCurrentSentence, object: nil)
+            } label: {
+                Image(systemName: "target")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Color(hex: theme.barIconColor))
+                    .frame(width: 44, height: 44)
+                    .background(Color(hex: theme.barBg), in: Circle())
+                    .overlay(Circle().strokeBorder(Color(hex: theme.barBorder), lineWidth: 1))
+                    .shadow(radius: 5)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 26)
+            .padding(.bottom, 96)
+        }
+    }
+
+    // MARK: - Scrolling
+
+    private func jump(toSentence id: Int) {
+        guard let doc = reader.document, doc.sentences.indices.contains(id) else { return }
+        scrollRequest = BookScrollRequest(token: scrollRequest.token + 1,
+                                          sentenceID: id, blockIndex: nil)
+    }
+
+    /// Re-issues the current find hit as a scroll target. The hit's range lives
+    /// in the text view (it does the searching), so the request only has to say
+    /// "move", not where to.
+    private func bumpScroll() {
+        scrollRequest = BookScrollRequest(token: scrollRequest.token + 1,
+                                          sentenceID: nil, blockIndex: nil)
+    }
+
+    private var isSearchActive: Bool {
+        isFindVisible && !findQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func findNext() {
+        guard findCount > 0 else { return }
+        findCurrent = (findCurrent + 1) % findCount
+    }
+
+    private func findPrev() {
+        guard findCount > 0 else { return }
+        findCurrent = (findCurrent - 1 + findCount) % findCount
+    }
+
+    private func closeFind() {
+        isFindVisible = false
+        findQuery = ""
+        findCount = 0
+        findCurrent = 0
+    }
+
+    // MARK: - Find (⌘F) — lives in the toolbar next to the Home button
 
     @ViewBuilder
     private var findToolbarField: some View {
@@ -567,450 +588,32 @@ struct DocumentReaderView: View {
                     .textFieldStyle(.plain)
                     .focused($findFocused)
                     .frame(width: 160)
-                    .onChange(of: findQuery) { _, new in
-                        updateFindMatches(query: new)
-                    }
+                    .onChange(of: findQuery) { _, _ in findCurrent = 0 }
                     .onSubmit { findNext() }
                 if !findQuery.isEmpty {
-                    Text(findMatches.isEmpty ? "No results" : "\(findCurrent + 1)/\(findMatches.count)")
+                    Text(findCount == 0 ? "No results" : "\(findCurrent + 1)/\(findCount)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(Color(hex: theme.textMuted))
                     Button { findPrev() } label: {
                         Image(systemName: "chevron.up").font(.system(size: 11, weight: .bold))
-                    }.buttonStyle(.plain).disabled(findMatches.isEmpty)
+                    }.buttonStyle(.plain).disabled(findCount == 0)
                     Button { findNext() } label: {
                         Image(systemName: "chevron.down").font(.system(size: 11, weight: .bold))
-                    }.buttonStyle(.plain).disabled(findMatches.isEmpty)
+                    }.buttonStyle(.plain).disabled(findCount == 0)
                 }
-                Button { isFindVisible = false; findQuery = ""; findMatches = [] } label: {
+                Button { closeFind() } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(Color(hex: theme.textMuted))
                 }.buttonStyle(.plain)
             }
             .padding(.horizontal, 10).padding(.vertical, 4)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(hex: theme.dropBorder).opacity(0.5)))
-            .onExitCommand { isFindVisible = false; findQuery = ""; findMatches = [] }
+            .onExitCommand { closeFind() }
         } else {
             Button { isFindVisible = true; findFocused = true } label: {
                 Image(systemName: "magnifyingglass")
             }
             .help("Find (⌘F)")
-        }
-    }
-
-    /// `scrollProxy?.scrollTo` alone only reaches a block the `LazyVStack`
-    /// has already mounted — a search hit can be anywhere in the document,
-    /// almost always far outside that range, so it would silently no-op
-    /// (counter updates, page doesn't move). Walk to it the same way
-    /// `scrollToResume` does for bookmark resume.
-    private func scrollToSentence(_ sentenceID: Int, in doc: ReaderDocument) {
-        guard let proxy = scrollProxy, doc.sentences.indices.contains(sentenceID) else { return }
-        scrollWalkToken += 1
-        walkScroll(proxy: proxy, toBlock: doc.sentences[sentenceID].blockIndex, from: 0, token: scrollWalkToken)
-    }
-
-    private func updateFindMatches(query: String) {
-        guard let doc = reader.document else { return }
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { findMatches = []; findCurrent = 0; return }
-        findMatches = doc.sentences.filter { $0.text.localizedCaseInsensitiveContains(q) }.map(\.id)
-        findCurrent = 0
-        if let first = findMatches.first {
-            scrollToSentence(first, in: doc)
-        }
-    }
-    private func findNext() {
-        guard !findMatches.isEmpty, let doc = reader.document else { return }
-        findCurrent = (findCurrent + 1) % findMatches.count
-        scrollToSentence(findMatches[findCurrent], in: doc)
-    }
-    private func findPrev() {
-        guard !findMatches.isEmpty, let doc = reader.document else { return }
-        findCurrent = (findCurrent - 1 + findMatches.count) % findMatches.count
-        scrollToSentence(findMatches[findCurrent], in: doc)
-    }
-
-    /// While a search is active, the normal playback autoscroll (which
-    /// follows every sentence as it's read) is suppressed — see the
-    /// `reader.currentIndex`/`reader.state` `.onChange` handlers above — so
-    /// find navigation keeps the view parked on the match the user is
-    /// looking at instead of it being yanked back to the playhead.
-    private var isSearchActive: Bool { !findQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-
-    private func sentenceID(_ index: Int) -> String { "s-\(index)" }
-    private func blockID(_ index: Int) -> String { "b-\(index)" }
-
-    /// `ScrollViewReader.scrollTo` can't find ids set inside `FlowLayout`
-    /// (a custom `Layout`, whose subviews don't propagate anchor preferences
-    /// up to the enclosing `ScrollView` the way a plain stack's children do)
-    /// — sentence spans live inside `FlowingParagraph`'s `FlowLayout`, so
-    /// `scrollTo(sentenceID(...))` silently no-ops. Block ids are set
-    /// directly on the `ForEach` in the outer (non-custom-Layout) `VStack`
-    /// and work correctly, so every scroll-to-sentence call resolves to the
-    /// sentence's owning block instead.
-    private func scrollTargetID(forSentence id: Int, in doc: ReaderDocument) -> String? {
-        guard doc.sentences.indices.contains(id) else { return nil }
-        return blockID(doc.sentences[id].blockIndex)
-    }
-
-    /// Jump to the resume sentence.
-    ///
-    /// Confirmed by instrumentation: neither `ScrollViewReader.scrollTo` nor
-    /// `.scrollPosition(id:)` can reach a block that hasn't been mounted by
-    /// `LazyVStack` yet — the id genuinely doesn't exist in the view tree
-    /// until the stack has scrolled near it, and there's no API to force
-    /// that from far away. So instead of one jump, this walks the scroll
-    /// position forward in small steps: each `scrollTo` lands just past the
-    /// currently-mounted region (which *is* reachable, since it either
-    /// already exists or is right at the mounting edge), which causes
-    /// LazyVStack to mount the next stretch, which makes the next step's
-    /// target reachable, and so on until the real target block is hit.
-    private func scrollToResume(proxy: ScrollViewProxy, doc: ReaderDocument) {
-        let index = reader.currentIndex
-        PerfLog.log("scrollToResume called, target index=\(index) of \(doc.sentences.count)")
-        guard index != 0, doc.sentences.indices.contains(index) else {
-            PerfLog.log("scrollToResume skipped (index 0 or out of range)")
-            return
-        }
-        let targetBlock = doc.sentences[index].blockIndex
-        guard targetBlock > 0 else { return }
-        initialScrollTarget = blockID(targetBlock)
-        scrollWalkToken += 1
-        walkScroll(proxy: proxy, toBlock: targetBlock, from: 0, token: scrollWalkToken)
-    }
-
-    /// Steps the scroll position from `current` toward `toBlock` in a
-    /// LazyVStack, one mountable stretch at a time — see `scrollToResume`.
-    /// `token` must still match `scrollWalkToken` at each hop: if a newer
-    /// walk was started in the meantime this chain is stale and stops,
-    /// rather than continuing to fire `scrollTo` calls that fight the
-    /// newer walk for the final position (this is what made repeated find
-    /// next/prev clicks — or fast typing — fail to land on the target).
-    private func walkScroll(proxy: ScrollViewProxy, toBlock target: Int, from current: Int,
-                            step: Int = 24, hop: Int = 0, token: Int) {
-        guard token == scrollWalkToken else {
-            PerfLog.log("walkScroll aborted (superseded by newer walk)")
-            return
-        }
-        guard hop < 2000 else {
-            PerfLog.log("walkScroll aborted (too many hops)")
-            return
-        }
-        let next = min(current + step, target)
-        let reachedTarget = next >= target
-        proxy.scrollTo(blockID(next), anchor: reachedTarget ? .center : .bottom)
-        PerfLog.log("walkScroll hop \(hop) -> block \(next)\(reachedTarget ? " (target)" : "")")
-        guard !reachedTarget else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
-            walkScroll(proxy: proxy, toBlock: target, from: next, step: step, hop: hop + 1, token: token)
-        }
-    }
-
-    @ViewBuilder
-    private func titleHeader(_ doc: ReaderDocument) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(doc.title)
-                .font(.system(size: 26, weight: .bold))
-                .foregroundStyle(Color(hex: theme.headerColor))
-            HStack(spacing: 8) {
-                Text(doc.fileType.label.uppercased())
-                    .font(.system(size: 11, weight: .bold))
-                    .kerning(0.6)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color(hex: theme.textMuted).opacity(0.18),
-                                in: RoundedRectangle(cornerRadius: 4))
-                    .foregroundStyle(Color(hex: theme.textMuted))
-                Text("\(doc.sentences.count) sentences")
-                    .font(.caption)
-                    .foregroundStyle(Color(hex: theme.textMuted))
-            }
-        }
-        .padding(.bottom, 6)
-    }
-
-    @ViewBuilder
-    private func blocks(_ doc: ReaderDocument) -> some View {
-        ForEach(Array(doc.blocks.enumerated()), id: \.offset) { bi, block in
-            blockView(block, blockIndex: bi, doc: doc)
-                .id(blockID(bi))
-        }
-    }
-
-    @ViewBuilder
-    private func blockView(_ block: DocBlock, blockIndex: Int, doc: ReaderDocument) -> some View {
-        switch block.content {
-        case .heading(let level, let text):
-            heading(level: level, text: text, blockIndex: blockIndex)
-        case .paragraph(let text):
-            paragraphBlock(text, blockIndex: blockIndex, doc: doc)
-        case .code(let code):
-            Text(code)
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(Color(hex: theme.text))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(Color(hex: theme.textMuted).opacity(0.1),
-                            in: RoundedRectangle(cornerRadius: 8))
-        case .quote(let text):
-            paragraphBlock(text, blockIndex: blockIndex, doc: doc)
-                .padding(.leading, 14)
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(Color(hex: theme.textMuted).opacity(0.5)).frame(width: 3)
-                }
-        case .listItem(let text):
-            HStack(alignment: .top, spacing: 8) {
-                Text("•").foregroundStyle(Color(hex: theme.textMuted))
-                paragraphBlock(text, blockIndex: blockIndex, doc: doc)
-            }
-        case .table(let rows):
-            tableView(rows)
-        case .image(let alt):
-            if !alt.isEmpty {
-                Text("[image — \(alt)]")
-                    .font(.caption.italic())
-                    .foregroundStyle(Color(hex: theme.textMuted).opacity(0.7))
-            }
-        case .rule:
-            Rectangle()
-                .fill(Color(hex: theme.textMuted).opacity(0.3))
-                .frame(height: 1)
-                .padding(.vertical, 8)
-        case .frontmatter(_, _, _):
-            EmptyView()
-        }
-    }
-
-    private func heading(level: Int, text: String, blockIndex: Int) -> some View {
-        let sizes: [CGFloat] = [27, 23, 20, 17.5, 15.5, 14.5]
-        return Text(text)
-            .font(.system(size: sizes[max(0, min(5, level - 1))], weight: .bold))
-            .foregroundStyle(Color(hex: theme.headerColor))
-            .padding(.top, level <= 2 ? 12 : 6)
-    }
-
-    /// Paragraph rendered from precomputed sentences — equatable so only the
-    /// active paragraph re-renders on each word tick. `themeName` is part of
-    /// the identity so toggling themes invalidates the cache.
-    private func paragraphBlock(_ text: String, blockIndex: Int, doc: ReaderDocument) -> some View {
-        let items = doc.sentencesByBlock[blockIndex] ?? []
-        if items.isEmpty { return AnyView(EmptyView()) }
-        let isActiveBlock = items.contains { $0.id == reader.currentIndex }
-        let searchCurrent = (!findQuery.isEmpty && !findMatches.isEmpty) ? findMatches[findCurrent] : nil
-        return AnyView(
-            FlowingParagraph(
-                items: items,
-                fontSize: reader.fontSize * 16.5,
-                textColor: Color(hex: theme.text),
-                textColorHex: theme.text,
-                activeColor: Color(hex: "#f5e08a"),
-                wordColor: Color(hex: "#b47a32"),
-                activeSentenceID: isActiveBlock ? reader.currentIndex : nil,
-                activeWordIndex: isActiveBlock ? reader.activeWordIndex : -1,
-                isPlaying: reader.isSpeaking,
-                themeName: theme.name,
-                searchQuery: findQuery,
-                searchCurrentID: searchCurrent,
-                onTap: { id in reader.playFrom(id) }
-            )
-            .equatable()
-            .id("para-\(blockIndex)")
-        )
-    }
-
-    private func tableView(_ rows: [[String]]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { ri, row in
-                HStack(spacing: 0) {
-                    ForEach(Array(row.enumerated()), id: \.offset) { ci, cell in
-                        Text(MarkdownLoader.stripInlineMd(cell))
-                            .font(.caption)
-                            .foregroundStyle(Color(hex: theme.text))
-                            .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
-                            .padding(6)
-                            .background(ri % 2 == 0 ? Color(hex: theme.textMuted).opacity(0.06) : .clear)
-                        if ci < row.count - 1 {
-                            Divider().overlay(Color(hex: theme.textMuted).opacity(0.3))
-                        }
-                    }
-                }
-                Divider().overlay(Color(hex: theme.textMuted).opacity(0.3))
-            }
-        }
-        .overlay(RoundedRectangle(cornerRadius: 6)
-            .strokeBorder(Color(hex: theme.textMuted).opacity(0.3)))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-    }
-}
-
-/// Renders one paragraph's precomputed sentence items as tappable spans.
-/// Equatable — only the paragraph containing the active sentence re-renders on
-/// each word tick; all others are skipped via `.equatable()`. `themeName` and
-/// `textColorHex` are included so a theme toggle invalidates every paragraph
-/// (otherwise the Equatable cache would keep the old white-on-beige colors).
-struct FlowingParagraph: View, Equatable {
-    let items: [(id: Int, text: String)]
-    let fontSize: CGFloat
-    let textColor: Color
-    let textColorHex: String
-    let activeColor: Color
-    let wordColor: Color
-    let activeSentenceID: Int?
-    let activeWordIndex: Int
-    let isPlaying: Bool
-    let themeName: String
-    let searchQuery: String
-    let searchCurrentID: Int?
-    var onTap: (Int) -> Void = { _ in }
-
-    init(items: [(id: Int, text: String)], fontSize: CGFloat, textColor: Color, textColorHex: String, activeColor: Color, wordColor: Color, activeSentenceID: Int?, activeWordIndex: Int, isPlaying: Bool, themeName: String, searchQuery: String = "", searchCurrentID: Int? = nil, onTap: @escaping (Int) -> Void = { _ in }) {
-        self.items = items; self.fontSize = fontSize; self.textColor = textColor; self.textColorHex = textColorHex
-        self.activeColor = activeColor; self.wordColor = wordColor
-        self.activeSentenceID = activeSentenceID; self.activeWordIndex = activeWordIndex
-        self.isPlaying = isPlaying; self.themeName = themeName
-        self.searchQuery = searchQuery; self.searchCurrentID = searchCurrentID; self.onTap = onTap
-    }
-
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.items.map(\.id) == rhs.items.map(\.id)
-            && lhs.fontSize == rhs.fontSize
-            && lhs.textColorHex == rhs.textColorHex
-            && lhs.themeName == rhs.themeName
-            && lhs.activeSentenceID == rhs.activeSentenceID
-            && lhs.activeWordIndex == rhs.activeWordIndex
-            && lhs.isPlaying == rhs.isPlaying
-            && lhs.searchQuery == rhs.searchQuery
-            && lhs.searchCurrentID == rhs.searchCurrentID
-    }
-
-    var body: some View {
-        FlowLayout(spacing: 6, lineSpacing: 5) {
-            ForEach(items, id: \.id) { item in
-                sentenceSpan(item)
-                    .id("s-\(item.id)")
-            }
-        }
-        .font(.system(size: fontSize))
-        .lineSpacing(fontSize * 0.55)
-    }
-
-    @ViewBuilder
-    private func sentenceSpan(_ item: (id: Int, text: String)) -> some View {
-        let isActive = item.id == activeSentenceID
-        let isSearchCurrent = item.id == searchCurrentID && !searchQuery.isEmpty
-        let isSearchMatch = !searchQuery.isEmpty
-            && item.text.localizedCaseInsensitiveContains(searchQuery)
-        Group {
-            if isActive, isPlaying || activeSentenceID != nil {
-                karaokeText(item.text, searchQuery: searchQuery)
-            } else if isSearchMatch {
-                highlightedText(item.text, query: searchQuery, isCurrent: isSearchCurrent)
-                    .foregroundStyle(textColor)
-            } else {
-                Text(item.text).foregroundStyle(textColor)
-            }
-        }
-        .padding(.horizontal, 2)
-        .padding(.vertical, 1)
-        .background(
-            isActive ? activeColor
-            : isSearchCurrent ? Color(hex: "#ff9f0a").opacity(0.35)
-            : isSearchMatch ? Color(hex: "#a8d8ff").opacity(0.45)
-            : Color.clear,
-            in: RoundedRectangle(cornerRadius: 3)
-        )
-        .contentShape(Rectangle())
-        .onTapGesture { onTap(item.id) }
-    }
-
-    private func highlightedText(_ text: String, query: String, isCurrent: Bool) -> Text {
-        guard !query.isEmpty else { return Text(text) }
-        var attr = AttributedString(text)
-        var searchRange = attr.startIndex..<attr.endIndex
-        let bg: Color = isCurrent ? Color(hex: "#ff9f0a") : Color(hex: "#a8d8ff")
-        let bgOpacity: Color = isCurrent ? bg : bg.opacity(0.55)
-        while let r = attr[searchRange].range(of: query, options: .caseInsensitive) {
-            attr[r].backgroundColor = bgOpacity
-            attr[r].foregroundColor = isCurrent ? .white : Color(hex: "#3a3028")
-            searchRange = r.upperBound..<attr.endIndex
-            if searchRange.lowerBound >= attr.endIndex { break }
-        }
-        return Text(attr)
-    }
-
-    private func karaokeText(_ sentence: String, searchQuery: String = "") -> some View {
-        let timings = WordTimingCalculator.timings(for: sentence)
-        // FlowLayout wraps words so a long active sentence doesn't force a
-        // single-line HStack that overflows the paragraph width (the cause of
-        // the giant yellow viewport fill).
-        return FlowLayout(spacing: 2, lineSpacing: 3) {
-            ForEach(Array(timings.enumerated()), id: \.offset) { i, t in
-                let isSearchWord = !searchQuery.isEmpty && t.word.localizedCaseInsensitiveContains(searchQuery)
-                Text(t.word)
-                    .foregroundStyle(i == activeWordIndex ? .white : Color(hex: "#3a3028"))
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(
-                        i == activeWordIndex ? wordColor
-                        : isSearchWord ? Color(hex: "#a8d8ff").opacity(0.6)
-                        : Color.clear,
-                        in: RoundedRectangle(cornerRadius: 3)
-                    )
-            }
-        }
-    }
-}
-
-/// Wrapping flow layout: places children left-to-right and wraps to the next
-/// line when they exceed the available width (macOS 13+ Layout protocol).
-struct FlowLayout: Layout {
-    var spacing: CGFloat = 6
-    var lineSpacing: CGFloat = 5
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        // Inside a LazyVStack the width proposal can be nil. Use the constrained
-        // content width, and measure each sentence Text with that width as a
-        // constraint so long sentences wrap instead of overflowing.
-        let maxWidth = proposal.width ?? 648
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var lineHeight: CGFloat = 0
-        let constrained = ProposedViewSize(width: maxWidth, height: nil)
-        for subview in subviews {
-            let size = subview.sizeThatFits(constrained)
-            // Single long sentence that needs the full width should not be
-            // treated as fitting beside the previous one — wrap it.
-            let w = min(size.width, maxWidth)
-            if x > 0, x + w > maxWidth {
-                x = 0
-                y += lineHeight + lineSpacing
-                lineHeight = 0
-            }
-            x += w + spacing
-            lineHeight = max(lineHeight, size.height)
-        }
-        return CGSize(width: maxWidth, height: y + lineHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        let maxWidth = bounds.width
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var lineHeight: CGFloat = 0
-        let constrained = ProposedViewSize(width: maxWidth, height: nil)
-        for subview in subviews {
-            let size = subview.sizeThatFits(constrained)
-            let w = min(size.width, maxWidth)
-            if x > 0, x + w > maxWidth {
-                x = 0
-                y += lineHeight + lineSpacing
-                lineHeight = 0
-            }
-            subview.place(at: CGPoint(x: bounds.minX + x, y: bounds.minY + y),
-                          anchor: .topLeading,
-                          proposal: ProposedViewSize(width: w, height: size.height))
-            x += w + spacing
-            lineHeight = max(lineHeight, size.height)
         }
     }
 }
@@ -1024,8 +627,37 @@ extension Notification.Name {
 
 struct OutlineSidebar: View {
     @ObservedObject private var reader = ReaderControllerHolder.reader
+    @State private var filter = ""
 
     private var theme: ReaderTheme { reader.theme }
+
+    private var entries: [OutlineEntry] {
+        let all = reader.document?.outline ?? []
+        let q = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return all }
+        return all.filter { $0.title.localizedCaseInsensitiveContains(q) }
+    }
+
+    /// Block the playhead is in, used to mark the section being read.
+    private var currentBlock: Int? {
+        guard let doc = reader.document, doc.sentences.indices.contains(reader.currentIndex) else { return nil }
+        return doc.sentences[reader.currentIndex].blockIndex
+    }
+
+    /// The deepest outline entry at or before the playhead — i.e. the
+    /// section currently being read, not merely the nearest title.
+    private var activeEntryID: UUID? {
+        guard let block = currentBlock else { return nil }
+        return (reader.document?.outline ?? []).last { $0.blockIndex <= block }?.id
+    }
+
+    /// Publisher TOCs nest arbitrarily deep, but the shallowest level in a
+    /// given book isn't always 1 (some books start at 2). Normalising against
+    /// the minimum keeps indentation tight instead of pushing everything to
+    /// the right.
+    private var baseLevel: Int {
+        (reader.document?.outline ?? []).map(\.level).min() ?? 1
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1043,33 +675,93 @@ struct OutlineSidebar: View {
                 }
                 .buttonStyle(.borderless)
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(hex: theme.textMuted))
+                TextField("Filter", text: $filter)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(hex: theme.text))
+                if !filter.isEmpty {
+                    Button { filter = "" } label: {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                            .foregroundStyle(Color(hex: theme.textMuted))
+                    }.buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color(hex: theme.inputBg), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color(hex: theme.inputBorder).opacity(0.6)))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 10)
 
             Divider().overlay(Color(hex: theme.menuBorder))
 
             ScrollViewReader { proxy in
-                List {
-                    ForEach(reader.document?.outline ?? []) { entry in
-                        Button {
-                            NotificationCenter.default.post(name: .scrollToBlock, object: entry.blockIndex)
-                        } label: {
-                            Text(entry.title)
-                                .font(entry.level <= 2 ? .callout.bold() : .callout)
-                                .foregroundStyle(Color(hex: theme.text))
-                                .padding(.leading, CGFloat(max(0, entry.level - 1)) * 12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(entries) { entry in
+                            outlineRow(entry)
+                                .id(entry.id)
                         }
-                        .buttonStyle(.plain)
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
+                        if entries.isEmpty {
+                            Text(filter.isEmpty ? "No table of contents" : "No matches")
+                                .font(.caption)
+                                .foregroundStyle(Color(hex: theme.textMuted))
+                                .padding(14)
+                        }
                     }
+                    .padding(.vertical, 6)
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                .onChange(of: activeEntryID) { _, new in
+                    guard let new, filter.isEmpty else { return }
+                    withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(new, anchor: .center) }
+                }
             }
         }
         .background(Color(hex: theme.menuBg))
+    }
+
+    @ViewBuilder
+    private func outlineRow(_ entry: OutlineEntry) -> some View {
+        let depth = max(0, entry.level - baseLevel)
+        let isActive = entry.id == activeEntryID
+        Button {
+            NotificationCenter.default.post(name: .scrollToBlock, object: entry.blockIndex)
+            reader.outlineVisible = false
+        } label: {
+            HStack(alignment: .top, spacing: 8) {
+                // A thin rail marks the current section without shifting the
+                // text, so the list doesn't jump as playback moves.
+                Rectangle()
+                    .fill(isActive ? Color(hex: theme.accent) : .clear)
+                    .frame(width: 2.5)
+                Text(entry.title)
+                    .font(.system(size: depth == 0 ? 13 : (depth == 1 ? 12.5 : 12),
+                                  weight: depth == 0 ? .semibold : .regular))
+                    .kerning(depth == 0 ? 0.2 : 0)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundStyle(Color(hex: isActive ? theme.headerColor
+                                                         : (depth == 0 ? theme.text : theme.textMuted)))
+                    .padding(.leading, CGFloat(depth) * 13)
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, depth == 0 ? 6 : 4)
+            .padding(.trailing, 12)
+            .background(isActive ? Color(hex: theme.accent).opacity(0.10) : .clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(entry.title)
     }
 }
 

@@ -37,6 +37,15 @@ final class ReaderController: ObservableObject {
     @Published private(set) var currentIndex = 0
     /// Word index within the active sentence for karaoke highlighting.
     @Published private(set) var activeWordIndex = -1
+    /// How far through the current sentence's audio playback is, 0...1.
+    ///
+    /// `activeWordIndex` counts words of the *synthesized* string, which is
+    /// not the string on screen: normalization expands "125" into three spoken
+    /// words and "Dr." into one, so a word index cannot be carried across.
+    /// The reader highlights by fraction instead and resolves it against the
+    /// displayed wording, which keeps the karaoke marker on the right word
+    /// however far the two forms diverge.
+    @Published private(set) var activeWordFraction: Double = 0
     @Published var outlineVisible = false
     @Published var miniPlayerVisible = false {
         didSet { MiniPlayerWindow.shared.setVisible(miniPlayerVisible) }
@@ -221,6 +230,7 @@ final class ReaderController: ObservableObject {
         document = nil
         currentIndex = 0
         activeWordIndex = -1
+        activeWordFraction = 0
         cache.removeAll()
         state = .empty
         statusText = ""
@@ -231,6 +241,7 @@ final class ReaderController: ObservableObject {
         document = doc
         cache.removeAll()
         activeWordIndex = -1
+        activeWordFraction = 0
         currentIndex = 0
 
         // Auto-resume from bookmark history.
@@ -428,6 +439,7 @@ final class ReaderController: ObservableObject {
         }
         currentIndex = next
         activeWordIndex = -1
+        activeWordFraction = 0
 
         if let doc = document, doc.sentences.indices.contains(next) {
             let ttsText = TTSTextNormalizer.expandNumericForms(doc.sentences[next].text)
@@ -446,6 +458,7 @@ final class ReaderController: ObservableObject {
         state = .ready
         statusText = "Finished — \(document?.sentences.count ?? 0) sentences"
         activeWordIndex = -1
+        activeWordFraction = 0
         NowPlayingManager.shared.clear()
     }
 
@@ -500,6 +513,7 @@ final class ReaderController: ObservableObject {
         if activeWordIndex != idx {
             activeWordIndex = idx
         }
+        activeWordFraction = clampedFrac
     }
 
     // MARK: - Audio helpers (port of blabla's boundary pauses + edge fade)

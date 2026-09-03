@@ -47,10 +47,22 @@ enum TTSTextNormalizer {
         var t = input
 
         // Strip images, wiki citation refs, markdown links (keep link text).
-        t = RegexCache.replace(t, pattern: #"!\[[^\]]*\]\([^)]*\)"#, with: "")
-        t = RegexCache.replace(t, pattern: #"\[(?:\[?[0-9]{1,3}\]?)\]\(#[^)]*\)"#, with: "")
-        t = RegexCache.replace(t, pattern: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1")
-        t = RegexCache.replace(t, pattern: #"\[\[[^\]]*\]\]\[?citenote[^]]*\]?"#, with: "")
+        // Guarded: a plain paragraph of book prose never contains "![" or
+        // "](" — the substring check is a cheap linear scan, so skipping the
+        // regex engine entirely for the near-universal no-match case is a
+        // straight win. Every guard here is exact: it fires only when the
+        // pattern that follows could not possibly match, so behavior for
+        // matching input is unchanged.
+        if t.contains("![") {
+            t = RegexCache.replace(t, pattern: #"!\[[^\]]*\]\([^)]*\)"#, with: "")
+        }
+        if t.contains("](") {
+            t = RegexCache.replace(t, pattern: #"\[(?:\[?[0-9]{1,3}\]?)\]\(#[^)]*\)"#, with: "")
+            t = RegexCache.replace(t, pattern: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1")
+        }
+        if t.contains("[[") {
+            t = RegexCache.replace(t, pattern: #"\[\[[^\]]*\]\]\[?citenote[^]]*\]?"#, with: "")
+        }
 
         // Punctuation translation
         t = t.replacingOccurrences(of: "\u{2018}", with: "'")
@@ -62,12 +74,22 @@ enum TTSTextNormalizer {
         t = t.replacingOccurrences(of: "[", with: ",").replacingOccurrences(of: "]", with: ",")
         t = t.replacingOccurrences(of: "{", with: "").replacingOccurrences(of: "}", with: "")
 
-        // Collapse whitespace
-        t = RegexCache.replace(t, pattern: "\\s+", with: " ")
+        // Collapse whitespace. Block text was already whitespace-collapsed
+        // once by HTMLToBlocks' `clean()`, so a per-sentence substring taken
+        // from it essentially never has a run to collapse — the guard turns
+        // the common case into one `contains` scan instead of a regex pass.
+        if t.contains("  ") || t.contains("\n") || t.contains("\t") || t.contains("\r") {
+            t = RegexCache.replace(t, pattern: "\\s+", with: " ")
+        }
         if t.count > 4000 { /* long docs handled by callers chunk-wise */ }
         t = t.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        t = wordOverrides.reduce(t) { $0.replacingOccurrences(of: $1.key, with: $1.value) }
+        // wordOverrides only ever matches specific technical tokens; skip the
+        // whole reduce (6 linear scans) unless a plausible trigger is present.
+        if t.contains("RTX") || t.contains("Qwen3") || t.contains("PyTorch")
+            || t.contains("SQLite") || t.contains("USB-C") {
+            t = wordOverrides.reduce(t) { $0.replacingOccurrences(of: $1.key, with: $1.value) }
+        }
         t = abbreviations(t)
         t = acronyms(t)
         return t
@@ -87,20 +109,35 @@ enum TTSTextNormalizer {
         return t
     }
 
+    /// Same net effect as running each `\bDr\.` / `\bMr\.` / … pattern in
+    /// its own `RegexCache.replace` pass, but as one alternation and one scan
+    /// instead of ten — those ten patterns never overlap (no one abbreviation
+    /// is a prefix of another with the same trailing period), so collapsing
+    /// them into a single regex changes nothing about which text matches.
+    private static let abbreviationMap: [String: String] = [
+        "Dr": "Doctor", "Mr": "Mister", "Mrs": "Misses", "Ms": "Miss",
+        "Prof": "Professor", "St": "Saint", "vs": "versus", "etc": "etcetera",
+        "e.g": "for example", "i.e": "that is",
+    ]
+    private static let abbreviationPattern =
+        #"\b(Dr|Mrs|Mr|Ms|Prof|St|vs|etc|e\.g|i\.e)\."#
+
     private static func abbreviations(_ s: String) -> String {
-        var out = s
-        let pairs: [(String, String)] = [
-            (#"\bDr\."#, "Doctor"), (#"\bMr\."#, "Mister"), (#"\bMrs\."#, "Misses"),
-            (#"\bMs\."#, "Miss"), (#"\bProf\."#, "Professor"), (#"\bSt\."#, "Saint"),
-            (#"\bvs\."#, "versus"), (#"\betc\."#, "etcetera"),
-            (#"\be\.g\."#, "for example"), (#"\bi\.e\."#, "that is"),
-        ]
-        for (p, r) in pairs {
-            out = RegexCache.replace(out, pattern: p, with: r)
+        guard s.contains(".") else { return s }
+        guard let re = RegexCache.regex(abbreviationPattern) else { return s }
+        let ns = s as NSString
+        var result = ""
+        var cursor = 0
+        re.enumerateMatches(in: s, range: NSRange(location: 0, length: ns.length)) { m, _, _ in
+            guard let m = m, m.numberOfRanges > 1 else { return }
+            result += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
+            let word = ns.substring(with: m.range(at: 1))
+            result += abbreviationMap[word] ?? word
+            cursor = m.range.location + m.range.length
         }
+        result += ns.substring(from: cursor)
         // "F.B.I." → "F B I"
-        out = dottedAcronyms(out)
-        return out
+        return dottedAcronyms(result)
     }
 
     /// "F.B.I." style dotted sequences → "F B I".

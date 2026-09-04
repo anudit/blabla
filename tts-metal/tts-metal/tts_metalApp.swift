@@ -14,6 +14,13 @@ import SwiftUI
 struct tts_metalApp: App {
     @StateObject private var controller = TtsController()
 
+    init() {
+        // Diagnostic harness for the main-thread stall report; see MainThreadStallTest.
+        if ProcessInfo.processInfo.environment["SUPERTONIC_STALLTEST"] == "1" {
+            Task { @MainActor in await MainThreadStallTest.run() }
+        }
+    }
+
     var body: some Scene {
         MenuBarExtra {
             ContentView(controller: controller)

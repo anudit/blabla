@@ -35,3 +35,7 @@ tools
 docs
 *.onnx
 Release
+.venv
+supertonic3-voice-clone
+*.mlmodel
+*.bin

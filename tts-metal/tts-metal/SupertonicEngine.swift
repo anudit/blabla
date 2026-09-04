@@ -67,6 +67,11 @@ final class SupertonicEngine: @unchecked Sendable {
 
         // flow-matching ODE
         var odeSteps = 8              // quality/speed knob; VALIDATE default
+
+        /// Run the flow-matching stage on the Apple Neural Engine instead of Metal.
+        /// See ANEVectorField for why this is ~16x faster and what it costs numerically.
+        /// Override with SUPERTONIC_ANE=0 / =1.
+        var useANE = ProcessInfo.processInfo.environment["SUPERTONIC_ANE"] != "0"
     }
     var config = Config()
     let sampleRate = 44100
@@ -95,6 +100,11 @@ final class SupertonicEngine: @unchecked Sendable {
     }
     // Namespaced by model: weights["te"]["char_embedder..."] etc.
     private var W: [String: [String: Weight]] = ["te": [:], "dp": [:], "vf": [:], "vo": [:]]
+    // Generation is confined to EngineHub.engineQueue, so `ane` needs no lock on the
+    // synthesis path. ANEVectorField guards its own model cache for the background
+    // pre-warm, which runs on a separate queue.
+    private var ane: ANEVectorField?
+    private var aneUnavailable = false
     private var filmWeights: [Weight] = []
     private var filmBiases: [MTLBuffer] = []
 
@@ -252,6 +262,7 @@ final class SupertonicEngine: @unchecked Sendable {
 
         status = .ready
         PerfLog.log("SupertonicEngine.load done — ready")
+        if config.useANE { prewarmANE() }
         return true
     }
 
@@ -722,6 +733,47 @@ final class SupertonicEngine: @unchecked Sendable {
                       theta: makeBuf(theta))
     }
 
+    // The first ever load of a (T, L) cell compiles an ANE program: 5-11 s measured, for
+    // a 9 s freeze mid-sentence when it happened lazily. The system caches that program
+    // on disk keyed to the compiled model — it survives both process launches and app
+    // rebuilds, so later launches load a cell in ~0.5 s and the whole 15-cell grid warms
+    // in ~8 s. Only regenerating ve_grid.mlpackage makes it cold again.
+    //
+    // Either way it must not land inside a generation. Every cell is warmed up front on
+    // a background queue, and `run` refuses a cell the warmer has not reached yet — that
+    // sentence falls back to Metal and the next one picks up the ANE.
+    private func prewarmANE() {
+        let a: ANEVectorField
+        do { a = try ANEVectorField() } catch { return }
+        ane = a
+        DispatchQueue.global(qos: .utility).async {
+            for (t, l) in ANEVectorField.allCells {
+                let t0 = Date()
+                if a.prewarm(T: t, L: l) {
+                    PerfLog.log(String(format: "ANE cell T%d_L%d warm (%.1fs)", t, l, Date().timeIntervalSince(t0)))
+                }
+            }
+        }
+    }
+
+    // Flow-matching on the ANE. The CoreML graph subsumes this whole stage — both CFG
+    // branches, the 4/-3 guidance combination, the Euler update and the latent mask are
+    // inside the model (it returns x_{k+1}, not a velocity), so there is nothing left to
+    // do here but marshal the tensors and step it `totalSteps` times.
+    private func runFlowMatchingANE(textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer,
+                                    L: Int, totalSteps: Int) throws -> MTLBuffer {
+        let ch = config.latentCh
+        let x0 = gaussian(ch * L)
+        let te = readBuf(textEmb, count: config.charEmb * T)
+        let st = readBuf(styleTtl, count: 50 * config.charEmb)
+        // Never construct here: ANEVectorField() may have to compile the .mlpackage,
+        // which is exactly the multi-second stall this path exists to avoid. If the
+        // warmer could not build one, this cell is simply not available.
+        guard let ane else { throw ANEVectorField.ANEError.notWarmedYet(T, L) }
+        let out = try ane.run(x0: x0, L: L, textEmb: te, T: T, styleTtl: st, totalSteps: totalSteps)
+        return makeBuf(out)
+    }
+
     // Flow-matching loop with classifier-free guidance, fully on-GPU. Each step runs
     // the vector estimator for the conditional and unconditional conditioning, then
     // combines the velocities and takes an Euler step — all as Metal kernels, so the
@@ -729,6 +781,23 @@ final class SupertonicEngine: @unchecked Sendable {
     //   v = w1·v_cond − w2·v_uncond   (w1=4, w2=3);  x_{k+1} = x_k + v / total_step
     private func runFlowMatching(textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer, L: Int, totalSteps: Int) throws -> MTLBuffer {
         let ch = config.latentCh
+        if config.useANE, !aneUnavailable, ANEVectorField.supports(T: T, L: L) {
+            do {
+                let r = try runFlowMatchingANE(textEmb: textEmb, T: T, styleTtl: styleTtl, L: L, totalSteps: totalSteps)
+                if profile { PerfLog.log("flow-matching: ANE (T=\(T), L=\(L))") }
+                return r
+            }
+            catch ANEVectorField.ANEError.notWarmedYet {
+                if profile { PerfLog.log("flow-matching: Metal (T=\(T), L=\(L)) — ANE cell not warm yet") }
+                // Transient: the warmer has not reached this cell. Use Metal this time and
+                // try again next sentence — do NOT disable the ANE for the session.
+            } catch {
+                // Model missing from the bundle, or a cell the compiler rejects outright.
+                // Stop retrying for the rest of the session.
+                print("[Supertonic] ANE path unavailable (\(error.localizedDescription)); using Metal")
+                aneUnavailable = true
+            }
+        }
         let cond = try prepConditioning(textEmb: textEmb, T: T, styleTtl: styleTtl)
         var xBuf = makeBuf(gaussian(ch * L))    // x_0 ~ N(0,1)  [144, L]
         let inv = 1.0 / Float(totalSteps)
@@ -1829,6 +1898,21 @@ final class SupertonicEngine: @unchecked Sendable {
         profile = true
         let ids = tokenize(text)
         print("[Supertonic] text=\"\(text)\" → \(ids.count) tokens, voice=\(voice), odeSteps=\(config.odeSteps)")
+        // SUPERTONIC_REPEAT=N synthesizes the same text N times in one process. The first
+        // iteration pays one-time costs that a long-lived app pays once too (CoreML model
+        // load, and on a cold machine the ANE program compile); later iterations are the
+        // steady state that actually matters for a reader working through many chunks.
+        let repeats = ProcessInfo.processInfo.environment["SUPERTONIC_REPEAT"].flatMap { Int($0) } ?? 1
+        for i in 1..<max(repeats, 1) {
+            let ti = now()
+            if let w = try? generate(text, voiceName: voice) {
+                let sec = Double(w.count) / Double(config.sampleRate)
+                let ms = now() - ti
+                let flow = lastTimings.first { $0.name == "flow_matching" }?.ms ?? 0
+                print(String(format: "[Supertonic] iter %d/%d total %.1f ms  flow %.1f ms  RTF %.2fx",
+                             i, repeats, ms, flow, sec / (ms / 1000)))
+            }
+        }
         let t0 = now()
         do {
             let wav = try generate(text, voiceName: voice)

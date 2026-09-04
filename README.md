@@ -138,9 +138,28 @@ To run the stage-by-stage numerical validation against a reference dump:
 ST_VALIDATE=1 /path/to/tts-metal.app/Contents/MacOS/tts-metal
 ```
 
+
+Steady-state A/B, Release build, M2 Max
+
+Both paths warmed identically; 6 generations per process, iterations 2-5 shown as steady state.
+
+┌─────────┬─────────┬────────────────────────┬──────────────────────┬──────────────┐
+│  text   │  audio  │   flow: Metal → ANE    │      end-to-end      │     RTF      │
+├─────────┼─────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 54 tok  │ 3.27 s  │ 429 → 29.8 ms (14.4×)  │ 499 → 99 ms (5.0×)   │ 6.6 → 33.1×  │
+├─────────┼─────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 92 tok  │ 5.50 s  │ 519 → 38.0 ms (13.7×)  │ 601 → 120 ms (5.0×)  │ 9.2 → 45.9×  │
+├─────────┼─────────┼────────────────────────┼──────────────────────┼──────────────┤
+│ 231 tok │ 13.65 s │ 1043 → 122.4 ms (8.5×) │ 1180 → 258 ms (4.6×) │ 11.6 → 52.0× │
+└─────────┴─────────┴────────────────────────┴──────────────────────┴──────────────┘
+
+Flow matching went from 87% of runtime to 30%. The bottleneck has moved — at 92 tokens, 82 of the remaining 120 ms is text encoder + duration predictor + vocoder, all still hand-written fp32 Metal.
+
+
 ---
 
 ## Credits
 
 - **Supertonic 3** — Supertone (Supertone/supertonic-3 on Hugging Face).
 - **tts-metal** is a custom, lightweight, dependency-free Metal adaptation of the Supertonic 3 model architecture.
+- https://maderix.github.io/articles/

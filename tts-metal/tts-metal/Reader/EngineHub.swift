@@ -65,18 +65,40 @@ final class EngineHub: ObservableObject {
         }
     }
 
+    /// Serial queue that owns the engine. Two things depend on this:
+    ///
+    ///  1. Synthesis must not run on the main thread. `Task.detached` looks like it
+    ///     guarantees that, but this type is `@MainActor`, so the closure inherited main
+    ///     actor isolation and the whole pipeline — `waitUntilCompleted`, thousands of
+    ///     blocking `IOGPUResourceCreate` calls — ran on the main thread, freezing the UI
+    ///     and stopping the 60 Hz karaoke timer for the duration of every sentence.
+    ///  2. `SupertonicEngine` is not thread-safe: it carries a single in-flight
+    ///     MTLCommandBuffer/encoder pair plus scratch state, so overlapping generations
+    ///     would interleave encoder writes. A serial queue serializes them by construction.
+    ///
+    /// It is `nonisolated` so it can be reached without hopping to the main actor.
+    private nonisolated let engineQueue = DispatchQueue(label: "supertonic.engine",
+                                                        qos: .userInitiated)
+
     /// Synthesize one chunk at 48 kHz (resampled from the engine's native rate).
-    /// Runs entirely off the main actor.
-    func generate(_ text: String, voice: String, speed: Float) async throws -> [Float] {
-        guard let eng = engine else { return [] }
+    /// Runs entirely off the main actor — see `engineQueue`.
+    nonisolated func generate(_ text: String, voice: String, speed: Float) async throws -> [Float] {
+        guard let eng = await self.engine else { return [] }
         PerfLog.log("EngineHub.generate start (\(text.count) chars)")
-        let result = try await Task.detached(priority: .userInitiated) { () -> [Float] in
-            let wave = try eng.generate(text, voiceName: voice,
-                                        speed: max(0.7, min(2.0, speed * 1.05)))
-            if wave.isEmpty { return [] }
-            return Resampler.resample(wave, from: Double(eng.sampleRate),
-                                      to: TtsConfig.enhancedSampleRate)
-        }.value
+        let result: [Float] = try await withCheckedThrowingContinuation { cont in
+            engineQueue.async {
+                do {
+                    let wave = try eng.generate(text, voiceName: voice,
+                                                speed: max(0.7, min(2.0, speed * 1.05)))
+                    if wave.isEmpty { cont.resume(returning: []); return }
+                    cont.resume(returning: Resampler.resample(wave,
+                                                              from: Double(eng.sampleRate),
+                                                              to: TtsConfig.enhancedSampleRate))
+                } catch {
+                    cont.resume(throwing: error)
+                }
+            }
+        }
         PerfLog.log("EngineHub.generate done")
         return result
     }

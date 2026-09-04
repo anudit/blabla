@@ -1,0 +1,198 @@
+{
+ "plain|64": {
+  "ANE": 3.5488330177031457,
+  "GPU": 7.660500006750226,
+  "ane_ops": 690,
+  "tot_ops": 703,
+  "non_ane": {
+   "ios18.sin": 3,
+   "ios18.cos": 3,
+   "ios18.concat": 1,
+   "ios18.softplus": 1,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "plain|80": {
+  "ANE": 4.353625001385808,
+  "GPU": 13.51616601459682,
+  "ane_ops": 690,
+  "tot_ops": 703,
+  "non_ane": {
+   "ios18.sin": 3,
+   "ios18.cos": 3,
+   "ios18.concat": 1,
+   "ios18.softplus": 1,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "plain|96": {
+  "ANE": 4.652792005799711,
+  "GPU": 8.600874978583306,
+  "ane_ops": 690,
+  "tot_ops": 703,
+  "non_ane": {
+   "ios18.sin": 3,
+   "ios18.cos": 3,
+   "ios18.concat": 1,
+   "ios18.softplus": 1,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "plain|128": {
+  "ANE": 5.891959008295089,
+  "GPU": 8.613166981376708,
+  "ane_ops": 690,
+  "tot_ops": 703,
+  "non_ane": {
+   "ios18.sin": 3,
+   "ios18.cos": 3,
+   "ios18.concat": 1,
+   "ios18.softplus": 1,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "plain|160": {
+  "ANE": 7.6835829531773925,
+  "GPU": 10.33633400220424,
+  "ane_ops": 690,
+  "tot_ops": 703,
+  "non_ane": {
+   "ios18.sin": 3,
+   "ios18.cos": 3,
+   "ios18.concat": 1,
+   "ios18.softplus": 1,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "plain|192": {
+  "ANE": 9.107000019866973,
+  "GPU": 10.904334019869566,
+  "ane_ops": 690,
+  "tot_ops": 703,
+  "non_ane": {
+   "ios18.sin": 3,
+   "ios18.cos": 3,
+   "ios18.concat": 1,
+   "ios18.softplus": 1,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "plain|256": {
+  "ANE": 11.875625001266599,
+  "GPU": 12.964416993781924,
+  "ane_ops": 690,
+  "tot_ops": 703,
+  "non_ane": {
+   "ios18.sin": 3,
+   "ios18.cos": 3,
+   "ios18.concat": 1,
+   "ios18.softplus": 1,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "hoist|64": {
+  "ANE": 3.6502500297501683,
+  "GPU": 7.225791981909424,
+  "ane_ops": 678,
+  "tot_ops": 687,
+  "non_ane": {
+   "ios18.sin": 2,
+   "ios18.cos": 2,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "hoist|80": {
+  "ANE": 4.386458953376859,
+  "GPU": 12.416833022143692,
+  "ane_ops": 678,
+  "tot_ops": 687,
+  "non_ane": {
+   "ios18.sin": 2,
+   "ios18.cos": 2,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "hoist|96": {
+  "ANE": 4.659000027459115,
+  "GPU": 8.421292004641145,
+  "ane_ops": 678,
+  "tot_ops": 687,
+  "non_ane": {
+   "ios18.sin": 2,
+   "ios18.cos": 2,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "hoist|128": {
+  "ANE": 5.45112497638911,
+  "GPU": 8.598667045589536,
+  "ane_ops": 678,
+  "tot_ops": 687,
+  "non_ane": {
+   "ios18.sin": 2,
+   "ios18.cos": 2,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "hoist|160": {
+  "ANE": 7.743459020275623,
+  "GPU": 10.550375038292259,
+  "ane_ops": 678,
+  "tot_ops": 687,
+  "non_ane": {
+   "ios18.sin": 2,
+   "ios18.cos": 2,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "hoist|192": {
+  "ANE": 9.063375007826835,
+  "GPU": 10.897167026996613,
+  "ane_ops": 678,
+  "tot_ops": 687,
+  "non_ane": {
+   "ios18.sin": 2,
+   "ios18.cos": 2,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ },
+ "hoist|256": {
+  "ANE": 11.736041982658207,
+  "GPU": 13.18287500180304,
+  "ane_ops": 678,
+  "tot_ops": 687,
+  "non_ane": {
+   "ios18.sin": 2,
+   "ios18.cos": 2,
+   "tile": 3,
+   "select": 1,
+   "ios18.softmax": 1
+  }
+ }
+}

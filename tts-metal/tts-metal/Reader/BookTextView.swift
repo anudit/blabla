@@ -184,6 +184,9 @@ struct BookTextView: NSViewRepresentable {
             if let anchor, anchor < rendered.attributed.length {
                 scroll(to: NSRange(location: anchor, length: 1), anchorFraction: 0.02)
             }
+            // A jump that arrived before this book existed (the resume position
+            // travels with the document) now has something to aim at.
+            if let held = pendingScroll { applyScroll(held) }
         }
 
         /// Character index at the top of the visible area, used to hold the
@@ -339,6 +342,8 @@ struct BookTextView: NSViewRepresentable {
             }
             lastScrollToken = request.token
             pendingScroll = nil
+            PerfLog.log("scroll -> sentence \(request.sentenceID.map(String.init) ?? "-") "
+                        + "range \(range.location)+\(range.length) of \(rendered.attributed.length)")
             scroll(to: range)
         }
 

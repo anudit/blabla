@@ -115,6 +115,16 @@ final class ReaderController: ObservableObject {
         NowPlayingManager.shared.onNextSentence = { [weak self] in self?.skipSentence(+1) }
         NowPlayingManager.shared.onPrevSentence = { [weak self] in self?.skipSentence(-1) }
 
+        // The bookmark save is debounced by 2 s, and quitting cancels the pending
+        // task — so a session that ends without a pause could persist a position
+        // several sentences behind where the reader actually stopped, and resume
+        // there next time. Flush on the way out.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.saveBookmarkNow() }
+        }
+
         Task { await waitForEngine() }
     }
 
@@ -250,6 +260,9 @@ final class ReaderController: ObservableObject {
             pendingResumeIndex = entry.sentenceIndex
             currentIndex = entry.sentenceIndex
             statusText = "Resuming at sentence \(entry.sentenceIndex + 1)"
+            PerfLog.log("resume -> index \(entry.sentenceIndex) of \(doc.sentences.count) "
+                        + "(saved \(entry.totalSentences)): "
+                        + "\"\(doc.sentences[entry.sentenceIndex].displayText.prefix(60))\"")
         }
     }
 
@@ -583,6 +596,8 @@ final class ReaderController: ObservableObject {
             ocrPage: doc.sentencePages.indices.contains(currentIndex) ? doc.sentencePages[currentIndex] : nil,
             filePath: doc.sourceFilePath
         ))
+        PerfLog.log("bookmark saved -> index \(currentIndex) of \(doc.sentences.count): "
+                    + "\"\(doc.sentences.indices.contains(currentIndex) ? String(doc.sentences[currentIndex].displayText.prefix(60)) : "")\"")
     }
 
     // MARK: - Test voice

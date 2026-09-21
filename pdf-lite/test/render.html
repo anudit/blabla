@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>pdf-lite render smoke test</title>
+<style>html,body{margin:0;background:#202020}#status{position:fixed;z-index:2;top:0;left:0;right:0;height:20px;overflow:hidden;color:#111;background:#fff;font:11px monospace;padding:2px 6px;opacity:.9}canvas{display:block;background:white}</style>
+<div id="status">running</div>
+<canvas id="page" width="400" height="200"></canvas>
+<script type="module">
+  import { PdfDocument } from '/dist/pdf-lite.js';
+
+  try {
+    const binary = atob('__PDF_BASE64__');
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    const pdf = await PdfDocument.open(bytes);
+    const page = await pdf.getPage(Number('__PAGE_NUMBER__') || 1);
+    const text = await page.getTextContent();
+    const extractedText = text.items.map(item => item.str).join('');
+    const expectedText = '__EXPECTED_TEXT__';
+    const hasExpectedText = expectedText ? extractedText.includes(expectedText) : extractedText.trim().length > 0;
+    const canvas = document.querySelector('#page');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const viewport = page.getViewport({ scale: 2 });
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let black = 0, nonWhite = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      if (pixels[i + 3] > 8) {
+        if (pixels[i] < 8 && pixels[i + 1] < 8 && pixels[i + 2] < 8) black++;
+        if (pixels[i] < 248 || pixels[i + 1] < 248 || pixels[i + 2] < 248) nonWhite++;
+      }
+    }
+    const blackRatio = black / (pixels.length / 4);
+    const nonWhiteRatio = nonWhite / (pixels.length / 4);
+    const passed = hasExpectedText && blackRatio < 0.2 && nonWhiteRatio > 0.001;
+    const status = document.querySelector('#status');
+    status.textContent = JSON.stringify({ passed, hasExpectedText, extractedText, blackRatio, nonWhiteRatio, width: canvas.width, height: canvas.height });
+    window.__renderTest = { passed, hasExpectedText, extractedText, blackRatio, nonWhiteRatio };
+  } catch (error) {
+    document.querySelector('#status').textContent = `FAILED: ${error?.stack || error}`;
+    window.__renderTest = { passed: false, error: String(error) };
+  }
+</script>

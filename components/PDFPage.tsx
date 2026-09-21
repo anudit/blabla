@@ -47,9 +47,12 @@ const PDFPage = ({ data, pdfDoc, onLineClick, pageContainerStyle }: PDFPageProps
     const observer = new IntersectionObserver((entries) => {
       const entry = entries[0];
       if (!entry) return;
+      // Keep a rendered page mounted once it has entered the reader's
+      // viewport. Cleaning it up as soon as it leaves the intersection margin
+      // can race with fast scrolling and leave a visible page blank when it
+      // re-enters before the next render tick.
       if (entry.isIntersecting) { setIsVisible(true); setTimeout(renderPage, 0); }
-      else { setIsVisible(false); cleanupPage(); }
-    }, { rootMargin: '1000px 0px' });
+    }, { rootMargin: '5000px 0px' });
     observer.observe(container);
     return () => { observer.disconnect(); cleanupPage(); };
   }, [data, pdfDoc]);

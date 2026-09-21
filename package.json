@@ -12,9 +12,9 @@
     "outdated": "bunx npm-check-updates --interactive"
   },
   "dependencies": {
-    "@preact/signals": "^2.11.1",
+    "@preact/signals": "^2.11.2",
     "fflate": "^0.8.3",
-    "lucide-preact": "^1.33.0",
+    "lucide-preact": "^1.47.0",
     "paddleocr-webgpu": "^1.4.0",
     "phonemizer": "^1.2.1",
     "preact": "^10.29.8"

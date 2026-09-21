@@ -58,13 +58,6 @@ await cp("./sw.js", "./dist/sw.js");
 await cp("./sitemap.xml", "./dist/sitemap.xml");
 await cp("./robots.txt", "./dist/robots.txt");
 
-// Lean pdf.js build (see scripts/build-pdfjs-lean.ts). The worker is served as
-// a static file; the main-thread lib is bundled in via loaders.tsx.
-await cp(
-  "./vendor/pdf/pdf.worker.mjs",
-  "./dist/pdf.worker.mjs"
-);
-
 console.log("Injecting file list into Service Worker...");
 const meta = JSON.parse(await readFile("./dist/meta.json", "utf8"));
 const outputs = Object.keys(meta.outputs);
@@ -74,7 +67,6 @@ const baseShell = [
     '/index.html',
     '/180.png',
     '/manifest.json',
-    '/pdf.worker.mjs',
     // Workers are built via separate build() calls without a metafile, so they
     // never appear in meta.outputs. List them explicitly so the service worker
     // treats them as network-first app-shell assets — new worker bundles then

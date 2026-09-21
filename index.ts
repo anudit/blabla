@@ -57,7 +57,6 @@ const server = serve({
     ),
 
     // 3. Serve Static Assets
-    "/pdf.worker.mjs": Bun.file("./vendor/pdf/pdf.worker.mjs"),
     "/manifest.json": Bun.file("./manifest.json"),
     // Dev has no precomputed app shell (that's a build.ts step). An EMPTY
     // shell is unsafe here: sw.js treats non-shell assets as cache-first, so

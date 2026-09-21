@@ -5,6 +5,7 @@ import {
 import {
   findTitleInToc, extractSentences, stripMd, isMarkdown, extractRuns, isImageUrl,
 } from './utils';
+import { PdfDocument } from './pdf-lite/src/index';
 
 const sentRe = /[^.!?]+[.!?]+/g;
 
@@ -511,11 +512,7 @@ export const loadPDF = async (
 ) => {
   setIsDocLoading(true);
   try {
-    const pdfjsLib = await import('./vendor/pdf/pdf.mjs');
-    pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.mjs';
-    const loadingTask = pdfjsLib.getDocument({ data });
-    const doc = await loadingTask.promise;
-    (doc as any).destroy = () => loadingTask.destroy();
+    const doc = await PdfDocument.open(data);
     const scale = Math.min(window.devicePixelRatio || 1, 2);
     
     const globalLineList: any[] = [];
@@ -537,7 +534,7 @@ export const loadPDF = async (
       const page = await doc.getPage(i);
       const textContent = await page.getTextContent();
       const viewport = page.getViewport({ scale });
-      const lines = processTextContent(textContent, scale, globalLineList.length, pdfjsLib, viewport);
+      const lines = processTextContent(textContent, scale, globalLineList.length, viewport);
 
       // Extend the text index with this page's new lines
       for (const line of lines) {
@@ -584,7 +581,7 @@ export const loadPDF = async (
   } catch (e) { console.error(e); } finally { setIsDocLoading(false); }
 };
 
-const processTextContent = (textContent: any, scale: number, startIndex: number, pdfjsLib: any, viewport: any) => {
+const processTextContent = (textContent: any, scale: number, startIndex: number, viewport: any) => {
   const rawItems = textContent.items.map((item: any) => {
     const [x, y] = viewport.convertToViewportPoint(item.transform[4], item.transform[5]);
     const w = item.width * viewport.scale;
@@ -592,7 +589,7 @@ const processTextContent = (textContent: any, scale: number, startIndex: number,
     return { str: item.str, x, y, w, h };
   }).sort((a: any, b: any) => Math.abs(a.y - b.y) > a.h * 0.4 ? a.y - b.y : a.x - b.x);
 
-  const lines: any[] = []; 
+  const bands: any[] = [];
   let currentLine: any = null;
   rawItems.forEach((item: any) => {
     if (!currentLine) {
@@ -601,11 +598,49 @@ const processTextContent = (textContent: any, scale: number, startIndex: number,
       currentLine.items.push(item);
       currentLine.height = Math.max(currentLine.height, item.h);
     } else {
-      lines.push(currentLine);
+      bands.push(currentLine);
       currentLine = { items: [item], y: item.y, height: item.h };
     }
   });
-  if (currentLine) lines.push(currentLine);
+  if (currentLine) bands.push(currentLine);
+
+  // A PDF text stream is positioned, not line-oriented. On a two-column
+  // page, both columns often share the same baseline, so Y-only grouping
+  // incorrectly creates one line spanning the gutter. Split each baseline at
+  // the large horizontal gutter first, then read each column top-to-bottom.
+  const lines: any[] = [];
+  // Compare text start positions rather than estimated item widths. PDF text
+  // item widths are approximate in pdf-lite, and a long left-column item can
+  // otherwise appear to reach into the next column.
+  const gutter = viewport.width * 0.2;
+  for (const band of bands) {
+    const items = [...band.items].sort((a: any, b: any) => a.x - b.x);
+    let column: any[] = [];
+    const flush = () => {
+      if (column.length) lines.push({ items: column, y: band.y, height: band.height });
+      column = [];
+    };
+    items.forEach((item: any, index: number) => {
+      const previous = column[column.length - 1];
+      const startGap = previous ? item.x - previous.x : 0;
+      if (index > 0 && startGap > gutter) flush();
+      column.push(item);
+    });
+    flush();
+  }
+
+  const columnStarts: number[] = [];
+  for (const line of [...lines].sort((a, b) => Math.min(...a.items.map((i: any) => i.x)) - Math.min(...b.items.map((i: any) => i.x)))) {
+    const x = Math.min(...line.items.map((i: any) => i.x));
+    if (!columnStarts.some(start => Math.abs(start - x) < gutter)) columnStarts.push(x);
+  }
+  const columnIndex = (line: any) => {
+    const x = Math.min(...line.items.map((i: any) => i.x));
+    let nearest = 0, distance = Infinity;
+    columnStarts.forEach((start, index) => { if (Math.abs(start - x) < distance) { nearest = index; distance = Math.abs(start - x); } });
+    return nearest;
+  };
+  lines.sort((a, b) => columnIndex(a) - columnIndex(b) || a.y - b.y);
 
   return lines.map((line: any, idx: number) => {
     const minX = Math.min(...line.items.map((i: any) => i.x));
@@ -613,9 +648,20 @@ const processTextContent = (textContent: any, scale: number, startIndex: number,
     const maxX = last.x + last.w;
     const width = maxX - minX;
     
+    // The canvas text is painted with its PDF baseline at `line.y`. Give the
+    // hit/highlight box a small ascender/descender allowance so it covers the
+    // actual glyphs instead of becoming a thin strip below them. Keep this
+    // adjustment local to each line, so it cannot cross a column gutter.
+    const overlayHeight = Math.max(line.height * 1.2, 1);
+    const overlayTop = line.y - overlayHeight * 0.86;
     return {
       id: startIndex + idx, 
-      text: line.items.map((i: any) => i.str).join(' '),
+      text: line.items.map((i: any, itemIndex: number) => {
+        if (itemIndex === 0) return i.str;
+        const previous = line.items[itemIndex - 1];
+        const gap = i.x - (previous.x + previous.w);
+        return `${gap > Math.max(previous.h * 0.2, 1) ? ' ' : ''}${i.str}`;
+      }).join(''),
       words: line.items.map((i: any) => ({
         text: i.str,
         left: `${((i.x - minX) / width) * 100}%`,
@@ -624,9 +670,9 @@ const processTextContent = (textContent: any, scale: number, startIndex: number,
         height: `${(i.h / line.height) * 100}%`
       })),
       left: `${(minX / viewport.width) * 100}%`, 
-      top: `${((line.y - line.height) / viewport.height) * 100}%`,
+      top: `${(overlayTop / viewport.height) * 100}%`,
       width: `${(width / viewport.width) * 100}%`, 
-      height: `${(line.height / viewport.height) * 100}%`,
+      height: `${(overlayHeight / viewport.height) * 100}%`,
       startPos: 0
     };
   });

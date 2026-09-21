@@ -1,0 +1,14 @@
+{
+  "name": "@blabla/pdf-lite",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build.ts",
+    "check": "bunx tsc --noEmit",
+    "test": "bun test/smoke.ts",
+    "render:serve": "bun test/render-server.ts"
+  },
+  "dependencies": {
+    "jpeg-js": "^0.4.4"
+  }
+}

@@ -393,6 +393,14 @@ final class ReaderController: ObservableObject {
                     // idempotent, so a no-op once the background pass catches up.
                     let ttsText = TTSTextNormalizer.expandNumericForms(doc.sentences[idx].text)
 
+                    // Have the ANE cells the look-ahead sentences need loaded while this one
+                    // synthesizes (only the common cells are warmed at launch). First pass
+                    // covers the whole window; after that one new sentence enters per step.
+                    let from = idx == index ? idx + 1 : idx + Self.lookahead
+                    let upcoming = (from...(idx + Self.lookahead)).filter { $0 < doc.sentences.count }
+                        .flatMap { SentenceSplitter.splitChunk(TTSTextNormalizer.expandNumericForms(doc.sentences[$0].text), limit: 280) }
+                    if !upcoming.isEmpty { Task { await self.engineHub.prefetch(upcoming, speed: rate) } }
+
                     var wave = self.cache[idx] ?? []
                     if wave.isEmpty {
                         if idx == index { PerfLog.log("synthesizing first sentence (idx \(idx))") }

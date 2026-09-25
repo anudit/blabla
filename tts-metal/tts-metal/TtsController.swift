@@ -108,9 +108,11 @@ final class TtsController: ObservableObject {
         statusText = "Loading model…"
         hub.ensureLoaded()
 
+        // 20 ms, matching ReaderController.waitForEngine: the load itself is only a few
+        // hundred ms, so a 200 ms poll added up to that much again before ⌥⌘R worked.
         while !hub.ready && !hub.failed {
             statusText = hub.statusText
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
 
         if hub.ready {
@@ -208,6 +210,9 @@ final class TtsController: ObservableObject {
         let rate = Float(speed)
         let stVoice = supertonicVoice
         let gen = audio.currentGeneration
+        // Queue the ANE cells these chunks need (only the common ones load at launch).
+        let hub = self.hub
+        Task { await hub.prefetch(Array(chunks.prefix(8)), speed: rate) }
         speakTask = Task { @MainActor in
             for (index, chunk) in chunks.enumerated() {
                 if Task.isCancelled { return }

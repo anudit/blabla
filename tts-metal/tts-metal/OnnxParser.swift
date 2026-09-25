@@ -151,7 +151,9 @@ final class OnnxParser {
             case 9: // raw_data
                 let len = try readVarint(tag.dataStart)
                 let s = len.end
-                rawData = buffer.subdata(in: s..<(s + Int(len.value)))
+                // A slice shares the (memory-mapped) backing store; `subdata` would copy
+                // every tensor, ~400 MB across the four models, before it is even uploaded.
+                rawData = buffer[s..<(s + Int(len.value))]
                 offset = s + Int(len.value)
             default:
                 offset = try skipField(tag)

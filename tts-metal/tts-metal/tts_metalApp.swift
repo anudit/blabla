@@ -15,9 +15,18 @@ struct tts_metalApp: App {
     @StateObject private var controller = TtsController()
 
     init() {
+        // Start the model load at the earliest point in the process. Reached lazily via
+        // TtsController's init Task instead, it waited ~0.3 s behind window restoration
+        // and the first SwiftUI layout pass on the main thread; the load itself runs on
+        // the engine queue, so starting it here overlaps it with all of that.
+        EngineHub.shared.ensureLoaded()
         // Diagnostic harness for the main-thread stall report; see MainThreadStallTest.
         if ProcessInfo.processInfo.environment["SUPERTONIC_STALLTEST"] == "1" {
             Task { @MainActor in await MainThreadStallTest.run() }
+        }
+        // Latency / RTF / memory benchmark; see Benchmark.
+        if ProcessInfo.processInfo.environment["SUPERTONIC_BENCH"] == "1" {
+            Task { @MainActor in await Benchmark.run() }
         }
     }
 

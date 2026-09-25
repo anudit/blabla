@@ -82,7 +82,14 @@ final class AudioPlayer {
         for w in waiters { w.resume() }
     }
 
-    private func startEngineIfNeeded() {
+    /// `AVAudioEngine.start()` blocks in HAL negotiation (~260 ms on first start, measured
+    /// at launch), so it runs on its own serial queue: `prewarm` starts it there without
+    /// holding the main thread, and on-demand starts go through the same queue so they
+    /// wait for an in-flight prewarm instead of racing it. The engine is touched nowhere
+    /// else after init (the graph is never reconfigured; see the header).
+    private nonisolated let startQueue = DispatchQueue(label: "audio.engine.start", qos: .userInitiated)
+
+    private nonisolated static func start(_ engine: AVAudioEngine) {
         if !engine.isRunning {
             engine.prepare()
             do { try engine.start() }
@@ -90,15 +97,19 @@ final class AudioPlayer {
         }
     }
 
-    /// Starts the audio hardware ahead of the first `enqueue`/`enqueueTagged`
-    /// call. `AVAudioEngine.start()` negotiates with the system's audio HAL
-    /// and can take well over 100ms the first time it runs — measured via
-    /// PerfLog, that cost otherwise landed entirely on the very first
-    /// sentence's time-to-first-audio. Call this once, early (e.g. while the
-    /// TTS model is still loading), so it overlaps with other startup work
-    /// instead of adding to playback latency.
+    private func startEngineIfNeeded() {
+        if engine.isRunning { return }
+        let engine = self.engine
+        startQueue.sync { Self.start(engine) }
+    }
+
+    /// Starts the audio hardware ahead of the first `enqueue`/`enqueueTagged`, in the
+    /// background: HAL negotiation otherwise lands on the first sentence's
+    /// time-to-first-audio (or, called synchronously at launch, stalled the main thread
+    /// and the model load behind it by ~260 ms).
     func prewarm() {
-        startEngineIfNeeded()
+        let engine = self.engine
+        startQueue.async { Self.start(engine) }
     }
 
     private func makeBuffer(_ samples: [Float]) -> AVAudioPCMBuffer? {

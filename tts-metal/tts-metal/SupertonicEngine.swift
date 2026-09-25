@@ -105,8 +105,11 @@ final class SupertonicEngine: @unchecked Sendable {
     // pre-warm, which runs on a separate queue.
     private var ane: ANEVectorField?
     private var aneUnavailable = false
-    private var filmWeights: [Weight] = []
-    private var filmBiases: [MTLBuffer] = []
+    /// "ane", "gpu" (CoreML GPU bridge) or "metal": which backend ran the flow-matching
+    /// stage of the last generation.
+    private(set) var lastFlowBackend = ""
+    var aneWarmupComplete: Bool { ane?.warmupComplete ?? true }
+    private var vectorFieldLoaded = false
 
     private let weightAliasMap: [String: String] = [
         "vector_field.main_blocks.5.attention.W_value.linear.MatMul.weight": "onnx::MatMul_3407",
@@ -192,77 +195,50 @@ final class SupertonicEngine: @unchecked Sendable {
     @discardableResult
     func load() throws -> Bool {
         PerfLog.log("SupertonicEngine.load start")
+        if config.useANE { prewarmANE() }
         status = .loading("Compiling Metal shaders")
         guard let lib = device.makeDefaultLibrary() else {
             status = .error("default.metallib not found"); return false
         }
         library = lib
-        compilePipelines()
-        PerfLog.log("compilePipelines done")
 
-        let models: [(String, String)] = [
-            ("te", "text_encoder"), ("dp", "duration_predictor"),
-            ("vf", "vector_estimator"), ("vo", "vocoder"),
+        // Every stage below is independent, so they run concurrently: pipeline compiles,
+        // the ONNX weight uploads, the tokenizer and the voices. Serially this was ~0.6 s
+        // of the launch, dominated by pipelines (~240 ms) and voice JSON (~250 ms).
+        // vector_estimator (256 MB) is only read by the hand-written Metal flow path, which
+        // the ANE path and its GPU bridge leave as a rare last resort, so it loads on first
+        // use there (`ensureVectorFieldWeights`) rather than sitting resident.
+        var models: [(String, String)] = [
+            ("te", "text_encoder"), ("dp", "duration_predictor"), ("vo", "vocoder"),
+        ]
+        if !config.useANE { models.append(("vf", "vector_estimator")) }
+        let lock = NSLock()
+        var firstError: Error?
+        var missing: String?
+        var jobs: [() throws -> Void] = [
+            { self.compilePipelines() },
+            { try self.loadTokenizer() },
+            { try self.loadVoices() },
         ]
         for (ns, file) in models {
-            status = .loading("Loading \(file)")
-            guard let url = Bundle.main.url(forResource: file, withExtension: "onnx",
-                                            subdirectory: "supertonic") ??
-                            Bundle.main.url(forResource: file, withExtension: "onnx") else {
-                status = .error("\(file).onnx missing from bundle"); return false
-            }
-            let data = try Data(contentsOf: url, options: .alwaysMapped)
-            try OnnxParser(data).parseInitializers { tensor in
-                autoreleasepool { self.uploadWeight(tensor, into: ns) }
-            }
-            print("[Supertonic] \(file): \(W[ns]!.count) weight buffers")
-            PerfLog.log("\(file) weights uploaded")
-        }
-
-        status = .loading("Loading tokenizer")
-        try loadTokenizer()
-        PerfLog.log("tokenizer loaded")
-
-        status = .loading("Loading voices")
-        try loadVoices()
-        PerfLog.log("voices loaded")
-
-        // Cache film weights and biases
-        let allVfInits = W["vf"]!
-
-        func blockIndex(of name: String) -> Int {
-            if let range = name.range(of: "main_blocks.") {
-                let suffix = name[range.upperBound...]
-                if let dotIndex = suffix.firstIndex(of: ".") {
-                    let numStr = suffix[..<dotIndex]
-                    return Int(numStr) ?? 0
+            jobs.append {
+                guard let local = try self.loadWeights(ns: ns, file: file) else {
+                    lock.lock(); missing = file; lock.unlock(); return
                 }
-            }
-            return 0
-        }
-
-        var tempWeights: [(String, Weight)] = []
-        for (name, wt) in allVfInits {
-            if wt.shape == [64, 512] {
-                tempWeights.append((name, wt))
+                lock.lock(); self.W[ns] = local; lock.unlock()
             }
         }
-        tempWeights.sort(by: { blockIndex(of: $0.0) < blockIndex(of: $1.0) })
-        self.filmWeights = tempWeights.map { $0.1 }
-
-        var tempBiases: [(String, MTLBuffer)] = []
-        for (name, wt) in allVfInits {
-            if name.contains("linear.linear.bias") {
-                tempBiases.append((name, wt.buf))
-            }
+        status = .loading("Loading model")
+        DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+            do { try jobs[i]() } catch { lock.lock(); firstError = firstError ?? error; lock.unlock() }
         }
-        tempBiases.sort(by: { blockIndex(of: $0.0) < blockIndex(of: $1.0) })
-        self.filmBiases = tempBiases.map { $0.1 }
-        print("[Supertonic] Cached \(filmWeights.count) film weights and \(filmBiases.count) film biases")
+        if let firstError { throw firstError }
+        if let missing { status = .error("\(missing).onnx missing from bundle"); return false }
+        vectorFieldLoaded = !(W["vf"]?.isEmpty ?? true)
+        PerfLog.log("weights, pipelines, tokenizer, voices loaded")
 
         status = .ready
         PerfLog.log("SupertonicEngine.load done — ready")
-        if config.useANE { prewarmANE() }
         return true
     }
 
@@ -282,30 +258,68 @@ final class SupertonicEngine: @unchecked Sendable {
             "copy_kernel", "transpose_batched_kernel", "st_dwconv1d_edge_batched_kernel",
             "lava_gamma_residual_batched_kernel", "st_add_col_batched_kernel",
         ]
-        for n in names {
-            guard let fn = library.makeFunction(name: n) else { print("[Supertonic] MISSING \(n)"); continue }
-            do { pipelines[n] = try device.makeComputePipelineState(function: fn) }
-            catch { print("[Supertonic] pipeline fail \(n): \(error)") }
+        // Pipeline creation is thread-safe and each one is an independent compile (or
+        // shader-cache lookup), so build them in parallel.
+        let lock = NSLock()
+        var built: [String: MTLComputePipelineState] = [:]
+        DispatchQueue.concurrentPerform(iterations: names.count) { i in
+            let n = names[i]
+            guard let fn = library.makeFunction(name: n) else { print("[Supertonic] MISSING \(n)"); return }
+            do {
+                let p = try device.makeComputePipelineState(function: fn)
+                lock.lock(); built[n] = p; lock.unlock()
+            } catch { print("[Supertonic] pipeline fail \(n): \(error)") }
         }
-        print("[Supertonic] compiled \(pipelines.count) pipelines")
+        pipelines = built
+        PerfLog.log("compiled \(pipelines.count) pipelines")
     }
 
-    private func uploadWeight(_ t: OnnxTensor, into ns: String) {
-        let name = t.name
-        if name.hasSuffix("_scale") || name.hasSuffix("_zero_point") { return }
-        let total = t.dims.reduce(1, *)
-        if total == 0 || t.rawData.isEmpty { return }
-        let floats: [Float]
-        switch t.dataType {
-        case OnnxDtype.float32: floats = OnnxDequant.float32Data(t.rawData)
-        case OnnxDtype.float16: floats = OnnxDequant.float16Array(t.rawData)
-        case OnnxDtype.int64: return
-        default: return    // int8/uint8 quant handled in a later pass if present
+    /// Parses one bundled ONNX model's initializers into Metal buffers; nil if missing.
+    private func loadWeights(ns: String, file: String) throws -> [String: Weight]? {
+        guard let url = Bundle.main.url(forResource: file, withExtension: "onnx", subdirectory: "supertonic") ??
+                        Bundle.main.url(forResource: file, withExtension: "onnx") else { return nil }
+        let data = try Data(contentsOf: url, options: .alwaysMapped)
+        var local: [String: Weight] = [:]
+        try OnnxParser(data).parseInitializers { tensor in
+            autoreleasepool {
+                if let w = self.makeWeight(tensor, ns: ns) { local[tensor.name] = w }
+            }
         }
-        guard let buf = device.makeBuffer(bytes: floats, length: floats.count * 4,
-                                          options: [.storageModeShared]) else { return }
+        PerfLog.log("\(file) weights uploaded (\(local.count) buffers)")
+        return local
+    }
+
+    /// The Metal flow path's weights, loaded on first use when the ANE path is on (~30 ms
+    /// from the page cache). Synthesis queue only, like the rest of generation.
+    private func ensureVectorFieldWeights() throws {
+        if vectorFieldLoaded { return }
+        guard let vf = try loadWeights(ns: "vf", file: "vector_estimator") else {
+            throw err("vector_estimator.onnx missing from bundle")
+        }
+        W["vf"] = vf
+        vectorFieldLoaded = true
+    }
+
+    private func makeWeight(_ t: OnnxTensor, ns: String) -> Weight? {
+        let name = t.name
+        if name.hasSuffix("_scale") || name.hasSuffix("_zero_point") { return nil }
+        let total = t.dims.reduce(1, *)
+        if total == 0 || t.rawData.isEmpty { return nil }
+        let buf: MTLBuffer?
+        switch t.dataType {
+        case OnnxDtype.float32:
+            // Straight from the mapped file into the Metal buffer: one copy, no [Float].
+            buf = t.rawData.withUnsafeBytes {
+                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: [.storageModeShared])
+            }
+        case OnnxDtype.float16:
+            let floats = OnnxDequant.float16Array(t.rawData)
+            buf = device.makeBuffer(bytes: floats, length: floats.count * 4, options: [.storageModeShared])
+        default: return nil    // int64 shape constants; int8/uint8 quant not used by these models
+        }
+        guard let buf else { return nil }
         buf.label = "\(ns).\(name)"
-        W[ns]![name] = Weight(buf: buf, shape: t.dims)
+        return Weight(buf: buf, shape: t.dims)
     }
 
     private func loadTokenizer() throws {
@@ -314,37 +328,64 @@ final class SupertonicEngine: @unchecked Sendable {
                         Bundle.main.url(forResource: "unicode_indexer", withExtension: "json") else {
             throw err("unicode_indexer.json missing")
         }
-        let arr = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [Int] ?? []
-        unicodeIndexer = arr.map { Int32($0) }
-        print("[Supertonic] tokenizer: \(unicodeIndexer.count) codepoints")
+        let nums = Self.scanNumbers(in: try Data(contentsOf: url))
+        unicodeIndexer = nums.map { Int32($0) }
     }
 
     private func loadVoices() throws {
-        // voice_styles/*.json each has style_ttl [1,50,256] and style_dp [1,8,16]
+        // voice_styles/*.json each has style_ttl [1,50,256] and style_dp [1,8,16].
+        // Parsed with a flat number scan: NSJSONSerialization boxed all ~140k values into
+        // NSDecimalNumbers (~250 ms at launch for 11 voices).
         let names = ["david-deep", "F1","F2","F3","F4","F5","M1","M2","M3","M4","M5"]
-        for name in names {
+        let lock = NSLock()
+        var parsed: [String: VoiceStyle] = [:]
+        DispatchQueue.concurrentPerform(iterations: names.count) { i in
+            let name = names[i]
             guard let url = Bundle.main.url(forResource: name, withExtension: "json",
                                             subdirectory: "voice_styles") ??
-                            Bundle.main.url(forResource: name, withExtension: "json") else { continue }
-            guard let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
-            else { continue }
-            func flat(_ key: String) -> [Float] {
-                guard let d = obj[key] as? [String: Any],
-                      let data = d["data"] else { return [] }
-                var out: [Float] = []
-                func rec(_ x: Any) {
-                    if let a = x as? [Any] { for e in a { rec(e) } }
-                    else if let n = x as? NSNumber { out.append(n.floatValue) }
-                }
-                rec(data)
-                return out
-            }
-            let ttl = flat("style_ttl"), dp = flat("style_dp")
-            if ttl.count == 50 * 256 && dp.count == 8 * 16 {
-                voices[name] = VoiceStyle(styleTtl: ttl, styleDp: dp)
+                            Bundle.main.url(forResource: name, withExtension: "json"),
+                  let data = try? Data(contentsOf: url),
+                  let ttl = Self.scanArray(in: data, key: "style_ttl"),
+                  let dp = Self.scanArray(in: data, key: "style_dp"),
+                  ttl.count == 50 * 256, dp.count == 8 * 16 else { return }
+            lock.lock(); parsed[name] = VoiceStyle(styleTtl: ttl, styleDp: dp); lock.unlock()
+        }
+        voices = parsed
+    }
+
+    /// Every number in the (nested) array that is the `"data"` value of `"key"`.
+    private static func scanArray(in data: Data, key: String) -> [Float]? {
+        guard let k = data.range(of: Data("\"\(key)\"".utf8)),
+              let d = data.range(of: Data("\"data\"".utf8), in: k.upperBound..<data.endIndex),
+              let open = data[d.upperBound...].firstIndex(of: UInt8(ascii: "[")) else { return nil }
+        var depth = 0, end = open
+        for i in open..<data.endIndex {
+            let c = data[i]
+            if c == UInt8(ascii: "[") { depth += 1 }
+            else if c == UInt8(ascii: "]") { depth -= 1; if depth == 0 { end = i; break } }
+        }
+        return scanNumbers(in: data[open...end])
+    }
+
+    /// All JSON numbers in `bytes`, in order (brackets, commas and whitespace skipped).
+    private static func scanNumbers(in bytes: Data) -> [Float] {
+        var out: [Float] = []
+        out.reserveCapacity(bytes.count / 8)
+        var buf = [UInt8](bytes); buf.append(0)    // NUL-terminate for strtof
+        buf.withUnsafeMutableBufferPointer { p in
+            let base = UnsafeMutableRawPointer(p.baseAddress!).assumingMemoryBound(to: CChar.self)
+            var i = 0
+            let n = p.count - 1
+            while i < n {
+                let c = p[i]
+                if c == UInt8(ascii: "-") || (c >= UInt8(ascii: "0") && c <= UInt8(ascii: "9")) {
+                    var endp: UnsafeMutablePointer<CChar>? = nil
+                    out.append(strtof(base + i, &endp))
+                    i = max(i + 1, endp.map { $0 - base } ?? 0)
+                } else { i += 1 }
             }
         }
-        print("[Supertonic] loaded \(voices.count) voices")
+        return out
     }
 
     // MARK: - Tokenize
@@ -419,10 +460,6 @@ final class SupertonicEngine: @unchecked Sendable {
         lastTimings = timings
         if profile { for t in timings { print(String(format: "[Supertonic] %-20s %.1f ms", (t.name as NSString).utf8String!, t.ms)) } }
 
-        let wavMean = wav.reduce(0, +) / Float(wav.count)
-        let wavVar = wav.map { ($0 - wavMean) * ($0 - wavMean) }.reduce(0, +) / Float(wav.count)
-        print(String(format: "[Stats] wav: count=%d mean=%.6f std=%.6f min=%.6f max=%.6f", wav.count, wavMean, sqrt(wavVar), wav.min() ?? 0, wav.max() ?? 0))
-
         return wav
     }
 
@@ -487,10 +524,20 @@ final class SupertonicEngine: @unchecked Sendable {
     /// Raw weight as a Float array. Tries the exact ONNX initializer name first, then
     /// the alias resolver (so descriptive `...MatMul.weight` names resolve to `onnx::MatMul_*`).
     private func rawWeight(_ ns: String, _ name: String) -> [Float]? {
-        if let w = W[ns]?[name] { return readBuf(w.buf, count: w.count) }
-        guard let buf = weightBuf(ns, name) else { return nil }
-        return readBuf(buf, count: buf.length / 4)
+        // Weights are immutable after load, and every caller of this reads weights that are
+        // never swapped for a transposed copy by `weightBufWT`, so the CPU copy is cached.
+        // Uncached, each call was a GPU flush plus a fresh copy (the DP char table alone is
+        // 2 MB) on every generation.
+        let key = ns + "|" + name
+        if let hit = rawWeightCache[key] { return hit }
+        let arr: [Float]
+        if let w = W[ns]?[name] { arr = readBuf(w.buf, count: w.count) }
+        else if let buf = weightBuf(ns, name) { arr = readBuf(buf, count: buf.length / 4) }
+        else { return nil }
+        rawWeightCache[key] = arr
+        return arr
     }
+    private var rawWeightCache: [String: [Float]] = [:]
 
     /// CPU matmul: out[M,N] = A[M,K] · W[K,N] (+ bias[N]).  W is row-major [in,out]
     /// exactly as stored in ONNX (used as the B operand of an ONNX MatMul → no transpose).
@@ -526,6 +573,8 @@ final class SupertonicEngine: @unchecked Sendable {
     ///   out      = LayerNorm_C(add_1) → transpose → [C,T]
     /// 2 heads, head_dim 128, fixed score divisor 16 (= sqrt(256)). text_mask is all-ones
     /// for our unpadded single sequence, so its Where/Mul terms are identities and dropped.
+    private var tanhKeyCache: [Int: [Float]] = [:]
+
     private func speechPromptedEncoder(projCM: [Float], T: Int, C: Int,
                                        styleTtl: [Float], styleKey: [Float]) throws -> [Float] {
         let heads = 2, hd = C / heads, S = 50
@@ -550,32 +599,43 @@ final class SupertonicEngine: @unchecked Sendable {
             let bo = rawWeight("te", bp+"out_fc.linear.bias")
 
             let Q = cpuMatmul(q_src, Wq, bq, M: T, K: C, N: C)      // [T,C]
-            let K = cpuMatmul(styleKey, Wk, bk, M: S, K: C, N: C)   // [S,C]
+            // tanh(styleKey·Wk) depends only on weights: compute it once per process
+            // instead of re-evaluating tanh inside the T×S×hd score loop (1.2M tanhf/call).
+            let K: [Float]
+            if let cached = tanhKeyCache[idx] { K = cached } else {
+                K = cpuMatmul(styleKey, Wk, bk, M: S, K: C, N: C).map { tanh($0) }   // [S,C]
+                tanhKeyCache[idx] = K
+            }
             let V = cpuMatmul(styleTtl, Wv, bv, M: S, K: C, N: C)   // [S,C]
 
+            // Per head: scores = Q_h·K_hᵀ·scale → row softmax → ctx_h = P·V_h, as two BLAS
+            // GEMMs over strided head slices (lda = C). This was a scalar T×S×hd triple loop,
+            // ~30% of the synthesis thread's CPU time and all of it on the TTFT path.
             var ctx = [Float](repeating: 0, count: T * C)
-            var scores = [Float](repeating: 0, count: S)
-            for head in 0..<heads {
-                let hoff = head * hd
-                for t in 0..<T {
-                    var mx = -Float.greatestFiniteMagnitude
-                    for s in 0..<S {
-                        var dot: Float = 0
-                        for d in 0..<hd { dot += Q[t * C + hoff + d] * tanh(K[s * C + hoff + d]) }
-                        let sc = dot * scale
-                        scores[s] = sc
-                        if sc > mx { mx = sc }
+            var scores = [Float](repeating: 0, count: T * S)
+            Q.withUnsafeBufferPointer { q in K.withUnsafeBufferPointer { k in V.withUnsafeBufferPointer { v in
+            scores.withUnsafeMutableBufferPointer { sc in ctx.withUnsafeMutableBufferPointer { cx in
+                let scp = sc.baseAddress!
+                for head in 0..<heads {
+                    let hoff = head * hd
+                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, Int32(T), Int32(S), Int32(hd),
+                                scale, q.baseAddress! + hoff, Int32(C), k.baseAddress! + hoff, Int32(C),
+                                0, scp, Int32(S))
+                    for t in 0..<T {
+                        let row = scp + t * S
+                        var mx: Float = 0, sum: Float = 0, n = Int32(S)
+                        vDSP_maxv(row, 1, &mx, vDSP_Length(S))
+                        mx = -mx
+                        vDSP_vsadd(row, 1, &mx, row, 1, vDSP_Length(S))
+                        vvexpf(row, row, &n)
+                        vDSP_sve(row, 1, &sum, vDSP_Length(S))
+                        vDSP_vsdiv(row, 1, &sum, row, 1, vDSP_Length(S))
                     }
-                    var sum: Float = 0
-                    for s in 0..<S { let e = exp(scores[s] - mx); scores[s] = e; sum += e }
-                    let inv = 1.0 / sum
-                    for d in 0..<hd {
-                        var acc: Float = 0
-                        for s in 0..<S { acc += scores[s] * V[s * C + hoff + d] }
-                        ctx[t * C + hoff + d] = acc * inv
-                    }
+                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, Int32(T), Int32(hd), Int32(S),
+                                1, scp, Int32(S), v.baseAddress! + hoff, Int32(C),
+                                0, cx.baseAddress! + hoff, Int32(C))
                 }
-            }
+            }}}}}
             return cpuMatmul(ctx, Wo, bo, M: T, K: C, N: C)         // [T,C]
         }
 
@@ -615,11 +675,9 @@ final class SupertonicEngine: @unchecked Sendable {
     // VALIDATE: `durSeconds` is currently estimated from character count; the real
     // duration_predictor graph (dp) should replace the estimate.
     private func dpEmbedAndConcat(ids: MTLBuffer, T: Int) throws -> MTLBuffer {
-        guard let emb = weightBuf("dp", "char_embedder.weight"),
-              let sent = weightBuf("dp", "sentence_token")
+        guard let table = rawWeight("dp", "char_embedder.weight"),   // V=8322, C=64
+              let sentToken = rawWeight("dp", "sentence_token")       // [1, 64, 1]
         else { throw err("dp embed weights missing") }
-        let table = readBuf(emb, count: 8322 * 64) // V=8322, C=64
-        let sentToken = readBuf(sent, count: 64) // [1, 64, 1]
         let idArr = readIntBuf(ids, count: T)
 
         var out = [Float](repeating: 0, count: 64 * (T + 1))
@@ -694,7 +752,6 @@ final class SupertonicEngine: @unchecked Sendable {
             for j in 0..<128 { outVal += hAct[j] * w1[j] }
 
             let durSeconds = exp(outVal) / speed
-            print("[DurationPredict] predicted duration = \(durSeconds) s")
 
             let chunkSize = Double(512 * config.chunkCompress)
             let L = Int((Double(durSeconds) * Double(config.sampleRate) / chunkSize).rounded(.up))
@@ -733,27 +790,29 @@ final class SupertonicEngine: @unchecked Sendable {
                       theta: makeBuf(theta))
     }
 
-    // The first ever load of a (T, L) cell compiles an ANE program: 5-11 s measured, for
-    // a 9 s freeze mid-sentence when it happened lazily. The system caches that program
-    // on disk keyed to the compiled model — it survives both process launches and app
-    // rebuilds, so later launches load a cell in ~0.5 s and the whole 15-cell grid warms
-    // in ~8 s. Only regenerating ve_grid.mlpackage makes it cold again.
-    //
-    // Either way it must not land inside a generation. Every cell is warmed up front on
-    // a background queue, and `run` refuses a cell the warmer has not reached yet — that
-    // sentence falls back to Metal and the next one picks up the ANE.
+    // Loading a (T, L) cell costs 6-10 s with a cold ANE program cache and ~0.5 s once
+    // cached; see ANEVectorField.startWarmup. Either way it must not land
+    // inside a generation: `run` refuses a cell the warmer has not reached yet, so that
+    // sentence falls back to Metal and the next one picks up the ANE. Called at the very
+    // start of load() so warm-up overlaps the Metal weight upload.
     private func prewarmANE() {
-        let a: ANEVectorField
-        do { a = try ANEVectorField() } catch { return }
+        guard ane == nil, let a = try? ANEVectorField() else { return }
         ane = a
-        DispatchQueue.global(qos: .utility).async {
-            for (t, l) in ANEVectorField.allCells {
-                let t0 = Date()
-                if a.prewarm(T: t, L: l) {
-                    PerfLog.log(String(format: "ANE cell T%d_L%d warm (%.1fs)", t, l, Date().timeIntervalSince(t0)))
-                }
-            }
-        }
+        a.startWarmup()
+    }
+
+    /// Asks the ANE warmer for the cell(s) an upcoming `generate(text, speed:)` will need,
+    /// so it is loaded by the time that sentence is synthesized. Only eagerCells are
+    /// loaded at launch; the rest arrive through here. Safe from any thread (tokenizing
+    /// reads load-time state only). L is estimated from the token count — measured
+    /// L ≈ 0.91·T/speed across short to long English sentences — and both buckets within
+    /// ±15% of the estimate are requested, since the real duration varies with text/voice.
+    func prefetchANE(_ text: String, speed: Float) {
+        guard config.useANE, !aneUnavailable, let ane else { return }
+        let T = tokenize(text).count
+        guard T > 0 else { return }
+        let estL = 0.91 * Double(T) / Double(speed)
+        for f in [0.85, 1.15] { ane.request(T: T, L: max(1, Int(estL * f))) }
     }
 
     // Flow-matching on the ANE. The CoreML graph subsumes this whole stage — both CFG
@@ -784,10 +843,12 @@ final class SupertonicEngine: @unchecked Sendable {
         if config.useANE, !aneUnavailable, ANEVectorField.supports(T: T, L: L) {
             do {
                 let r = try runFlowMatchingANE(textEmb: textEmb, T: T, styleTtl: styleTtl, L: L, totalSteps: totalSteps)
-                if profile { PerfLog.log("flow-matching: ANE (T=\(T), L=\(L))") }
+                lastFlowBackend = ane?.lastBackend ?? "ane"
+                if profile { PerfLog.log("flow-matching: \(lastFlowBackend.uppercased()) (T=\(T), L=\(L))") }
                 return r
             }
             catch ANEVectorField.ANEError.notWarmedYet {
+                ane?.request(T: T, L: L)
                 if profile { PerfLog.log("flow-matching: Metal (T=\(T), L=\(L)) — ANE cell not warm yet") }
                 // Transient: the warmer has not reached this cell. Use Metal this time and
                 // try again next sentence — do NOT disable the ANE for the session.
@@ -798,6 +859,8 @@ final class SupertonicEngine: @unchecked Sendable {
                 aneUnavailable = true
             }
         }
+        lastFlowBackend = "metal"
+        try ensureVectorFieldWeights()
         let cond = try prepConditioning(textEmb: textEmb, T: T, styleTtl: styleTtl)
         var xBuf = makeBuf(gaussian(ch * L))    // x_0 ~ N(0,1)  [144, L]
         let inv = 1.0 / Float(totalSteps)
@@ -812,6 +875,14 @@ final class SupertonicEngine: @unchecked Sendable {
                              size: ch * L, w1: 4.0, w2: 3.0, invTotal: inv)
             xBuf = nx
             if k == 0 { printBufStats("vfield[0] step0", xBuf, count: ch * L) }
+            // One command buffer per ODE step, at most two in flight. Every `empty()`
+            // intermediate lives until its command buffer completes, and the CPU encodes far
+            // faster than the GPU runs, so without a bound all 8 steps' activations (~100 MB
+            // per step at L≈80) are allocated up front: 1.2-2.4 GB peak footprint. Waiting on
+            // the previous step while the current one is queued keeps the GPU busy.
+            let prev = lastCommitted
+            commitNoWait()
+            prev?.waitUntilCompleted()
         }
         return xBuf
     }
@@ -822,6 +893,7 @@ final class SupertonicEngine: @unchecked Sendable {
     func vectorEstimatorStep(x: [Float], textEmb: MTLBuffer, T: Int, styleTtl: MTLBuffer,
                              L: Int, curStep: Float, totalStep: Float) throws -> [Float] {
         let ch = config.latentCh
+        try ensureVectorFieldWeights()
         let cond = try prepConditioning(textEmb: textEmb, T: T, styleTtl: styleTtl)
         let xBuf = makeBuf(x)
         let tEmbBuf = makeBuf(try timeEmbeddingArr(cur: curStep, total: totalStep))
@@ -1124,9 +1196,7 @@ final class SupertonicEngine: @unchecked Sendable {
             let hid = empty(T * filter)
             matmulRowMajorWT(A: h, ns: ns, name: "attn_encoder.ffn_layers.\(layer).conv_1.weight", bias: b1, out: hid, M: T, K: C, N: filter, act: "relu")
             if layer == 3 {
-                saveBin("/tmp/layer3_h.bin", h, count: T * C)
                 printBufStats("layer 3 FFN hid", hid, count: T * filter)
-                saveBin("/tmp/layer3_hid.bin", hid, count: T * filter)
             }
             let out = empty(T * C)
             matmulRowMajorWT(A: hid, ns: ns, name: "attn_encoder.ffn_layers.\(layer).conv_2.weight", bias: b2, out: out, M: T, K: filter, N: C)
@@ -1134,7 +1204,6 @@ final class SupertonicEngine: @unchecked Sendable {
         }
         if layer == 3 {
             printBufStats("layer 3 ff", ff, count: T * C)
-            saveBin("/tmp/layer3_ff.bin", ff, count: T * C)
         }
         var h2 = empty(T * C)
         dispatchAdd(a: h, b: ff, out: h2, size: T * C)
@@ -1155,7 +1224,14 @@ final class SupertonicEngine: @unchecked Sendable {
     // time_encoder: sinusoid(t) [64] → Gemm→256 → Mish → Gemm→64.
     //   sinusoid: arg = (cur/total)·1000·theta[f]; emb = concat(sin, cos) over 32 bands.
     //   Mish(x) = x·tanh(softplus(x)).
+    private var timeEmbCache: [SIMD2<Float>: [Float]] = [:]
     private func timeEmbeddingArr(cur: Float, total: Float) throws -> [Float] {
+        if let hit = timeEmbCache[SIMD2(cur, total)] { return hit }
+        let r = try timeEmbeddingArrUncached(cur: cur, total: total)
+        timeEmbCache[SIMD2(cur, total)] = r
+        return r
+    }
+    private func timeEmbeddingArrUncached(cur: Float, total: Float) throws -> [Float] {
         let t = cur / max(total, 1)
         // frequency bands (Constant_3), fixed [32]
         let freqs: [Float] = [1.0, 0.74296391, 0.55199546, 0.41011271, 0.30469894, 0.22638035,
@@ -1382,8 +1458,7 @@ final class SupertonicEngine: @unchecked Sendable {
     }
 
     private func embedChannelMajor(ns: String, embName: String?, ids: MTLBuffer, T: Int, C: Int) throws -> MTLBuffer {
-        guard let name = embName, let emb = W[ns]![name] else { return empty(C * T) }
-        let table = readBuf(emb.buf, count: emb.count)      // [V, C]
+        guard let name = embName, let table = rawWeight(ns, name) else { return empty(C * T) }   // [V, C]
         let idArr = readIntBuf(ids, count: T)
         var out = [Float](repeating: 0, count: C * T)       // channel-major [C, T]
         for t in 0..<T {
@@ -1415,6 +1490,18 @@ final class SupertonicEngine: @unchecked Sendable {
     /// which dictionary entry a given name refers to.
     private func resolvedWeightKey(_ ns: String, _ contains: String) -> String? {
         if W[ns]?[contains] != nil { return contains }
+        // The fallback below is a linear substring scan over every initializer name.
+        // It ran ~290 times per generation (≈40 ms of CPU on the synthesis path), so
+        // resolve each name once and remember the answer, including misses.
+        let memoKey = ns + "|" + contains
+        if let hit = resolvedKeyMemo[memoKey] { return hit }
+        let key = resolveWeightKeySlow(ns, contains)
+        resolvedKeyMemo[memoKey] = .some(key)
+        return key
+    }
+    private var resolvedKeyMemo: [String: String?] = [:]
+
+    private func resolveWeightKeySlow(_ ns: String, _ contains: String) -> String? {
 
         // Resolve via alias map
         let normalized = contains
@@ -1436,7 +1523,6 @@ final class SupertonicEngine: @unchecked Sendable {
 
         // suffix / substring match
         if let hit = W[ns]?.first(where: { $0.key.hasSuffix(contains) || $0.key.contains(contains) }) {
-            print("[WeightBuf] matched '\(contains)' to '\(hit.key)'")
             return hit.key
         }
         return nil
@@ -1700,9 +1786,17 @@ final class SupertonicEngine: @unchecked Sendable {
     private func ensureEncoder() {
         if cmd == nil { cmd = queue.makeCommandBuffer(); enc = cmd!.makeComputeCommandEncoder() }
     }
+    /// Most recent buffer committed by `commitNoWait`. Buffers on one queue complete in
+    /// commit order, so waiting on this one waits on everything committed before it.
+    private var lastCommitted: MTLCommandBuffer?
+    private func commitNoWait() {
+        if let e = enc { e.endEncoding(); cmd?.commit(); lastCommitted = cmd }
+        cmd = nil; enc = nil
+    }
     private func flushAndWait() {
         if let e = enc { e.endEncoding(); cmd?.commit(); cmd?.waitUntilCompleted() }
-        cmd = nil; enc = nil
+        else { lastCommitted?.waitUntilCompleted() }
+        cmd = nil; enc = nil; lastCommitted = nil
     }
     private func readBuf(_ b: MTLBuffer, count: Int) -> [Float] {
         flushAndWait()
@@ -1731,11 +1825,21 @@ final class SupertonicEngine: @unchecked Sendable {
         try? data.write(to: URL(fileURLWithPath: path))
         print("Saved \(path)")
     }
+    /// SUPERTONIC_SEED=<n> makes the ODE's initial noise reproducible (benchmarks and
+    /// A/B output comparisons); otherwise it is fresh system randomness per sentence.
+    private var noiseRNG: SeededRNG? = ProcessInfo.processInfo.environment["SUPERTONIC_SEED"]
+        .flatMap { UInt64($0) }.map { SeededRNG(seed: $0) }
     private func gaussian(_ n: Int) -> [Float] {
         var out = [Float](repeating: 0, count: n)
+        var sys = SystemRandomNumberGenerator()
         var i = 0
         while i < n {
-            let u1 = Float.random(in: 1e-6...1), u2 = Float.random(in: 0...1)
+            let u1: Float, u2: Float
+            if noiseRNG != nil {
+                u1 = Float.random(in: 1e-6...1, using: &noiseRNG!); u2 = Float.random(in: 0...1, using: &noiseRNG!)
+            } else {
+                u1 = Float.random(in: 1e-6...1, using: &sys); u2 = Float.random(in: 0...1, using: &sys)
+            }
             let r = (-2 * log(u1)).squareRoot()
             out[i] = r * cos(2 * .pi * u2)
             if i + 1 < n { out[i + 1] = r * sin(2 * .pi * u2) }
@@ -1949,5 +2053,18 @@ final class SupertonicEngine: @unchecked Sendable {
             var x = v.littleEndian; withUnsafeBytes(of: &x) { data.append(contentsOf: $0) }
         }
         try? data.write(to: url)
+    }
+}
+
+/// SplitMix64 — small, fast, deterministic; used only for SUPERTONIC_SEED runs.
+struct SeededRNG: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
     }
 }

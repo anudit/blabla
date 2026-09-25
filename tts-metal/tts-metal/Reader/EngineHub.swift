@@ -27,25 +27,26 @@ final class EngineHub: ObservableObject {
         guard !loadStarted else { return }
         loadStarted = true
 
-        // Overlaps AVAudioEngine's first-start hardware negotiation (100ms+)
-        // with the model load below, instead of paying it on the first
-        // sentence's time-to-first-audio.
-        AudioPlayer.shared.prewarm()
-
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let queue = device.makeCommandQueue() else {
-            statusText = "Metal not available."
-            failed = true
-            return
-        }
-        let eng = SupertonicEngine(device: device, queue: queue)
-        Task.detached(priority: .utility) { [weak self] () -> Void in
+        // Everything here is dispatched, not done inline: this runs from App.init on the
+        // main thread, where the audio engine start (~260 ms) and Metal device creation
+        // (~30 ms) used to delay both the first window and the model load.
+        engineQueue.async { [weak self] in
+            guard let device = MTLCreateSystemDefaultDevice(),
+                  let queue = device.makeCommandQueue() else {
+                Task { @MainActor [weak self] in
+                    self?.statusText = "Metal not available."
+                    self?.failed = true
+                }
+                return
+            }
+            let eng = SupertonicEngine(device: device, queue: queue)
             do { try eng.load() }
             catch { print("[EngineHub] load failed: \(error)") }
             eng.profile = true   // per-stage synthesis timings via PerfLog/print — see SupertonicEngine.generate
-            await MainActor.run { [weak self] in
+            let ok = eng.status == .ready
+            Task { @MainActor [weak self] in
                 self?.engine = eng
-                if eng.status == .ready {
+                if ok {
                     self?.ready = true
                     self?.statusText = "Ready"
                 } else {
@@ -63,6 +64,11 @@ final class EngineHub: ObservableObject {
                 eng.validate()
             }
         }
+
+        // Overlaps AVAudioEngine's first-start hardware negotiation with the model load
+        // instead of paying it on the first sentence's time-to-first-audio. Asynchronous;
+        // see AudioPlayer.prewarm.
+        AudioPlayer.shared.prewarm()
     }
 
     /// Serial queue that owns the engine. Two things depend on this:
@@ -80,6 +86,16 @@ final class EngineHub: ObservableObject {
     private nonisolated let engineQueue = DispatchQueue(label: "supertonic.engine",
                                                         qos: .userInitiated)
 
+    /// Engine speed for a user speed; `generate` and `prefetch` must agree on it.
+    private nonisolated static func engineSpeed(_ speed: Float) -> Float { max(0.7, min(2.0, speed * 1.05)) }
+
+    /// Hint that `text` will be synthesized soon, so the ANE cell it needs gets loaded
+    /// first. Cheap (a tokenize and a queue insert); call it for look-ahead sentences.
+    nonisolated func prefetch(_ texts: [String], speed: Float) async {
+        guard let eng = await self.engine else { return }
+        for t in texts { eng.prefetchANE(t, speed: Self.engineSpeed(speed)) }
+    }
+
     /// Synthesize one chunk at 48 kHz (resampled from the engine's native rate).
     /// Runs entirely off the main actor — see `engineQueue`.
     nonisolated func generate(_ text: String, voice: String, speed: Float) async throws -> [Float] {
@@ -89,7 +105,7 @@ final class EngineHub: ObservableObject {
             engineQueue.async {
                 do {
                     let wave = try eng.generate(text, voiceName: voice,
-                                                speed: max(0.7, min(2.0, speed * 1.05)))
+                                                speed: Self.engineSpeed(speed))
                     if wave.isEmpty { cont.resume(returning: []); return }
                     cont.resume(returning: Resampler.resample(wave,
                                                               from: Double(eng.sampleRate),

@@ -31,11 +31,6 @@ struct ZipArchive {
         self.entries = parsed
     }
 
-    init?(url: URL) {
-        guard let d = try? Data(contentsOf: url) else { return nil }
-        self.init(data: d)
-    }
-
     // MARK: - EOCD
 
     private static let eocdSignature: UInt32 = 0x06054b50

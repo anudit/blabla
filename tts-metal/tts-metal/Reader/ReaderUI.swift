@@ -426,6 +426,7 @@ struct LandingView: View {
 struct DocumentReaderView: View {
     @ObservedObject private var reader = ReaderControllerHolder.reader
     @State private var isFindVisible = false
+    @State private var isAskVisible = false
     @State private var findQuery = ""
     @State private var findCount = 0
     @State private var findCurrent = 0
@@ -470,7 +471,9 @@ struct DocumentReaderView: View {
                 }
                 .ignoresSafeArea(edges: .bottom)
                 .onAppear { jump(toSentence: reader.currentIndex) }
+                .onAppear { BookAskController.shared.bookLoaded(doc) }
                 .onChange(of: doc.sourceID) { _, _ in jump(toSentence: reader.currentIndex) }
+                .onChange(of: doc.sourceID) { _, _ in BookAskController.shared.bookLoaded(doc) }
                 .onChange(of: reader.currentIndex) { _, newIndex in
                     // While a search is up, find navigation owns the scroll
                     // position — otherwise every hit would be yanked back to
@@ -509,6 +512,18 @@ struct DocumentReaderView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 findToolbarField
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button("Ask") { isAskVisible.toggle() }
+                .help("Ask this book")
+                .popover(isPresented: $isAskVisible, arrowEdge: .bottom) {
+                    if let document = reader.document {
+                        BookAskPanel(document: document) { sentence in
+                            isAskVisible = false
+                            jump(toSentence: sentence)
+                        }
+                    }
+                }
             }
         }
     }

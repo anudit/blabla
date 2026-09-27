@@ -7,11 +7,29 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A11A00010000000000000001 /* USearch in Frameworks */ = {isa = PBXBuildFile; productRef = A11A00020000000000000001 /* USearch */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		D6128CB83007AE2E00057BB7 /* tts-metal.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "tts-metal.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A11A00040000000000000001 /* NumKong header-only link shim */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "NumKong header-only link shim";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/CNumKong.o",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ ! -e \"${BUILT_PRODUCTS_DIR}/CNumKong.o\" ]; then\n    xcrun clang -x c -c /dev/null -o \"${BUILT_PRODUCTS_DIR}/CNumKong.o\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		D6128CBA3007AE2E00057BB7 /* tts-metal */ = {
@@ -26,6 +44,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A11A00010000000000000001 /* USearch in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -55,6 +74,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = D6128CC33007AE2F00057BB7 /* Build configuration list for PBXNativeTarget "tts-metal" */;
 			buildPhases = (
+				A11A00040000000000000001 /* NumKong header-only link shim */,
 				D6128CB43007AE2E00057BB7 /* Sources */,
 				D6128CB53007AE2E00057BB7 /* Frameworks */,
 				D6128CB63007AE2E00057BB7 /* Resources */,
@@ -68,6 +88,7 @@
 			);
 			name = "tts-metal";
 			packageProductDependencies = (
+				A11A00020000000000000001 /* USearch */,
 			);
 			productName = "tts-metal";
 			productReference = D6128CB83007AE2E00057BB7 /* tts-metal.app */;
@@ -98,6 +119,7 @@
 			mainGroup = D6128CAF3007AE2E00057BB7;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				A11A00030000000000000001 /* XCRemoteSwiftPackageReference "USearch" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D6128CB93007AE2E00057BB7 /* Products */;
@@ -336,8 +358,15 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+/* Begin XCRemoteSwiftPackageReference section */
+		A11A00030000000000000001 /* XCRemoteSwiftPackageReference "USearch" */ = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/unum-cloud/USearch"; requirement = {kind = upToNextMajorVersion; minimumVersion = 2.26.2; }; };
+/* End XCRemoteSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+		A11A00020000000000000001 /* USearch */ = {isa = XCSwiftPackageProductDependency; package = A11A00030000000000000001 /* XCRemoteSwiftPackageReference "USearch" */; productName = USearch; };
+/* End XCSwiftPackageProductDependency section */
 
 
 	};
 	rootObject = D6128CB03007AE2E00057BB7 /* Project object */;
+
 }

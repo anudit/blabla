@@ -12,7 +12,8 @@ import Foundation
 enum DOCXLoader {
 
     static func load(url: URL, fileName: String, sourceID: String) throws -> ReaderDocument {
-        guard let zip = ZipArchive(url: url) else { throw LoaderError.failed("Not a valid DOCX (bad ZIP).") }
+        let archiveData = try Data(contentsOf: url)
+        guard let zip = ZipArchive(data: archiveData) else { throw LoaderError.failed("Not a valid DOCX (bad ZIP).") }
         guard let xmlData = zip.read("word/document.xml"),
               let xml = String(data: xmlData, encoding: .utf8) else {
             throw LoaderError.failed("Invalid DOCX: missing document.xml.")

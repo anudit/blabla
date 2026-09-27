@@ -1,13 +1,22 @@
 {
-  "originHash" : "54a530a8a66c1ee0cc1c6dd34159a96243f09d436e10ae5178973082bff1ef28",
+  "originHash" : "cdabf85d99c123d627bf0769d4da4cfc50f455ccdfa9664e32491dcd35c46b3e",
   "pins" : [
     {
-      "identity" : "onnxruntime-swift-package-manager",
+      "identity" : "numkong",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/microsoft/onnxruntime-swift-package-manager",
+      "location" : "https://github.com/ashvardanian/NumKong",
       "state" : {
-        "revision" : "b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2",
-        "version" : "1.24.2"
+        "revision" : "42c6245e6b2bf78d3377eda20eff8da506c3d5b0",
+        "version" : "7.8.3"
+      }
+    },
+    {
+      "identity" : "usearch",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/unum-cloud/USearch",
+      "state" : {
+        "revision" : "f91fe5bc000222aa1af6e91daf78c2bb20b0c90e",
+        "version" : "2.26.2"
       }
     }
   ],

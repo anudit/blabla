@@ -28,6 +28,10 @@ struct tts_metalApp: App {
         if ProcessInfo.processInfo.environment["SUPERTONIC_BENCH"] == "1" {
             Task { @MainActor in await Benchmark.run() }
         }
+        // End-of-utterance cropping across reader speeds; see SpeedTailTest.
+        if ProcessInfo.processInfo.environment["SUPERTONIC_SPEEDTEST"] == "1" {
+            Task { @MainActor in await SpeedTailTest.run() }
+        }
     }
 
     var body: some Scene {

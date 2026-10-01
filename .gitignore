@@ -40,3 +40,4 @@ Release
 supertonic3-voice-clone
 *.mlmodel
 *.bin
+*.txt

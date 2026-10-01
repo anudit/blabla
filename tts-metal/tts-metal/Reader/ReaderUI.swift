@@ -466,7 +466,8 @@ struct DocumentReaderView: View {
                                 if count > 0 { bumpScroll() }
                             }
                         },
-                        onActivateSentence: { reader.playFrom($0) }
+                        onActivateSentence: { reader.playFrom($0) },
+                        onZoom: { reader.fontSize = Double($0) }
                     )
                 }
                 .ignoresSafeArea(edges: .bottom)
@@ -1035,12 +1036,12 @@ struct SettingsPopover: View {
             // Font size
             HStack {
                 Text("Font size").frame(width: 52, alignment: .leading)
-                Button("-") { reader.fontSize = max(0.8, reader.fontSize - 0.05) }
+                Button("-") { reader.fontSize = max(Double(BookTextView.fontScaleRange.lowerBound), reader.fontSize - 0.05) }
                     .buttonStyle(.bordered)
                 Text(String(format: "%.2f×", reader.fontSize))
                     .font(.caption.monospacedDigit())
                     .frame(width: 44)
-                Button("+") { reader.fontSize = min(1.6, reader.fontSize + 0.05) }
+                Button("+") { reader.fontSize = min(Double(BookTextView.fontScaleRange.upperBound), reader.fontSize + 0.05) }
                     .buttonStyle(.bordered)
             }
 

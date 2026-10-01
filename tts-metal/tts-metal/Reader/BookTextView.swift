@@ -53,6 +53,10 @@ struct BookTextView: NSViewRepresentable {
     var onSearchCount: (Int) -> Void = { _ in }
     /// Double-click anywhere in the prose starts playback from that sentence.
     var onActivateSentence: (Int) -> Void = { _ in }
+    /// A trackpad pinch finished; carries the new font scale.
+    var onZoom: (CGFloat) -> Void = { _ in }
+
+    static let fontScaleRange: ClosedRange<CGFloat> = 0.8...1.6
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -104,16 +108,29 @@ struct BookTextView: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = true
         scrollView.autohidesScrollers = true
+        // Pinch zooms the page live, then `pinchEnded` turns the zoom into a
+        // font scale so the text re-wraps at the new size instead of staying
+        // a scaled bitmap of the old layout.
+        scrollView.allowsMagnification = true
 
         coordinator.textView = textView
         coordinator.scrollView = scrollView
+        coordinator.observePinch(on: scrollView)
+        coordinator.installClickOutsideMonitor()
         return scrollView
+    }
+
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        coordinator.teardown()
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
         scrollView.backgroundColor = NSColor(hex: theme.bg)
+        // Live pinch stops where the committed font scale would be clamped.
+        scrollView.minMagnification = Self.fontScaleRange.lowerBound / fontScale
+        scrollView.maxMagnification = Self.fontScaleRange.upperBound / fontScale
 
         coordinator.applyContent(document: document, theme: theme,
                                  fontScale: fontScale, columnWidth: columnWidth)
@@ -149,7 +166,60 @@ struct BookTextView: NSViewRepresentable {
         /// be retried once the book is installed.
         private var pendingScroll: BookScrollRequest?
 
+        private var pinchObserver: NSObjectProtocol?
+        private var clickMonitor: Any?
+
         init(_ parent: BookTextView) { self.parent = parent }
+
+        func teardown() {
+            if let pinchObserver { NotificationCenter.default.removeObserver(pinchObserver) }
+            if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+            pinchObserver = nil
+            clickMonitor = nil
+        }
+
+        // MARK: Pinch zoom
+
+        func observePinch(on scrollView: NSScrollView) {
+            pinchObserver = NotificationCenter.default.addObserver(
+                forName: NSScrollView.didEndLiveMagnifyNotification, object: scrollView, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pinchEnded() }
+            }
+        }
+
+        private func pinchEnded() {
+            guard let scrollView else { return }
+            let range = BookTextView.fontScaleRange
+            let raw = parent.fontScale * scrollView.magnification
+            // Same 0.05 steps as the toolbar's −/+ buttons.
+            let scale = min(range.upperBound, max(range.lowerBound, (raw * 20).rounded() / 20))
+            // Back to 1× before the rebuild: the new font size now carries the
+            // zoom, and the rebuild re-anchors on whatever is at the top.
+            scrollView.magnification = 1
+            if abs(scale - parent.fontScale) > 0.001 { parent.onZoom(scale) }
+        }
+
+        // MARK: Click outside
+
+        /// A selection otherwise stays painted after clicking elsewhere in the
+        /// window (sidebar, toolbar, empty chrome), because the text view only
+        /// greys it out on losing focus. Clicks inside the scroll view —
+        /// including its margins and scroller — are left to AppKit.
+        func installClickOutsideMonitor() {
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard let self, let textView = self.textView, let scrollView = self.scrollView,
+                          event.window === textView.window,
+                          textView.selectedRange().length > 0 else { return }
+                    let hit = event.window?.contentView?.hitTest(event.locationInWindow)
+                    if hit.map({ !$0.isDescendant(of: scrollView) }) ?? true {
+                        textView.setSelectedRange(NSRange(location: textView.selectedRange().location, length: 0))
+                    }
+                }
+                return event
+            }
+        }
 
         // MARK: Content
 

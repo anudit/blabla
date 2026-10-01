@@ -86,8 +86,17 @@ final class EngineHub: ObservableObject {
     private nonisolated let engineQueue = DispatchQueue(label: "supertonic.engine",
                                                         qos: .userInitiated)
 
-    /// Engine speed for a user speed; `generate` and `prefetch` must agree on it.
-    private nonisolated static func engineSpeed(_ speed: Float) -> Float { max(0.7, min(2.0, speed * 1.05)) }
+    /// Overall speed for a user speed (the model's natural pace reads slightly slow).
+    private nonisolated static func targetSpeed(_ speed: Float) -> Float { max(0.7, min(2.1, speed * 1.05)) }
+
+    /// Speed the model itself is asked for; `generate` and `prefetch` must agree on it.
+    /// Capped — see `TimeStretcher` for why the rest is applied after synthesis.
+    private nonisolated static func engineSpeed(_ speed: Float) -> Float {
+        min(targetSpeed(speed), TimeStretcher.maxModelSpeed)
+    }
+
+    /// Owned by `engineQueue`, like the engine.
+    private nonisolated(unsafe) static var stretcher = TimeStretcher(sampleRate: TtsConfig.enhancedSampleRate)
 
     /// Hint that `text` will be synthesized soon, so the ANE cell it needs gets loaded
     /// first. Cheap (a tokenize and a queue insert); call it for look-ahead sentences.
@@ -107,9 +116,13 @@ final class EngineHub: ObservableObject {
                     let wave = try eng.generate(text, voiceName: voice,
                                                 speed: Self.engineSpeed(speed))
                     if wave.isEmpty { cont.resume(returning: []); return }
-                    cont.resume(returning: Resampler.resample(wave,
-                                                              from: Double(eng.sampleRate),
-                                                              to: TtsConfig.enhancedSampleRate))
+                    var out = Resampler.resample(wave, from: Double(eng.sampleRate),
+                                                 to: TtsConfig.enhancedSampleRate)
+                    let rest = Self.targetSpeed(speed) / Self.engineSpeed(speed)
+                    if rest > 1.005, let stretcher = Self.stretcher {
+                        out = stretcher.stretch(out, rate: rest)
+                    }
+                    cont.resume(returning: out)
                 } catch {
                     cont.resume(throwing: error)
                 }

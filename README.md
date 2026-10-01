@@ -1,165 +1,125 @@
-# tts-metal
+<p align="center">
+  <img src="assets/icon.png" width="160" alt="BlaBla icon">
+</p>
 
-A native macOS **text-to-speech suite** that runs the **Supertonic 3** latent flow-matching model entirely on-device using **Metal compute shaders** — no Python, no ONNX Runtime, no Core ML.
+<h1 align="center">BlaBla</h1>
 
-open ./tts-metal/build/Build/Products/Release/Blabla.app
+<p align="center">
+  A private, on-device reader for macOS that reads your books and documents aloud.<br>
+  Powered by the Supertonic 3 text-to-speech model running on Metal and the Neural Engine.
+</p>
 
-Two surfaces, one engine:
+<p align="center">
+  <a href="../../releases/latest">Download</a> · <a href="#build-from-source">Build from source</a> · <a href="LICENSE">MIT License</a>
+</p>
 
-1. **Menu-bar selection reader** — select text anywhere in the system, press **⌥⌘R**, and it speaks the selection.
-2. **BlaBla document reader** — a full private AI reading window (ported from the BlaBla web app): drop a PDF / EPUB / MOBI / DOCX / Markdown / TXT file or paste a URL, and it reads the document aloud with sentence karaoke highlighting, auto-scroll, TOC navigation, auto-resume bookmarks, a floating mini player, and media-key control. Everything stays on-device.
-
-```
-selection / document ──▶ Loaders ──▶ Sentence stream ──▶ Normalizer ──▶ Supertonic 3 (Metal) ──▶ Resampler ──▶ AVAudioEngine
-                        (PDF/EPUB/   (click-to-jump ids)   (numbers,        44.1 kHz audio          (Lanczos)    gapless queue
-                         MOBI/DOCX/                        money, dates,
-                         MD/URL)                           abbreviations)
-```
-
----
+![BlaBla reading a book](assets/screenshot.png)
 
 ## Features
 
-- **Pure Metal Compute**: Executes the full 99.2M parameter Supertonic 3 architecture directly on Apple Silicon GPUs using custom Metal kernels.
-- **Multilingual Support**: Synthesizes speech across 31 languages (including English, Korean, Japanese, Arabic, German, Spanish, French, Hindi, and more).
-- **Zero-Shot Voice Cloning**: Dynamically estimates and applies speaker embeddings from reference voice styles defined in JSON configs.
-- **Expression Tags**: Supports expressive synthesis using prompt tags like `<laugh>`, `<breath>`, and `<sigh>`.
-- **High-Fidelity Output**: Generates native 44.1 kHz full-band audio, which is resampled on-the-fly to 48 kHz for gapless playback using a high-quality Lanczos sinc filter.
+**Document reader**
+- Opens PDF, EPUB, MOBI/AZW, DOCX, Markdown, TXT, web pages (paste a URL) and clipboard text.
+- Word-by-word karaoke highlighting with auto-scroll. Double-click any sentence to start reading from there.
+- Table of contents sidebar, find in book (⌘F), and pinch-to-zoom text.
+- Remembers where you left off in every document.
+- Floating mini player that stays on top of other windows.
+- Now Playing and media-key support.
+- Ask questions about the book you're reading, answered on-device by Apple Intelligence with cited passages.
+- 11 voices, 1×–2× speed, six reading themes.
 
-### BlaBla document reader (ported from the BlaBla web app)
+**Menu-bar reader**
+- Select text in any app and press **⌥⌘R** to hear it.
 
-| Feature | Details |
-|---|---|
-| **Formats** | PDF (PDFKit text layer), EPUB (spine + nav/NCX TOC), MOBI/AZW (PalmDOC LZ77), DOCX, Markdown (frontmatter, code, tables, lists), TXT, URL fetch, clipboard paste |
-| **Reader UI** | Rendered blocks, click any sentence to jump playback, sentence + word karaoke highlighting, auto-scroll tracking, scroll-to-current button, TOC outline sidebar |
-| **Playback** | 3-sentence look-ahead prefetch, sliding-window backpressure, gapless tagged scheduling, punctuation-aware pauses (`. , : ; ! ?`) |
-| **Text frontend** | Abbreviations, money, dates, times, phone numbers, versions, ordinals, dotted acronyms, big-number expansion |
-| **Resume** | Auto-save bookmarks (≤20 history entries, progress bars) keyed by file identity/URL |
-| **System integration** | Now Playing + media keys (play/pause, ±1 sentence) via MPRemoteCommandCenter, floating always-on-top mini player |
-| **Settings** | Voice (M1–M5/F1–F5/david-deep), speed 1×–2×, volume, font size 0.8–1.6, 6 reader themes, test voice, reset document |
+**Private by design**
+- Speech synthesis, document parsing and search all run locally. Nothing is uploaded.
 
----
+## Install
 
-## Stack
+1. Download `BlaBla.zip` from the [latest release](../../releases/latest) and unzip it.
+2. Move `Blabla.app` to `/Applications`.
+3. The app is not notarized, so the first launch is blocked by Gatekeeper. Either right-click the app and choose **Open**, or run:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/Blabla.app
+   ```
+4. For the menu-bar reader, grant Accessibility access when asked (needed to read the selected text).
 
-| Layer | Implementation |
-|---|---|
-| **UI** | SwiftUI `MenuBarExtra` (agent app, running entirely in the macOS menu bar) |
-| **Global hotkey** | Carbon `RegisterEventHotKey` (⌥⌘R) |
-| **Selection capture** | Accessibility API (`AXUIElement`) |
-| **Tokenizer** | Fast, local unicode codepoint index mapping using a `65536`-entry table (`unicode_indexer.json`) |
-| **TTS Engine** | **Supertonic 3** (99.2M parameters) — parsed from ONNX model definitions at startup and executed via custom Metal wrappers (`SupertonicEngine.swift`) |
-| **Compute** | Hand-written Metal compute shaders (`Shaders.metal`) optimized for attention, Rotary Position Embeddings (RoPE), relative-position biases, and causal dilated convolutions |
-| **Audio Playback** | `AVAudioEngine` + `AVAudioPlayerNode` queue with a 5-chunk sliding-window backpressure system for gapless streaming |
-| **Weights** | ONNX weights (`duration_predictor`, `text_encoder`, `vector_estimator`, `vocoder`) and voice style configs bundled directly in app resources |
-
----
-
-## Supertonic 3 TTS pipeline
-
-Supertonic 3 is an iterative flow-matching ODE-based text-to-speech model. Its execution flow consists of the following custom-implemented stages:
-
-1. **Text Preprocessing & Tokenization**: Normalizes incoming unicode text, strips excess whitespace, inserts punctuation, wraps sections with language tags (e.g. `<lang>...</lang>`), and maps characters to indices.
-2. **Duration Predictor**: Runs the `duration_predictor` model using text token IDs, text mask, and a `style_dp` (1x8x16) voice style tensor to determine phoneme-level frame durations.
-3. **Text Encoder**: Runs the `text_encoder` model using text token IDs, text mask, and a `style_ttl` (1x50x256) voice style tensor to produce row-major phoneme embeddings.
-4. **Flow Matching ODE (Vector Estimator)**: 
-   - Generates a Gaussian noise latent tensor matching the length computed by the duration predictor.
-   - Solves the probability flow ODE by running the `vector_estimator` model (64M parameters) iteratively (typically **8 steps** of an Euler ODE solver) to estimate the vector field, transforming the noise into a clean speech latent representation.
-5. **Vocoder**: Runs the `vocoder` model (25M parameters) to synthesize the final 44.1 kHz raw audio waveform.
-
----
+**Requirements:** a Mac with Apple Silicon running macOS 26.5 or later. Ask requires Apple Intelligence.
 
 ## Performance
 
-Benchmarks measured on an **Apple M2 Max** (Release build, 8 ODE steps) for a 92-token
-English test sentence producing **5.5 s** of 44.1 kHz audio.
+Measured on an M2 Max, Release build, speed 1×, 8 flow-matching steps, steady state (median of 6 runs).
 
-### End-to-End Latency
+| Sentence | Audio | Metal only | Metal + Neural Engine | RTF (Metal → ANE) |
+|---|---:|---:|---:|---:|
+| Short (16 chars) | 1.6 s | 368 ms | **58 ms** | 4.4× → **27.6×** |
+| Medium (83 chars) | 5.5 s | 508 ms | **84 ms** | 10.8× → **65.8×** |
+| Long (191 chars) | 12.1 s | 926 ms | **162 ms** | 13.0× → **74.3×** |
 
-| Pipeline | End-to-End Time | Audio Generated | Realtime Factor (RTF) |
-|---|---:|---:|---:|
-| **Supertonic 3 (Metal)** | **~720 ms** | 5.5 s @ 44.1 kHz | **~7.6×** (at 8 steps) |
+Realtime factor (RTF) is seconds of audio generated per second of synthesis: at 66× a 5.5 s sentence is ready in 84 ms.
 
-### Stage Breakdown
+Stage breakdown for the medium sentence with the Neural Engine:
 
-| Stage | Latency | Notes |
+| Stage | Time | Runs on |
 |---|---:|---|
-| **Duration Predictor** | ~18 ms | Lightweight MLP |
-| **Text Encoder** | ~114 ms | ConvNeXt + Relative-Position Attention |
-| **Flow Matching Loop** | **~570 ms** | 8 steps of the 64M parameter vector field, cond+uncond batched |
-| **Vocoder** | ~47 ms | Causal Convolutions & ISTFT head |
+| Flow matching (8 steps) | 38.9 ms | Neural Engine |
+| Vocoder | 26.4 ms | GPU |
+| Text encoder | 12.9 ms | GPU + CPU |
+| Duration predictor | 3.7 ms | GPU + CPU |
 
-> **Realtime Factor (RTF)** = (seconds of audio generated) ÷ (synthesis latency). RTF ~7.6×
-> means 1 second of speech is synthesized in ~130 ms. The flow-matching ODE steps are a
-> speed-to-quality control knob (fewer steps = faster).
+The model is ready about 0.25 s after launch. The flow-matching stage runs on the Neural Engine through Core ML and the rest of the pipeline runs on hand-written Metal compute kernels. On the first launch the Neural Engine programs compile in the background; until they are ready, sentences are synthesized on the GPU (about 0.5 s for a medium sentence), so playback is never blocked.
 
-The flow-matching loop is **entirely on-GPU**: the ConvNeXt backbone, both cross-attentions
-(RoPE→text, tanh→style — projections and softmax included), the time conditioning, and the
-CFG Euler step all run as Metal kernels, and the conditional/unconditional passes are batched
-together (`M = 2·L`) so the small latent length still fills the GPU. The ODE state stays
-resident across all 8 steps — no per-step CPU round-trip. The pointwise matmuls use a
-register-blocked, activation-fused GEMM. Correctness is checked by the `ST_VALIDATE` harness
-(`vfield[0] corr=1.0000`, bit-identical to the reference).
+## How it works
 
----
-
-## Build & run
-
-Open `tts-metal/tts-metal.xcodeproj` in Xcode and build in **Release** mode, or build from the command line:
-
-```bash
-cd tts-metal
-xcodebuild -project tts-metal.xcodeproj -scheme tts-metal -configuration Release build
+```
+document ─▶ loaders ─▶ sentences ─▶ text normalizer ─▶ Supertonic 3 ─▶ time-stretch ─▶ AVAudioEngine
+            PDF/EPUB/              numbers, dates,     text encoder     above 1.2×      gapless queue
+            MOBI/DOCX/             money, acronyms     duration         (pitch kept)
+            MD/URL                                     flow matching
+                                                       vocoder
 ```
 
-The model weights are git-ignored and bundled into the app resources under `supertonic/`:
+- **Text encoder and duration predictor** run on custom Metal kernels and predict how long the sentence should take.
+- **Flow matching** turns noise into a speech latent in 8 Euler steps, with classifier-free guidance, on the Neural Engine (with a Metal fallback).
+- **Vocoder** turns the latent into 44.1 kHz audio on Metal, which is resampled to 48 kHz for playback.
+- **Speed** — the model itself speaks at no more than 1.2× its natural pace, because beyond that it starts dropping words. Faster speeds are applied afterwards with a pitch-preserving time-stretch.
+- **Playback** synthesizes a few sentences ahead of the one being read, with natural pauses at punctuation.
+
+## Build from source
+
+The model weights are not in the repository. Download the Supertonic 3 ONNX files from [Supertone/supertonic-3](https://huggingface.co/Supertone/supertonic-3) on Hugging Face and place them in `tts-metal/tts-metal/supertonic/`:
+
 - `duration_predictor.onnx`
 - `text_encoder.onnx`
 - `vector_estimator.onnx`
 - `vocoder.onnx`
-- `unicode_indexer.json`
-- `voice_styles/` (JSON reference configurations)
 
-### Usage
-1. Open the application.
-2. Grant Accessibility permissions (required to read the system selection).
-3. Select a voice (presets like `M1`..`M5`, `F1`..`F5`, or a cloned voice style like `david-deep`) and speed in the menu-bar popover.
-4. Press **⌥⌘R** on any highlighted text, or type text directly into the "Type to speak" box to synthesize speech.
+Then build the release app:
 
-### Developer Smoke Testing
-
-To run the on-device self-test logic at startup:
 ```bash
-SUPERTONIC_SELFTEST=1 /path/to/tts-metal.app/Contents/MacOS/tts-metal
+./build_scripts/build_release.sh     # produces ./Blabla-Release.app
 ```
 
-To run the stage-by-stage numerical validation against a reference dump:
-```bash
-ST_VALIDATE=1 /path/to/tts-metal.app/Contents/MacOS/tts-metal
-```
+Or open `tts-metal/tts-metal.xcodeproj` in Xcode and run the `tts-metal` scheme.
 
+### Diagnostics
 
-Steady-state A/B, Release build, M2 Max
+The app has a few headless modes, enabled with environment variables on the binary in `Blabla.app/Contents/MacOS/Blabla`:
 
-Both paths warmed identically; 6 generations per process, iterations 2-5 shown as steady state.
+| Variable | What it does |
+|---|---|
+| `SUPERTONIC_BENCH=1` | Latency, realtime factor, energy and memory benchmark |
+| `SUPERTONIC_ANE=0` | Disable the Neural Engine and use Metal only |
+| `SUPERTONIC_SPEEDTEST=1` | Synthesize test sentences at every speed (add `SUPERTONIC_SPEEDTEST_DUMP=<dir>` to save them) |
+| `SUPERTONIC_SELFTEST=1` | Synthesize one sentence and write `/tmp/supertonic_selftest.wav` |
+| `SUPERTONIC_SEED=<n>` | Make synthesis deterministic |
 
-┌─────────┬─────────┬────────────────────────┬──────────────────────┬──────────────┐
-│  text   │  audio  │   flow: Metal → ANE    │      end-to-end      │     RTF      │
-├─────────┼─────────┼────────────────────────┼──────────────────────┼──────────────┤
-│ 54 tok  │ 3.27 s  │ 429 → 29.8 ms (14.4×)  │ 499 → 99 ms (5.0×)   │ 6.6 → 33.1×  │
-├─────────┼─────────┼────────────────────────┼──────────────────────┼──────────────┤
-│ 92 tok  │ 5.50 s  │ 519 → 38.0 ms (13.7×)  │ 601 → 120 ms (5.0×)  │ 9.2 → 45.9×  │
-├─────────┼─────────┼────────────────────────┼──────────────────────┼──────────────┤
-│ 231 tok │ 13.65 s │ 1043 → 122.4 ms (8.5×) │ 1180 → 258 ms (4.6×) │ 11.6 → 52.0× │
-└─────────┴─────────┴────────────────────────┴──────────────────────┴──────────────┘
+## License
 
-Flow matching went from 87% of runtime to 30%. The bottleneck has moved — at 92 tokens, 82 of the remaining 120 ms is text encoder + duration predictor + vocoder, all still hand-written fp32 Metal.
+The source code is released under the [MIT License](LICENSE).
 
-
----
+The Supertonic 3 model weights are made by [Supertone](https://huggingface.co/Supertone/supertonic-3) and are distributed under their own license; see the model card for its terms. The release build bundles these weights.
 
 ## Credits
 
-- **Supertonic 3** — Supertone (Supertone/supertonic-3 on Hugging Face).
-- **tts-metal** is a custom, lightweight, dependency-free Metal adaptation of the Supertonic 3 model architecture.
-- https://maderix.github.io/articles/
+- [Supertonic 3](https://huggingface.co/Supertone/supertonic-3) by Supertone.
+- [maderix's articles](https://maderix.github.io/articles/) on running models on the Apple Neural Engine.

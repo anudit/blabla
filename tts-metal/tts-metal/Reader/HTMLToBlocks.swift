@@ -29,9 +29,15 @@ final class HTMLToBlocks {
     /// Page URL for web documents, used to absolutize relative image srcs.
     private let baseURL: URL?
 
-    init(baseDir: String = "", baseURL: URL? = nil) {
+    /// The book's stylesheets (EPUB). Any `<style>` blocks in the parsed
+    /// document are added to it per parse.
+    private let baseStyles: CSSStyleSheet
+    private var styles = CSSStyleSheet.empty
+
+    init(baseDir: String = "", baseURL: URL? = nil, styles: CSSStyleSheet = .empty) {
         self.baseDir = baseDir
         self.baseURL = baseURL
+        self.baseStyles = styles
     }
 
     private var blocks: [DocBlock] = []
@@ -50,12 +56,19 @@ final class HTMLToBlocks {
     private var cellIsOpen = false
     private var codeText: String?
     private var pendingHr = false
-    /// Nesting depth of inline elements (span/a/sup) — see `capture`.
-    private var inlineDepth = 0
+    /// Open inline elements (span/a/sup/i/…), innermost last. `styled` means
+    /// an open style marker was written for it and a close one is owed.
+    private var inlineStack: [(name: String, styled: Bool, link: Bool)] = []
     /// Text of an inline element being held back: footnote markers are
     /// discarded outright (`drop`), <sup> is kept only if it doesn't look
-    /// like a reference marker.
-    private var capture: (depth: Int, text: String, drop: Bool)?
+    /// like a reference marker. `linked` records a hyperlink around or
+    /// inside it — the strongest sign a superscript number is a note ref.
+    private var capture: (depth: Int, text: String, drop: Bool, linked: Bool)?
+    /// Open block containers (div/section/blockquote/…) and the alignment
+    /// each one set, so `text-align` inherits the way it does in CSS.
+    private var containerStack: [(name: String, align: CSSStyleSheet.Align?)] = []
+    /// Alignment of the paragraph being accumulated.
+    private var paragraphAlign: CSSStyleSheet.Align?
     private static let voidTags: Set<String> = ["br", "hr", "img", "meta", "link", "input", "col", "area", "base", "embed", "source", "track", "wbr"]
 
     struct Result {
@@ -72,6 +85,14 @@ final class HTMLToBlocks {
     func parse(_ html: String) -> Result {
         reset()
         let src = html.replacingOccurrences(of: "\u{feff}", with: "")
+        styles = baseStyles
+        if src.range(of: "<style", options: .caseInsensitive) != nil,
+           let re = RegexCache.regex(#"<style[^>]*>([\s\S]*?)</style>"#, options: .caseInsensitive) {
+            let ns = src as NSString
+            for m in re.matches(in: src, range: NSRange(location: 0, length: ns.length)) {
+                styles.add(css: ns.substring(with: m.range(at: 1)))
+            }
+        }
         var i = src.startIndex
         while i < src.endIndex {
             let c = src[i]
@@ -93,7 +114,8 @@ final class HTMLToBlocks {
         skipDepth = 0; svgDepth = 0; quoteText = nil; listItemTag = nil
         tableRows = []; currentRow = []; currentCell = ""; cellIsOpen = false
         codeText = nil; firstHeading = nil
-        inlineDepth = 0; capture = nil
+        inlineStack = []; capture = nil
+        containerStack = []; paragraphAlign = nil
     }
 
     private func append(_ c: Character) {
@@ -179,9 +201,130 @@ final class HTMLToBlocks {
     /// reference marker; anything longer (units, "E=mc2" style exponents,
     /// "1st") is real content and gets kept.
     private static func looksLikeRefMarker(_ s: String) -> Bool {
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        let t = stripMarkers(s).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty, t.count <= 8 else { return false }
         return t.range(of: #"^[\d\s.,;\[\]()*†‡§¶–-]+$"#, options: .regularExpression) != nil
+    }
+
+    /// Whether a held-back <sup> is a note reference rather than content.
+    /// Marker-shaped text alone isn't enough: in a maths book `2<sup>5</sup>`
+    /// and `x<sup>2</sup>` are exponents, and dropping them turned "2⁵ (= 32)"
+    /// into "2 (= 32)". A reference is linked to its note, or sits after
+    /// punctuation/space ("…between people.⁷⁵"); an exponent follows the
+    /// letter, digit or bracket it raises.
+    private func isNoteReference(_ c: (depth: Int, text: String, drop: Bool, linked: Bool)) -> Bool {
+        guard Self.looksLikeRefMarker(c.text) else { return false }
+        if c.linked { return true }
+        guard let prev = text.unicodeScalars.last(where: { !Self.isMarker($0) }) else { return true }
+        return CharacterSet.whitespacesAndNewlines.contains(prev)
+            || ".,;:!?\"'\u{201D}\u{2019}\u{2014}".unicodeScalars.contains(prev)
+    }
+
+    // MARK: - Inline style markers
+    //
+    // Styled inline elements write a private-use scalar into the text stream
+    // where they open and close. The markers travel through the existing
+    // accumulate → capture → clean pipeline untouched, and `cleanStyled`
+    // turns them into `StyleRun` ranges while it collapses whitespace — so
+    // offsets are computed against the final display text, not the raw HTML.
+    // Plane-15 private use, which no book text uses.
+
+    private static let markerBase: UInt32 = 0xF0000
+    private static let closeMarker = Character(Unicode.Scalar(0xF00FF as UInt32)!)
+
+    private static func openMarker(_ style: InlineStyle) -> Character {
+        Character(Unicode.Scalar(markerBase + UInt32(style.rawValue))!)
+    }
+
+    private static func isMarker(_ s: Unicode.Scalar) -> Bool {
+        s.value >= markerBase && s.value <= 0xF00FF
+    }
+
+    private static func stripMarkers(_ s: String) -> String {
+        guard s.unicodeScalars.contains(where: isMarker) else { return s }
+        var v = String.UnicodeScalarView()
+        v.append(contentsOf: s.unicodeScalars.filter { !isMarker($0) })
+        return String(v)
+    }
+
+    /// Inline style an element asks for: what the tag means by default,
+    /// overridden by the stylesheet, overridden by its own `style=`.
+    private func inlineStyle(tag: String, body: String) -> InlineStyle {
+        var d = CSSStyleSheet.Declarations()
+        switch tag {
+        case "i", "em", "cite", "var", "dfn": d.italic = true
+        case "b", "strong": d.bold = true
+        case "sup": d.vertical = 1
+        case "sub": d.vertical = -1
+        default: break
+        }
+        d.merge(cssDeclarations(tag: tag, body: body))
+        var s: InlineStyle = []
+        if let i = d.italic { s.insert(i ? .italic : .upright) }
+        if d.bold == true { s.insert(.bold) }
+        if d.vertical == 1 { s.insert(.superscript) }
+        if d.vertical == -1 { s.insert(.subscript) }
+        return s
+    }
+
+    private func cssDeclarations(tag: String, body: String) -> CSSStyleSheet.Declarations {
+        let classes = body.contains("class=")
+            ? attribute(named: "class", in: body).lowercased().split(separator: " ").map(String.init)
+            : []
+        var d = styles.isEmpty ? CSSStyleSheet.Declarations()
+                               : styles.declarations(tag: tag, classes: classes)
+        if body.contains("style=") {
+            d.merge(CSSStyleSheet.parseDeclarations(attribute(named: "style", in: body)))
+        }
+        if body.contains("align=") {
+            switch attribute(named: "align", in: body).lowercased() {
+            case "center": d.align = .center
+            case "right": d.align = .right
+            case "left": d.align = .left
+            case "justify": d.align = .justify
+            default: break
+            }
+        }
+        return d
+    }
+
+    /// Nearest alignment set by an enclosing container.
+    private var inheritedAlign: CSSStyleSheet.Align? {
+        containerStack.last(where: { $0.align != nil })?.align
+    }
+
+    private func openInline(_ name: String, body: String) {
+        let link = name == "a" && body.contains("href=")
+        inlineStack.append((name, false, link))
+        if capture == nil, skipDepth == 0, svgDepth == 0 {
+            let cls = body.contains("class=") ? attribute(named: "class", in: body) : ""
+            if Self.isFootnoteRefClass(cls) || attribute(named: "epub:type", in: body) == "noteref" {
+                capture = (inlineStack.count, "", true, link)
+            } else if name == "sup" {
+                capture = (inlineStack.count, "", false, inlineStack.contains { $0.link })
+            }
+        } else if link, capture != nil {
+            capture!.linked = true
+        }
+        let style = inlineStyle(tag: name, body: body)
+        if !style.isEmpty {
+            append(Self.openMarker(style))
+            inlineStack[inlineStack.count - 1].styled = true
+        }
+    }
+
+    private func closeInline(_ name: String) {
+        guard let idx = inlineStack.lastIndex(where: { $0.name == name }) else { return }
+        // Pops any unclosed children too, so a stray tag can't strand a
+        // style or a capture.
+        while inlineStack.count > idx {
+            let e = inlineStack.removeLast()
+            if e.styled { append(Self.closeMarker) }
+            if let c = capture, c.depth == inlineStack.count + 1 {
+                capture = nil
+                if !c.drop, !isNoteReference(c) { text += c.text }
+            }
+        }
     }
 
     // MARK: - Tag handling
@@ -220,6 +363,7 @@ final class HTMLToBlocks {
                 closeParagraph()
                 paragraphOpen = true
                 paragraphKind = classKind(in: body) ?? .paragraph
+                paragraphAlign = cssDeclarations(tag: "p", body: body).align ?? inheritedAlign
                 if paragraphKind == .rule {
                     paragraphOpen = false
                     appendBlock(.rule)
@@ -243,7 +387,15 @@ final class HTMLToBlocks {
             closeParagraph()
             appendBlock(.rule)
 
+        case "center":
+            if closing { popContainer("center") }
+            else { closeParagraph(); containerStack.append(("center", .center)) }
+
         case "blockquote":
+            if closing { popContainer("blockquote") }
+            else if !selfClosing {
+                containerStack.append(("blockquote", cssDeclarations(tag: name, body: body).align))
+            }
             if closing {
                 if let q = quoteText {
                     let t = clean(q)
@@ -269,14 +421,16 @@ final class HTMLToBlocks {
 
         case "li":
             if closing {
-                let t = clean(text)
+                let t = cleanStyled(text)
                 text = ""
                 paragraphOpen = false
-                if !t.isEmpty { appendBlock(.listItem(t.hasPunctuationTerminal ? t : t + ".")) }
+                if !t.text.isEmpty { emit(t, as: .listItem) }
+                paragraphAlign = nil
             } else {
                 closeParagraph()
                 paragraphOpen = true
                 paragraphKind = .listItem
+                paragraphAlign = cssDeclarations(tag: "li", body: body).align ?? inheritedAlign
             }
 
         case "table":
@@ -304,31 +458,24 @@ final class HTMLToBlocks {
             guard !closing, skipDepth == 0 else { break }
             emitImage(from: body)
 
-        case "span", "a", "sup":
-            // Inline elements. Tracked by depth so a footnote marker's text
-            // can be withheld until its own closing tag — see `capture`.
+        case "span", "a", "sup", "sub", "i", "em", "b", "strong", "cite", "var", "dfn",
+             "small", "abbr", "u", "font":
+            // Inline elements. Tracked as a stack so a footnote marker's text
+            // can be withheld until its own closing tag (see `capture`), and
+            // so styled ones (<i>, <sub>, a CSS-italic span) can mark where
+            // their style starts and ends in the text.
             if selfClosing { break }
-            if closing {
-                if let c = capture, c.depth == inlineDepth {
-                    if !c.drop, !Self.looksLikeRefMarker(c.text) { text += c.text }
-                    capture = nil
-                }
-                inlineDepth = max(0, inlineDepth - 1)
-            } else {
-                inlineDepth += 1
-                if capture == nil, skipDepth == 0, svgDepth == 0 {
-                    let cls = body.contains("class=") ? attribute(named: "class", in: body) : ""
-                    if Self.isFootnoteRefClass(cls) || attribute(named: "epub:type", in: body) == "noteref" {
-                        capture = (inlineDepth, "", true)
-                    } else if name == "sup" {
-                        capture = (inlineDepth, "", false)
-                    }
-                }
-            }
+            if closing { closeInline(name) } else { openInline(name, body: body) }
 
         case "div", "section", "article", "header", "footer", "main", "nav", "aside",
              "ul", "ol", "dl", "dt", "dd", "figure", "figcaption", "body", "html":
             if ["ul", "ol"].contains(name) && !closing { closeParagraph() }
+            if ["div", "section", "article", "figure", "figcaption", "aside", "body"].contains(name) {
+                if closing { popContainer(name) }
+                else if !selfClosing {
+                    containerStack.append((name, cssDeclarations(tag: name, body: body).align))
+                }
+            }
             if ["div", "section", "article", "figure", "figcaption"].contains(name) {
                 if closing {
                     closeParagraph()
@@ -344,6 +491,7 @@ final class HTMLToBlocks {
                     closeParagraph()
                     paragraphOpen = true
                     paragraphKind = name == "figcaption" ? .caption : (classKind(in: body) ?? .paragraph)
+                    paragraphAlign = inheritedAlign
                 }
             }
 
@@ -364,9 +512,9 @@ final class HTMLToBlocks {
     /// Flushes any text accumulated before the image so the picture keeps its
     /// position in the flow, then appends the image itself.
     private func emitImage(from tagBody: String) {
-        let pending = clean(text)
+        let pending = cleanStyled(text)
         text = ""
-        if !pending.isEmpty { emit(pending, as: paragraphKind) }
+        if !pending.text.isEmpty { emit(pending, as: paragraphKind) }
 
         var src = attribute(named: "src", in: tagBody)
         if src.isEmpty { src = attribute(named: "xlink:href", in: tagBody) }
@@ -393,20 +541,27 @@ final class HTMLToBlocks {
         // An unbalanced inline tag inside the paragraph must not leak its
         // capture into the next one.
         if let c = capture {
-            if !c.drop, !Self.looksLikeRefMarker(c.text) { text += c.text }
             capture = nil
+            if !c.drop, !isNoteReference(c) { text += c.text }
         }
-        inlineDepth = 0
+        inlineStack = []
         guard paragraphOpen else { text = ""; return }
         paragraphOpen = false
-        let t = clean(text)
+        let t = cleanStyled(text)
         text = ""
-        guard !t.isEmpty else { return }
+        guard !t.text.isEmpty else { return }
         emit(t, as: paragraphKind)
         paragraphKind = .paragraph
+        paragraphAlign = nil
     }
 
-    private func emit(_ t: String, as kind: ParaKind) {
+    private func popContainer(_ name: String) {
+        guard let idx = containerStack.lastIndex(where: { $0.name == name }) else { return }
+        containerStack.removeSubrange(idx...)
+    }
+
+    private func emit(_ styled: (text: String, runs: [StyleRun]), as kind: ParaKind) {
+        let t = styled.text
         switch kind {
         case .paragraph:
             appendBlock(.paragraph(t))
@@ -421,16 +576,23 @@ final class HTMLToBlocks {
         case .caption:
             appendBlock(.caption(t))
         case .rule:
-            appendBlock(.rule)
+            appendBlock(.rule); return
+        }
+        blocks[blocks.count - 1].runs = styled.runs
+        switch paragraphAlign {
+        case .center: blocks[blocks.count - 1].alignment = .center
+        case .right:  blocks[blocks.count - 1].alignment = .right
+        case .left:   blocks[blocks.count - 1].alignment = .left
+        case .justify, nil: break
         }
     }
 
     private func emitParagraphAsHeading(level: Int) {
         paragraphOpen = false
-        let t = clean(text)
+        let t = cleanStyled(text)
         text = ""
         paragraphKind = .paragraph
-        guard !t.isEmpty else { return }
+        guard !t.text.isEmpty else { return }
         emit(t, as: .heading(level))
     }
 
@@ -475,8 +637,90 @@ final class HTMLToBlocks {
     }
 
     private func clean(_ s: String) -> String {
-        RegexCache.replace(Self.decodeEntities(s), pattern: "\\s+", with: " ")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+        cleanStyled(s).text
+    }
+
+    /// Decodes entities, collapses whitespace runs to one space and trims —
+    /// and, in the same pass, turns the inline style markers into ranges
+    /// over the cleaned string. A space between two differently styled
+    /// stretches belongs to the one before it, so `x<sub>2 </sub>and` keeps
+    /// the gap out of the subscript.
+    private func cleanStyled(_ s: String) -> (text: String, runs: [StyleRun]) {
+        let decoded = Self.decodeEntities(s)
+        var out = String.UnicodeScalarView()
+        var length = 0                       // UTF-16 length of `out`
+        var lastWasSpace = true              // suppresses leading space
+        var pendingSpace = false
+        var stack: [InlineStyle] = []
+        var current: InlineStyle = []
+        var runStart = 0
+        var runs: [StyleRun] = []
+
+        func effective() -> InlineStyle {
+            var e: InlineStyle = []
+            for st in stack {
+                if st.contains(.italic) { e.insert(.italic); e.remove(.upright) }
+                if st.contains(.upright) { e.remove(.italic); e.insert(.upright) }
+                if st.contains(.bold) { e.insert(.bold) }
+                if st.contains(.superscript) { e.insert(.superscript); e.remove(.subscript) }
+                if st.contains(.subscript) { e.insert(.subscript); e.remove(.superscript) }
+            }
+            return e
+        }
+        func flushSpace() {
+            if pendingSpace, !lastWasSpace { out.append(" "); length += 1; lastWasSpace = true }
+            pendingSpace = false
+        }
+        func styleChanged() {
+            let next = effective()
+            guard next != current else { return }
+            flushSpace()
+            // A space at the end of the run ("<sub>2 </sub>") stays unstyled,
+            // so the gap after a subscript is a full-size space.
+            let end = lastWasSpace ? length - 1 : length
+            if !current.isEmpty, end > runStart {
+                runs.append(StyleRun(range: NSRange(location: runStart, length: end - runStart), style: current))
+            }
+            current = next
+            runStart = length
+        }
+
+        for sc in decoded.unicodeScalars {
+            if Self.isMarker(sc) {
+                if sc.value == 0xF00FF { if !stack.isEmpty { stack.removeLast() } }
+                else { stack.append(InlineStyle(rawValue: UInt8(sc.value - Self.markerBase))) }
+                styleChanged()
+            } else if CharacterSet.whitespacesAndNewlines.contains(sc) {
+                pendingSpace = true
+            } else {
+                flushSpace()
+                out.append(sc)
+                length += sc.utf16.count
+                lastWasSpace = false
+            }
+        }
+        if !current.isEmpty, length > runStart {
+            runs.append(StyleRun(range: NSRange(location: runStart, length: length - runStart), style: current))
+        }
+        if lastWasSpace, length > 0 {          // a space flushed at a style change, then nothing
+            out.removeLast(); length -= 1
+        }
+        // Clip to the trimmed length and merge touching runs of one style
+        // ("<i>x</i><i>2</i>").
+        var merged: [StyleRun] = []
+        for r in runs {
+            let upper = min(r.range.upperBound, length)
+            guard upper > r.range.location else { continue }
+            let clipped = NSRange(location: r.range.location, length: upper - r.range.location)
+            if let last = merged.last, last.style == r.style, last.range.upperBound == clipped.location {
+                merged[merged.count - 1] = StyleRun(
+                    range: NSRange(location: last.range.location, length: clipped.upperBound - last.range.location),
+                    style: r.style)
+            } else {
+                merged.append(StyleRun(range: clipped, style: r.style))
+            }
+        }
+        return (String(out), merged)
     }
 
     private static let namedEntities: [String: String] = [

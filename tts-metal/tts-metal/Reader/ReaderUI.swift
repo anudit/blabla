@@ -108,20 +108,40 @@ struct LandingView: View {
 
     private var theme: ReaderTheme { reader.theme }
 
+    @ObservedObject private var covers = CoverStore.shared
+    @State private var filter: LibraryFilter = .all
+
     var body: some View {
         ScrollView {
-            VStack(spacing: 26) {
-                card
-                if showTextarea { textarea }
-                historySection
+            if bookmarks.entries.isEmpty {
+                // First run: nothing to show yet, so the drop card is the page.
+                VStack(spacing: 26) {
+                    card
+                    if showTextarea { textarea }
+                }
+                .padding(.horizontal, 28)
+                .padding(.top, 46)
+                .padding(.bottom, 110)
+                .frame(maxWidth: 680)
+                .frame(maxWidth: .infinity)
+            } else {
+                VStack(alignment: .leading, spacing: 22) {
+                    libraryHeader
+                    if showTextarea { textarea.frame(maxWidth: 680) }
+                    libraryGrid
+                }
+                // A centred column, like the reading view: on a wide window
+                // the shelf stays a comfortable width with margin either side
+                // instead of stretching to the window edges.
+                .frame(maxWidth: 1080)
+                .padding(.horizontal, 56)
+                .padding(.top, 30)
+                .padding(.bottom, 110)
+                .frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 46)
-            .padding(.bottom, 110)
-            .frame(maxWidth: 680)
-            .frame(maxWidth: .infinity)
         }
         .background(Color(hex: theme.bg))
+        .overlay { if isDragging && !bookmarks.entries.isEmpty { dropOverlay } }
         .onAppear(perform: registerPasteHandler)
         .onDrop(of: [UTType.fileURL], isTargeted: $isDragging) { providers in
             handleDrop(providers)
@@ -255,111 +275,137 @@ struct LandingView: View {
         }
     }
 
-    private var historySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .font(.system(size: 12))
-                Text("CONTINUE READING")
-                    .font(.system(size: 12, weight: .bold))
-                    .kerning(0.8)
-            }
-            .foregroundStyle(Color(hex: theme.textMuted))
+    // MARK: Library
 
-            ForEach(bookmarks.entries) { entry in
-                historyCard(entry)
-            }
+    private var visibleEntries: [BookmarkEntry] {
+        bookmarks.entries.filter { filter.includes($0.fileType) }
+    }
 
-            if bookmarks.entries.contains(where: { $0.url == nil }) {
-                Text("Drop the same file again to resume from where you left off")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color(hex: theme.textMuted))
-                    .frame(maxWidth: .infinity)
+    private var libraryHeader: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                Text("Library")
+                    .font(.system(size: 32, weight: .bold, design: .serif))
+                    .foregroundStyle(Color(hex: theme.headerColor))
+                Spacer(minLength: 20)
+                urlField
+                headerButton("Paste", systemImage: "doc.on.clipboard", action: handleClipboard)
+                    .help("Read text or a link from the clipboard (⌘V)")
+                headerButton("Add", systemImage: "plus", prominent: true, action: pickFile)
+                    .help("Open a PDF, EPUB, MOBI, DOCX, Markdown or text file")
+            }
+            // Only the kinds actually present get a filter.
+            let kinds = LibraryFilter.allCases.filter { f in
+                f == .all || bookmarks.entries.contains { f.includes($0.fileType) }
+            }
+            if kinds.count > 2 {
+                HStack(spacing: 6) {
+                    ForEach(kinds, id: \.self) { f in
+                        Button { filter = f } label: {
+                            Text(f.title)
+                                .font(.system(size: 13, weight: filter == f ? .semibold : .regular))
+                                .foregroundStyle(Color(hex: filter == f ? theme.bg : theme.text))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(filter == f
+                                    ? Color(hex: theme.text)
+                                    : Color(hex: theme.inputBg)))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
         }
     }
 
-    private func historyCard(_ entry: BookmarkEntry) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: iconFor(entry))
+    private var urlField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "globe")
+                .font(.system(size: 12))
                 .foregroundStyle(Color(hex: theme.textMuted))
-                .frame(width: 22)
-                .padding(.top, 3)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(entry.fileName)
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(Color(hex: theme.text))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Spacer()
-                    Text(entry.relativeTimeString())
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color(hex: theme.textMuted))
+            TextField("Open a URL…", text: $urlString)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundStyle(Color(hex: theme.text))
+                .onSubmit {
+                    let s = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !s.isEmpty else { return }
+                    reader.loadURL(s)
                 }
-                Text("\"\(entry.preview)\"")
-                    .font(.system(size: 13).italic())
-                    .foregroundStyle(Color(hex: theme.textMuted))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                HStack(spacing: 8) {
-                    ProgressView(value: entry.progress)
-                        .progressViewStyle(.linear)
-                        .tint(Color(hex: "#d4a017"))
-                    Text("\(Int(entry.progress * 100))%")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color(hex: theme.textMuted))
-                    Text(entry.fileType.uppercased())
-                        .font(.system(size: 11, weight: .bold))
-                        .kerning(0.5)
-                        .foregroundStyle(Color(hex: theme.textMuted))
-                }
-            }
-
-            Button {
-                bookmarks.remove(id: entry.id)
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color(hex: theme.textMuted))
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 3)
         }
-        .padding(16)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(width: 220)
         .background(
-            RoundedRectangle(cornerRadius: 14)
-                .fill(Color(hex: theme.dropBg))
-                .overlay(RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(Color(hex: theme.dropBorder).opacity(0.6)))
+            Capsule().fill(Color(hex: theme.inputBg))
+                .overlay(Capsule().strokeBorder(Color(hex: theme.inputBorder).opacity(0.7)))
         )
-        .contentShape(RoundedRectangle(cornerRadius: 14))
-        .onTapGesture {
-            PerfLog.log("resume tapped: \(entry.fileName)")
-            // Auto-reopen: prefer the saved file path (resume at saved line), else URL.
-            if let fp = entry.filePath, FileManager.default.fileExists(atPath: fp) {
-                reader.loadFileURL(URL(fileURLWithPath: fp))
-            } else if let u = entry.url {
-                reader.loadURL(u)
+    }
+
+    private func headerButton(_ title: String, systemImage: String, prominent: Bool = false,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Color(hex: prominent ? theme.bg : theme.text))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule().fill(Color(hex: prominent ? theme.text : theme.inputBg))
+                        .overlay(Capsule().strokeBorder(Color(hex: theme.inputBorder)
+                            .opacity(prominent ? 0 : 0.7)))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var libraryGrid: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 34, alignment: .bottom)],
+                  alignment: .leading, spacing: 34) {
+            ForEach(visibleEntries) { entry in
+                LibraryBookCell(entry: entry, theme: theme,
+                                cover: covers.covers[entry.id] ?? nil,
+                                available: isAvailable(entry),
+                                open: { open(entry) },
+                                remove: { bookmarks.remove(id: entry.id) })
+                    .onAppear { covers.request(entry) }
             }
+        }
+    }
+
+    private var dropOverlay: some View {
+        RoundedRectangle(cornerRadius: 18)
+            .strokeBorder(Color(hex: theme.accent), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
+            .background(RoundedRectangle(cornerRadius: 18).fill(Color(hex: theme.bg).opacity(0.75)))
+            .overlay(
+                VStack(spacing: 10) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 28, weight: .medium))
+                    Text("Drop to start reading")
+                        .font(.system(size: 19, weight: .semibold))
+                }
+                .foregroundStyle(Color(hex: theme.text))
+            )
+            .padding(16)
+            .allowsHitTesting(false)
+    }
+
+    private func isAvailable(_ entry: BookmarkEntry) -> Bool {
+        if let fp = entry.filePath { return FileManager.default.fileExists(atPath: fp) }
+        return entry.url != nil
+    }
+
+    private func open(_ entry: BookmarkEntry) {
+        PerfLog.log("resume tapped: \(entry.fileName)")
+        // Auto-reopen: prefer the saved file path (resume at saved line), else URL.
+        if let fp = entry.filePath, FileManager.default.fileExists(atPath: fp) {
+            reader.loadFileURL(URL(fileURLWithPath: fp))
+        } else if let u = entry.url {
+            reader.loadURL(u)
         }
     }
 
     // MARK: - Actions
-
-    private func iconFor(_ e: BookmarkEntry) -> String {
-        switch e.fileType {
-        case "pdf": return "book.pages"
-        case "epub": return "book"
-        case "mobi": return "text.book.closed"
-        case "docx": return "doc.text"
-        case "url": return "link"
-        case "ocr": return "eye"
-        default: return "doc.plaintext"
-        }
-    }
 
     private func pickFile() {
         let panel = NSOpenPanel()
@@ -418,6 +464,262 @@ struct LandingView: View {
             Task { @MainActor in reader.loadFileURL(url) }
         }
         return true
+    }
+}
+
+// MARK: - Library grid
+
+enum LibraryFilter: CaseIterable, Hashable {
+    case all, books, pdfs, articles
+
+    var title: String {
+        switch self {
+        case .all: return "All"
+        case .books: return "Books"
+        case .pdfs: return "PDFs"
+        case .articles: return "Articles & Text"
+        }
+    }
+
+    func includes(_ fileType: String) -> Bool {
+        switch self {
+        case .all: return true
+        case .books: return ["epub", "mobi", "docx"].contains(fileType)
+        case .pdfs: return fileType == "pdf"
+        case .articles: return ["url", "text", "ocr"].contains(fileType)
+        }
+    }
+}
+
+/// One book in the library: its cover standing on a shared baseline (covers
+/// keep their own proportions, as on a shelf), and beneath it the reading
+/// progress and a "…" menu — the Apple Books arrangement.
+private struct LibraryBookCell: View {
+    let entry: BookmarkEntry
+    let theme: ReaderTheme
+    let cover: NSImage?
+    let available: Bool
+    let open: () -> Void
+    let remove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Color.clear
+                .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                .overlay(alignment: .bottom) { coverView }
+                .contentShape(Rectangle())
+                .onTapGesture(perform: open)
+                .onHover { hovering = $0 }
+                .help(entry.fileName)
+
+            HStack(spacing: 6) {
+                progressLabel
+                Spacer(minLength: 4)
+                Menu {
+                    Button("Open", action: open).disabled(!available)
+                    if let fp = entry.filePath, available {
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: fp)])
+                        }
+                    }
+                    Divider()
+                    Button("Remove from Library", role: .destructive, action: remove)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color(hex: theme.textMuted))
+                        .frame(width: 22, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+        }
+    }
+
+    private var coverView: some View {
+        Group {
+            if let cover {
+                Image(nsImage: cover)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                GeneratedCover(title: entry.fileName, kind: entry.fileType)
+                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
+            }
+        }
+        .overlay { BookSurface() }
+        .clipShape(Self.coverShape)
+        .overlay(Self.coverShape.strokeBorder(Color.black.opacity(theme.isDark ? 0.4 : 0.14), lineWidth: 0.5))
+        // Contact shadow (where the book meets the shelf) under a wider,
+        // softer one; hovering lifts the book and spreads the shadow.
+        .shadow(color: .black.opacity(theme.isDark ? 0.6 : 0.28), radius: hovering ? 2.5 : 1.5,
+                x: 0, y: hovering ? 2 : 1)
+        .shadow(color: .black.opacity(theme.isDark ? 0.5 : 0.2), radius: hovering ? 18 : 10,
+                x: hovering ? 4 : 3, y: hovering ? 14 : 8)
+        .scaleEffect(hovering ? 1.03 : 1, anchor: .bottom)
+        .offset(y: hovering ? -3 : 0)
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: hovering)
+        // Dimmed rather than faded, so the shadow doesn't show through.
+        .saturation(available ? 1 : 0.4)
+        .brightness(available ? 0 : (theme.isDark ? -0.1 : 0.1))
+    }
+
+    /// Tighter at the spine than at the fore-edge, like a bound board.
+    private static let coverShape = UnevenRoundedRectangle(
+        topLeadingRadius: 1.5, bottomLeadingRadius: 1.5,
+        bottomTrailingRadius: 4, topTrailingRadius: 4, style: .continuous)
+
+    @ViewBuilder
+    private var progressLabel: some View {
+        if !available {
+            Text("Unavailable")
+                .font(.system(size: 11))
+                .foregroundStyle(Color(hex: theme.textMuted))
+        } else if entry.sentenceIndex == 0 {
+            Text("NEW")
+                .font(.system(size: 10, weight: .bold))
+                .kerning(0.4)
+                .foregroundStyle(Color(hex: theme.accent))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color(hex: theme.accent).opacity(0.16)))
+        } else if entry.progress >= 0.995 {
+            Text("Finished")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Color(hex: theme.textMuted))
+        } else {
+            Text("\(max(1, Int(entry.progress * 100)))%")
+                .font(.system(size: 11, weight: .medium).monospacedDigit())
+                .foregroundStyle(Color(hex: theme.textMuted))
+        }
+    }
+}
+
+/// Light and shade laid over a cover so it reads as a bound book rather
+/// than a flat picture: the rounded spine, the hinge groove where the board
+/// folds, a soft sheen across the face, and catch-lights on the top and
+/// fore-edge.
+private struct BookSurface: View {
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let hinge = w * 0.055
+            ZStack(alignment: .leading) {
+                // Spine curvature: darkest at the very edge.
+                LinearGradient(stops: [
+                    .init(color: .black.opacity(0.42), location: 0),
+                    .init(color: .black.opacity(0.10), location: 0.45),
+                    .init(color: .white.opacity(0.08), location: 0.8),
+                    .init(color: .clear, location: 1),
+                ], startPoint: .leading, endPoint: .trailing)
+                .frame(width: hinge)
+
+                // Hinge: a pressed groove, a dark crease with a lit lip
+                // beside it, feathered so it sits *in* the cover.
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black.opacity(0.32)],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 2.5)
+                    Rectangle().fill(.black.opacity(0.38)).frame(width: 1)
+                    LinearGradient(colors: [.white.opacity(0.22), .clear],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 3.5)
+                }
+                .blur(radius: 0.4)
+                .offset(x: hinge)
+
+                // Sheen across the face, falling off toward the foot.
+                LinearGradient(stops: [
+                    .init(color: .white.opacity(0.14), location: 0),
+                    .init(color: .white.opacity(0.03), location: 0.35),
+                    .init(color: .clear, location: 0.6),
+                    .init(color: .black.opacity(0.10), location: 1),
+                ], startPoint: .topLeading, endPoint: .bottomTrailing)
+                .blendMode(.softLight)
+
+                // Catch-lights: top edge and fore-edge.
+                VStack(spacing: 0) {
+                    Rectangle().fill(.white.opacity(0.18)).frame(height: 0.75)
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    LinearGradient(colors: [.clear, .white.opacity(0.12)],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: 3)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// The fallback cover for anything with no artwork: a cloth-bound colour
+/// picked from the title (so a book keeps its colour between launches), the
+/// title set in a serif, and a small label for the kind of document.
+private struct GeneratedCover: View {
+    let title: String
+    let kind: String
+
+    private static let palette: [(bg: String, ink: String)] = [
+        ("#1f3a5f", "#f3e9d2"), ("#6b1f2a", "#f5e6c8"), ("#24483a", "#efe6cf"),
+        ("#8a5a14", "#fbf1dc"), ("#3d4451", "#ece7dc"), ("#4a2c55", "#f1e4ef"),
+        ("#2f5d62", "#eef2e6"), ("#7a3b1d", "#f8ead6"), ("#1d1d1f", "#e9dfc9"),
+    ]
+
+    private var colors: (bg: Color, ink: Color) {
+        // Stable across launches, unlike `String.hashValue`.
+        let h = title.unicodeScalars.reduce(UInt32(5381)) { ($0 &* 33) &+ $1.value }
+        let p = Self.palette[Int(h % UInt32(Self.palette.count))]
+        return (Color(hex: p.bg), Color(hex: p.ink))
+    }
+
+    private var label: String {
+        switch kind {
+        case "pdf": return "PDF"
+        case "url": return "ARTICLE"
+        case "text": return "TEXT"
+        case "ocr": return "SCAN"
+        case "docx": return "DOCUMENT"
+        default: return ""
+        }
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let c = colors
+            ZStack {
+                LinearGradient(colors: [c.bg.opacity(0.92), c.bg], startPoint: .top, endPoint: .bottom)
+                // Inset rule, like a blind-stamped border.
+                RoundedRectangle(cornerRadius: 1)
+                    .strokeBorder(c.ink.opacity(0.35), lineWidth: 0.75)
+                    .padding(w * 0.06)
+                VStack(spacing: w * 0.05) {
+                    Spacer(minLength: 0)
+                    Text(title)
+                        .font(.system(size: w * 0.115, weight: .semibold, design: .serif))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(5)
+                        .minimumScaleFactor(0.6)
+                        .foregroundStyle(c.ink)
+                    Rectangle().fill(c.ink.opacity(0.5)).frame(width: w * 0.18, height: 0.75)
+                    Spacer(minLength: 0)
+                    if !label.isEmpty {
+                        Text(label)
+                            .font(.system(size: w * 0.055, weight: .semibold))
+                            .kerning(w * 0.012)
+                            .foregroundStyle(c.ink.opacity(0.7))
+                    }
+                }
+                .padding(.horizontal, w * 0.13)
+                .padding(.vertical, w * 0.16)
+            }
+        }
     }
 }
 
@@ -1005,7 +1307,7 @@ struct SettingsPopover: View {
             HStack {
                 Text("Voice").frame(width: 52, alignment: .leading)
                 Picker("", selection: $reader.voice) {
-                    ForEach(["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5","david-deep"], id: \.self) {
+                    ForEach(["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5","david-deep","daisy"], id: \.self) {
                         Text($0).tag($0)
                     }
                 }

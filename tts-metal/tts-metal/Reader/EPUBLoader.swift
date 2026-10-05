@@ -37,12 +37,14 @@ enum EPUBLoader {
         // 2. Manifest id → href, plus the image items and the nav document.
         var manifest: [String: String] = [:]
         var imageHrefs: [String] = []
+        var cssHrefs: [String] = []
         var navHref: String?
         for item in tagBodies(named: "item", in: opf) {
             guard let id = attributeValue("id", in: item), let href = attributeValue("href", in: item) else { continue }
             manifest[id] = href
             let media = attributeValue("media-type", in: item)?.lowercased() ?? ""
             if media.hasPrefix("image/") { imageHrefs.append(href) }
+            if media == "text/css" { cssHrefs.append(href) }
             if (attributeValue("properties", in: item) ?? "").contains("nav") { navHref = href }
         }
 
@@ -77,6 +79,19 @@ enum EPUBLoader {
             }
         }
 
+        // 5b. Stylesheets, read once for the whole book: alignment, italics
+        //     and super/subscript set by class live here, not in the markup.
+        //     Merged into one sheet in manifest order — books link the same
+        //     few sheets from every chapter.
+        var styles = CSSStyleSheet()
+        for href in cssHrefs {
+            let full = resolve(href, base: opfDir)
+            if let d = zip.read(full) ?? zip.read((full as NSString).lastPathComponent),
+               let css = decode(d) {
+                styles.add(css: css)
+            }
+        }
+
         // 6. Convert spine documents to blocks. Each chapter's zip-read +
         // HTMLToBlocks parse is independent of every other chapter — only
         // the final concatenation needs original spine order — so this runs
@@ -93,7 +108,7 @@ enum EPUBLoader {
                 guard let data = zip.read(full) ?? zip.read((full as NSString).lastPathComponent),
                       let html = decode(data) else { return }
                 let baseDir = (full as NSString).deletingLastPathComponent
-                let result = HTMLToBlocks(baseDir: baseDir).parse(html)
+                let result = HTMLToBlocks(baseDir: baseDir, styles: styles).parse(html)
 
                 let chapterName = (full as NSString).lastPathComponent
                 let entries = toc.filter { $0.file == chapterName }
@@ -132,6 +147,46 @@ enum EPUBLoader {
         return ReaderDocument(title: docTitle, fileType: .epub, sourceID: sourceID, fileName: docTitle,
                               previewURL: previewURL, frontmatter: nil, blocks: blocks, outline: outline,
                               resources: resources)
+    }
+
+    /// The book's cover image and its creator, read straight from the OPF
+    /// without converting any chapter — cheap enough for a library grid.
+    /// Tries, in order: the EPUB3 `properties="cover-image"` item, the EPUB2
+    /// `<meta name="cover" content="…">` pointer, then any image item whose
+    /// id or file name says "cover".
+    static func coverInfo(zip: ZipArchive) -> (image: Data?, author: String?) {
+        guard let containerXML = zip.read("META-INF/container.xml"),
+              let container = String(data: containerXML, encoding: .utf8),
+              let opfPath = firstAttribute("full-path", inTag: "rootfile", xml: container),
+              let opfData = zip.read(opfPath), let opf = decode(opfData) else { return (nil, nil) }
+        let opfDir = (opfPath as NSString).deletingLastPathComponent
+        let author = tagBody(named: "dc:creator", in: opf).map(stripTags).flatMap { $0.isEmpty ? nil : $0 }
+
+        var byId: [String: String] = [:]
+        var images: [(id: String, href: String, props: String)] = []
+        for item in tagBodies(named: "item", in: opf) {
+            guard let id = attributeValue("id", in: item), let href = attributeValue("href", in: item) else { continue }
+            byId[id] = href
+            if (attributeValue("media-type", in: item) ?? "").lowercased().hasPrefix("image/") {
+                images.append((id, href, attributeValue("properties", in: item) ?? ""))
+            }
+        }
+        var candidates: [String] = []
+        if let c = images.first(where: { $0.props.contains("cover-image") }) { candidates.append(c.href) }
+        for meta in tagBodies(named: "meta", in: opf)
+        where attributeValue("name", in: meta)?.lowercased() == "cover" {
+            if let id = attributeValue("content", in: meta), let href = byId[id] { candidates.append(href) }
+        }
+        if let c = images.first(where: { $0.id.lowercased().contains("cover") || $0.href.lowercased().contains("cover") }) {
+            candidates.append(c.href)
+        }
+        for href in candidates {
+            let full = resolve(href, base: opfDir)
+            if let d = zip.read(full) ?? zip.read((full as NSString).lastPathComponent), !d.isEmpty {
+                return (d, author)
+            }
+        }
+        return (nil, author)
     }
 
     /// Weaves the TOC entries that point into this chapter together with the

@@ -25,7 +25,7 @@
 - Floating mini player that stays on top of other windows.
 - Now Playing and media-key support.
 - Ask questions about the book you're reading, answered on-device by Apple Intelligence with cited passages.
-- 11 voices, 1×–2× speed, six reading themes.
+- 12 voices, 1×–2× speed, six reading themes.
 
 **Menu-bar reader**
 - Select text in any app and press **⌥⌘R** to hear it.

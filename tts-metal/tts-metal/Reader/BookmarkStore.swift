@@ -37,7 +37,7 @@ struct BookmarkEntry: Codable, Identifiable, Equatable {
 @MainActor
 final class BookmarkStore: ObservableObject {
     static let shared = BookmarkStore()
-    static let maxEntries = 20
+    static let maxEntries = 200
 
     @Published private(set) var entries: [BookmarkEntry] = []
 

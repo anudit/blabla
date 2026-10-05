@@ -336,7 +336,7 @@ final class SupertonicEngine: @unchecked Sendable {
         // voice_styles/*.json each has style_ttl [1,50,256] and style_dp [1,8,16].
         // Parsed with a flat number scan: NSJSONSerialization boxed all ~140k values into
         // NSDecimalNumbers (~250 ms at launch for 11 voices).
-        let names = ["david-deep", "F1","F2","F3","F4","F5","M1","M2","M3","M4","M5"]
+        let names = ["david-deep", "daisy", "F1","F2","F3","F4","F5","M1","M2","M3","M4","M5"]
         let lock = NSLock()
         var parsed: [String: VoiceStyle] = [:]
         DispatchQueue.concurrentPerform(iterations: names.count) { i in

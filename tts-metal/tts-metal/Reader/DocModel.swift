@@ -28,8 +28,36 @@ enum BlockContent: Equatable {
     case frontmatter(title: String?, description: String?, image: String?)
 }
 
+/// Inline character styling recovered from the source markup (<i>, <sub>,
+/// a stylesheet class with `font-style: italic`, …).
+struct InlineStyle: OptionSet, Hashable {
+    let rawValue: UInt8
+    static let italic      = InlineStyle(rawValue: 1 << 0)
+    static let bold        = InlineStyle(rawValue: 1 << 1)
+    /// Explicitly roman (`font-style: normal`) — cancels an enclosing italic,
+    /// including the italic a block style like `.quote` sets by default.
+    static let upright     = InlineStyle(rawValue: 1 << 2)
+    static let superscript = InlineStyle(rawValue: 1 << 3)
+    static let `subscript` = InlineStyle(rawValue: 1 << 4)
+}
+
+/// A styled stretch of a block's `displayText`, in UTF-16 offsets.
+struct StyleRun: Equatable {
+    let range: NSRange
+    let style: InlineStyle
+}
+
+/// Paragraph alignment the source asked for. `nil` on a block means the
+/// renderer's own default for that kind of block (justified body text).
+enum BlockAlignment: Equatable {
+    case left, center, right
+}
+
 struct DocBlock {
     var content: BlockContent
+    /// Inline styling over `displayText`. Display only — speech never sees it.
+    var runs: [StyleRun] = []
+    var alignment: BlockAlignment? = nil
 
     /// Speakable text for this block (empty for non-speakable blocks).
     var speechText: String {

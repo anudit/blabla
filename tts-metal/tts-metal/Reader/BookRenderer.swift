@@ -85,7 +85,7 @@ enum BookRenderer {
             case .paragraph, .quote, .listItem, .table:
                 out.append(paragraph(block, body: body, color: text, muted: muted))
             case .caption(let c):
-                out.append(caption(c, body: body, color: text))
+                out.append(caption(c, alignment: block.alignment, body: body, color: text))
             case .code(let c):
                 out.append(code(c, body: body, color: text))
             case .image(let alt, let src):
@@ -101,6 +101,13 @@ enum BookRenderer {
             // display text, which is exactly what was just appended (leading
             // decorations like a list bullet shift it, hence `textOffset`).
             let offset = start + textOffset(for: block)
+            // Inline styling is laid over the block's base font. The length
+            // check skips a block whose rendered text isn't its display text
+            // verbatim (a caps heading whose uppercasing changed its length).
+            if !block.runs.isEmpty,
+               out.length - offset == block.displayText.utf16.count + 1 {
+                applyRuns(block.runs, to: out, at: offset)
+            }
             for s in document.sentencesByBlock[bi] ?? [] {
                 let r = NSRange(location: offset + s.range.location, length: s.range.length)
                 guard r.upperBound <= out.length else { continue }
@@ -230,17 +237,20 @@ enum BookRenderer {
             break
         }
 
+        applyAlignment(block.alignment, to: style)
         return NSAttributedString(string: prefix + block.displayText + "\n", attributes: attrs)
     }
 
     /// Figure captions: set tight under the artwork, bold and a size down, so
     /// they read as apparatus rather than as the next paragraph of prose.
-    private static func caption(_ text: String, body: CGFloat, color: NSColor) -> NSAttributedString {
+    private static func caption(_ text: String, alignment: BlockAlignment?,
+                                body: CGFloat, color: NSColor) -> NSAttributedString {
         let style = NSMutableParagraphStyle()
         style.lineHeightMultiple = 1.25
         style.alignment = .justified
         style.hyphenationFactor = 0.9
         style.paragraphSpacing = body * 1.4
+        applyAlignment(alignment, to: style)
         return NSAttributedString(string: text + "\n", attributes: [
             .font: NSFont.systemFont(ofSize: body * 0.86, weight: .semibold),
             .foregroundColor: color,
@@ -317,6 +327,60 @@ enum BookRenderer {
         out.append(NSAttributedString(string: "\n"))
         out.addAttributes([.paragraphStyle: style], range: NSRange(location: 0, length: out.length))
         return out
+    }
+
+    // MARK: - Inline styling
+
+    /// The source's own alignment, where it set one: equations and verse are
+    /// centred, attributions set right. Centred text is never hyphenated —
+    /// a short centred line broken mid-word reads as a typo.
+    private static func applyAlignment(_ alignment: BlockAlignment?, to style: NSMutableParagraphStyle) {
+        switch alignment {
+        case .center:
+            style.alignment = .center
+            style.hyphenationFactor = 0
+            style.firstLineHeadIndent = style.headIndent
+        case .right:
+            style.alignment = .right
+            style.hyphenationFactor = 0
+        case .left:
+            style.alignment = .natural
+        case nil:
+            break
+        }
+    }
+
+    /// Lays italic/bold/super/subscript runs over whatever font the block
+    /// style already set, so a run keeps its block's size and weight.
+    /// Italic inside an already-italic block (a quote) flips to roman, the
+    /// way a book sets a title within italic text.
+    private static func applyRuns(_ runs: [StyleRun], to out: NSMutableAttributedString, at offset: Int) {
+        for run in runs {
+            let r = NSRange(location: offset + run.range.location, length: run.range.length)
+            guard r.location >= 0, r.length > 0, r.upperBound <= out.length else { continue }
+            out.enumerateAttribute(.font, in: r) { value, sub, _ in
+                guard let base = value as? NSFont else { return }
+                var traits = base.fontDescriptor.symbolicTraits
+                if run.style.contains(.italic) {
+                    if traits.contains(.italic) { traits.remove(.italic) } else { traits.insert(.italic) }
+                }
+                if run.style.contains(.upright) { traits.remove(.italic) }
+                if run.style.contains(.bold) { traits.insert(.bold) }
+                let shifted = run.style.contains(.superscript) || run.style.contains(.subscript)
+                let size = shifted ? base.pointSize * 0.7 : base.pointSize
+                var font = base
+                if traits != base.fontDescriptor.symbolicTraits || shifted {
+                    font = NSFont(descriptor: base.fontDescriptor.withSymbolicTraits(traits), size: size)
+                        ?? NSFont(descriptor: base.fontDescriptor, size: size) ?? base
+                }
+                out.addAttribute(.font, value: font, range: sub)
+                if run.style.contains(.superscript) {
+                    out.addAttribute(.baselineOffset, value: base.pointSize * 0.36, range: sub)
+                } else if run.style.contains(.subscript) {
+                    out.addAttribute(.baselineOffset, value: -base.pointSize * 0.16, range: sub)
+                }
+            }
+        }
     }
 
     // MARK: - Helpers

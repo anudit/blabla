@@ -92,6 +92,7 @@ final class ReaderController: ObservableObject {
     private var sentenceStart: Date?
     private var sentenceDuration: Double = 0
     private var pendingResumeIndex: Int?
+    private var pendingStartFraction: Double?
     private var bookmarkSaveTask: Task<Void, Never>?
 
     static let speedChoices: [Double] = [1.0, 1.25, 1.5, 1.75, 2.0]
@@ -112,6 +113,14 @@ final class ReaderController: ObservableObject {
         // Media keys / Now Playing
         NowPlayingManager.shared.register()
         NowPlayingManager.shared.onTogglePlayback = { [weak self] in self?.togglePlayPause() }
+        NowPlayingManager.shared.onPlay = { [weak self] in
+            guard let self, self.state == .paused || self.state == .ready else { return }
+            self.togglePlayPause()
+        }
+        NowPlayingManager.shared.onPause = { [weak self] in
+            guard let self, self.state == .playing || self.state == .generating else { return }
+            self.pause()
+        }
         NowPlayingManager.shared.onNextSentence = { [weak self] in self?.skipSentence(+1) }
         NowPlayingManager.shared.onPrevSentence = { [weak self] in self?.skipSentence(-1) }
 
@@ -157,7 +166,10 @@ final class ReaderController: ObservableObject {
 
     // MARK: - Document loading
 
-    func loadFileURL(_ url: URL) {
+    /// `startFraction` places a book with no BlaBla history at that point
+    /// (0…1) — how far the user had read it elsewhere, e.g. in Apple Books.
+    func loadFileURL(_ url: URL, startFraction: Double? = nil) {
+        pendingStartFraction = startFraction
         Task { await loadDocument(.file(url)) }
     }
 
@@ -253,6 +265,8 @@ final class ReaderController: ObservableObject {
         activeWordIndex = -1
         activeWordFraction = 0
         currentIndex = 0
+        let startFraction = pendingStartFraction
+        pendingStartFraction = nil
 
         // Auto-resume from bookmark history.
         if let entry = bookmarks.entry(for: doc.sourceID),
@@ -263,6 +277,13 @@ final class ReaderController: ObservableObject {
             PerfLog.log("resume -> index \(entry.sentenceIndex) of \(doc.sentences.count) "
                         + "(saved \(entry.totalSentences)): "
                         + "\"\(doc.sentences[entry.sentenceIndex].displayText.prefix(60))\"")
+        } else if let f = startFraction, f > 0, !doc.sentences.isEmpty {
+            // Books' progress is by location, not sentence, so this lands
+            // near — not exactly at — where the reader left off.
+            let index = min(Int(Double(doc.sentences.count) * f), doc.sentences.count - 1)
+            pendingResumeIndex = index
+            currentIndex = index
+            statusText = "Continuing from \(Int(f * 100))%"
         }
     }
 

@@ -8,7 +8,7 @@
 //  the model's real failure mode is skipping words, which needs a transcript —
 //  run the dumped .wav files through Whisper and diff against `texts`.
 //
-//     SUPERTONIC_SPEEDTEST=1 SUPERTONIC_SEED=1 SUPERTONIC_SPEEDTEST_DUMP=/path/dir Blabla
+//     SUPERTONIC_SPEEDTEST=1 SUPERTONIC_SEED=1 SUPERTONIC_SPEEDTEST_DUMP=/path/dir BlaBla
 //
 //  Prints one "[TAIL] ..." line per take and exits.
 //

@@ -12,8 +12,8 @@
 //  thread in the app shows up here as tick lateness, attributable to a specific stage.
 //
 //  Run both ways to attribute:
-//     SUPERTONIC_STALLTEST=1 SUPERTONIC_ANE=0 Blabla     (Metal baseline)
-//     SUPERTONIC_STALLTEST=1 SUPERTONIC_ANE=1 Blabla
+//     SUPERTONIC_STALLTEST=1 SUPERTONIC_ANE=0 BlaBla     (Metal baseline)
+//     SUPERTONIC_STALLTEST=1 SUPERTONIC_ANE=1 BlaBla
 //
 
 import Foundation

@@ -23,12 +23,48 @@ struct ZipEntry {
 struct ZipArchive {
     let data: Data
     let entries: [String: ZipEntry]   // keyed by full path
+    /// Set when the "archive" is an unpacked folder (Apple Books stores its
+    /// EPUBs this way): entries are then files under it, read from disk.
+    private var directory: URL?
 
     init?(data: Data) {
         self.data = data
         guard let eocd = ZipArchive.findEOCD(data) else { return nil }
         guard let parsed = ZipArchive.parseCentralDirectory(data, eocdEnd: eocd) else { return nil }
         self.entries = parsed
+    }
+
+    /// An unpacked archive: every regular file under `directory`, keyed by
+    /// its path relative to it, exactly as the zip's central directory would.
+    init?(directory: URL) {
+        let root = directory.standardizedFileURL.resolvingSymlinksInPath()
+        guard let walker = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]) else { return nil }
+        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        var out: [String: ZipEntry] = [:]
+        for case let file as URL in walker {
+            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values?.isRegularFile == true else { continue }
+            let path = file.resolvingSymlinksInPath().path
+            guard path.hasPrefix(rootPath) else { continue }
+            let name = String(path.dropFirst(rootPath.count))
+            let size = UInt64(values?.fileSize ?? 0)
+            out[name] = ZipEntry(name: name, isDirectory: false, offset: 0, compressedSize: size,
+                                 uncompressedSize: size, method: 0, crc32: 0)
+        }
+        guard !out.isEmpty else { return nil }
+        self.data = Data()
+        self.entries = out
+        self.directory = root
+    }
+
+    /// Opens an EPUB whether it's a zip file or an unpacked folder.
+    static func open(_ url: URL) throws -> ZipArchive? {
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            return ZipArchive(directory: url)
+        }
+        return ZipArchive(data: try Data(contentsOf: url, options: .mappedIfSafe))
     }
 
     // MARK: - EOCD
@@ -78,6 +114,9 @@ struct ZipArchive {
 
     func read(_ name: String) -> Data? {
         guard let entry = lookup(name) else { return nil }
+        if let directory {
+            return try? Data(contentsOf: directory.appendingPathComponent(entry.name), options: .mappedIfSafe)
+        }
         let lho = Int(entry.offset)
         guard data.count > lho + 30 else { return nil }
         let nameLen = Int(Self.readU16(data, lho + 26))

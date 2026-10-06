@@ -70,7 +70,8 @@ final class SupertonicEngine: @unchecked Sendable {
 
         /// Run the flow-matching stage on the Apple Neural Engine instead of Metal.
         /// See ANEVectorField for why this is ~16x faster and what it costs numerically.
-        /// Override with SUPERTONIC_ANE=0 / =1.
+        /// Override with SUPERTONIC_ANE=0 / =1. Ignored (stays on) when the build does not
+        /// bundle vector_estimator.onnx, since then there is no Metal path to run.
         var useANE = ProcessInfo.processInfo.environment["SUPERTONIC_ANE"] != "0"
     }
     var config = Config()
@@ -110,6 +111,14 @@ final class SupertonicEngine: @unchecked Sendable {
     private(set) var lastFlowBackend = ""
     var aneWarmupComplete: Bool { ane?.warmupComplete ?? true }
     private var vectorFieldLoaded = false
+    /// Whether the bundle carries vector_estimator.onnx for the hand-written Metal flow
+    /// path. Release builds leave it out (245 MB) and run flow-matching on CoreML only:
+    /// they wait for a cell that is not warm yet and split sentences too long for any cell.
+    private lazy var metalFlowAvailable = vectorEstimatorURL != nil
+    private var vectorEstimatorURL: URL? {
+        Bundle.main.url(forResource: "vector_estimator", withExtension: "onnx", subdirectory: "supertonic") ??
+            Bundle.main.url(forResource: "vector_estimator", withExtension: "onnx")
+    }
 
     private let weightAliasMap: [String: String] = [
         "vector_field.main_blocks.5.attention.W_value.linear.MatMul.weight": "onnx::MatMul_3407",
@@ -195,6 +204,10 @@ final class SupertonicEngine: @unchecked Sendable {
     @discardableResult
     func load() throws -> Bool {
         PerfLog.log("SupertonicEngine.load start")
+        if !config.useANE && !metalFlowAvailable {
+            print("[Supertonic] SUPERTONIC_ANE=0 ignored: vector_estimator.onnx is not bundled")
+            config.useANE = true
+        }
         if config.useANE { prewarmANE() }
         status = .loading("Compiling Metal shaders")
         guard let lib = device.makeDefaultLibrary() else {
@@ -446,6 +459,17 @@ final class SupertonicEngine: @unchecked Sendable {
         }
         guard L > 0 else { return [] }
 
+        // Without the Metal flow path, a sentence too long (or spoken too slowly) for the
+        // largest ANE cell is synthesized as two halves instead.
+        if !metalFlowAvailable && !ANEVectorField.supports(T: T, L: L) {
+            guard let (a, b) = Self.splitNearMiddle(text) else {
+                throw err("text too long to synthesize (T=\(T), L=\(L))")
+            }
+            if profile { PerfLog.log("split (T=\(T), L=\(L)) past the largest ANE cell") }
+            return try generate(a, voiceName: voiceName, totalSteps: totalSteps, speed: speed)
+                 + generate(b, voiceName: voiceName, totalSteps: totalSteps, speed: speed)
+        }
+
         // 3) flow-matching ODE over vector_estimator → latent [144, L]
         let latent = try stage("flow_matching") {
             try runFlowMatching(textEmb: textEmb, T: T, styleTtl: styleTtl, L: L, totalSteps: totalSteps)
@@ -461,6 +485,27 @@ final class SupertonicEngine: @unchecked Sendable {
         if profile { for t in timings { print(String(format: "[Supertonic] %-20s %.1f ms", (t.name as NSString).utf8String!, t.ms)) } }
 
         return wav
+    }
+
+    /// Splits `text` at the break nearest its middle: after clause punctuation if one is
+    /// reasonably close, else at any space, else mid-word. Nil if it cannot be halved.
+    static func splitNearMiddle(_ text: String) -> (String, String)? {
+        let chars = Array(text)
+        guard chars.count >= 2 else { return nil }
+        let mid = chars.count / 2
+        func nearest(within r: Int, _ isBreak: (Int) -> Bool) -> Int? {
+            for d in 0...r {
+                for i in [mid - d, mid + d] where i > 0 && i < chars.count && isBreak(i) { return i }
+            }
+            return nil
+        }
+        let clause: Set<Character> = [",", ";", ":", ".", "!", "?", "—", "–"]
+        let i = nearest(within: chars.count / 4) { chars[$0].isWhitespace && clause.contains(chars[$0 - 1]) }
+            ?? nearest(within: mid) { chars[$0].isWhitespace }
+            ?? mid
+        let a = String(chars[..<i]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let b = String(chars[i...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return a.isEmpty || b.isEmpty ? nil : (a, b)
     }
 
     private func printBufStats(_ label: String, _ buf: MTLBuffer, count: Int) {
@@ -847,6 +892,24 @@ final class SupertonicEngine: @unchecked Sendable {
                 if profile { PerfLog.log("flow-matching: \(lastFlowBackend.uppercased()) (T=\(T), L=\(L))") }
                 return r
             }
+            catch ANEVectorField.ANEError.notWarmedYet where !metalFlowAvailable {
+                // No Metal path to fall back to: block on this cell instead. The wait is
+                // ~0.3-0.5 s (GPU bridge or a cached ANE program), only on a sentence
+                // that arrives before the warmer reaches its cell.
+                guard let ane else {
+                    aneUnavailable = true
+                    throw err("speech model unavailable: ve_grid.mlmodelc failed to load")
+                }
+                let t0 = now()
+                do { try ane.waitUntilReady(T: T, L: L) } catch {
+                    throw err("speech model unavailable: \(error.localizedDescription)")
+                }
+                let r = try runFlowMatchingANE(textEmb: textEmb, T: T, styleTtl: styleTtl, L: L, totalSteps: totalSteps)
+                lastFlowBackend = ane.lastBackend
+                if profile { PerfLog.log(String(format: "flow-matching: %@ (T=%d, L=%d) after %.0f ms cell wait",
+                                                lastFlowBackend.uppercased(), T, L, now() - t0)) }
+                return r
+            }
             catch ANEVectorField.ANEError.notWarmedYet {
                 ane?.request(T: T, L: L)
                 if profile { PerfLog.log("flow-matching: Metal (T=\(T), L=\(L)) — ANE cell not warm yet") }
@@ -857,7 +920,12 @@ final class SupertonicEngine: @unchecked Sendable {
                 // Stop retrying for the rest of the session.
                 print("[Supertonic] ANE path unavailable (\(error.localizedDescription)); using Metal")
                 aneUnavailable = true
+                if !metalFlowAvailable { throw err("speech model unavailable: \(error.localizedDescription)") }
             }
+        }
+        guard metalFlowAvailable else {
+            throw err(aneUnavailable ? "speech model unavailable on this Mac (Neural Engine model failed to load)"
+                                     : "sentence too long for the speech model (T=\(T), L=\(L))")
         }
         lastFlowBackend = "metal"
         try ensureVectorFieldWeights()

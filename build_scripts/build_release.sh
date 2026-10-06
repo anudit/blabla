@@ -3,7 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_dir=${TMPDIR:-/tmp}/tts-metal-release-build
-stage_dir=$(mktemp -d "$root/.Blabla-release-staging.XXXXXX")
+stage_dir=$(mktemp -d "$root/.BlaBla-release-staging.XXXXXX")
 trap 'rm -rf "$stage_dir"' EXIT HUP INT TERM
 
 xcodebuild \
@@ -14,9 +14,9 @@ xcodebuild \
     -derivedDataPath "$build_dir" \
     build CODE_SIGNING_ALLOWED=NO
 
-source_app="$build_dir/Build/Products/Release/Blabla.app"
-staged_app="$stage_dir/Blabla-Release.app"
-output_app="$root/Blabla-Release.app"
+source_app="$build_dir/Build/Products/Release/BlaBla.app"
+staged_app="$stage_dir/BlaBla-Release.app"
+output_app="$root/BlaBla-Release.app"
 ditto "$source_app" "$staged_app"
 
 # The target has ENABLE_APP_SANDBOX=NO. Keep the release signature aligned
@@ -30,8 +30,8 @@ fi
 
 if [ -e "$output_app" ]; then
     backup_dir=$(mktemp -d "${TMPDIR:-/tmp}/tts-metal-release-backup.XXXXXX")
-    mv "$output_app" "$backup_dir/Blabla-Release.app"
-    echo "Previous app: $backup_dir/Blabla-Release.app"
+    mv "$output_app" "$backup_dir/BlaBla-Release.app"
+    echo "Previous app: $backup_dir/BlaBla-Release.app"
 fi
 mv "$staged_app" "$output_app"
 echo "Release app: $output_app"

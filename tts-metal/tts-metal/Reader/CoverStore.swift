@@ -10,6 +10,7 @@
 //       one) — accepted only if the match's title actually agrees with ours,
 //       because a loose search returns *some* book for almost any string;
 //    3. for a PDF with neither, its first page;
+//    (an Apple Books title tries Books' own cover cache before all of these;)
 //    4. otherwise nothing — the grid draws a typographic cover from the title.
 //
 //  A miss is cached too (as an empty marker file), so a book with no cover
@@ -73,10 +74,15 @@ final class CoverStore: ObservableObject {
         let path = entry.filePath.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }
         var author: String?
 
+        // 0. An Apple Books title: the cover Books already rendered.
+        if entry.id.hasPrefix("applebooks:"),
+           let d = AppleBooksLibrary.cachedCover(assetID: String(entry.id.dropFirst("applebooks:".count))) {
+            return d
+        }
+
         // 1. Embedded cover.
         if entry.fileType == "epub", let path,
-           let raw = try? Data(contentsOf: URL(fileURLWithPath: path), options: .mappedIfSafe),
-           let zip = ZipArchive(data: raw) {
+           let zip = (try? ZipArchive.open(URL(fileURLWithPath: path))) ?? nil {
             let info = EPUBLoader.coverInfo(zip: zip)
             if let img = info.image, let normalized = downscaled(img) { return normalized }
             author = info.author
@@ -117,7 +123,7 @@ final class CoverStore: ObservableObject {
         if let author { comps.queryItems?.append(URLQueryItem(name: "author", value: author)) }
         guard let url = comps.url else { return nil }
         var req = URLRequest(url: url, timeoutInterval: 10)
-        req.setValue("Blabla/1.0 (macOS reader)", forHTTPHeaderField: "User-Agent")
+        req.setValue("BlaBla/1.0 (macOS reader)", forHTTPHeaderField: "User-Agent")
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let result = try? JSONDecoder().decode(OLSearch.self, from: data) else { return nil }

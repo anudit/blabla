@@ -31,9 +31,22 @@
 		};
 /* End PBXShellScriptBuildPhase section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		A11A00050000000000000001 /* Exceptions for "tts-metal" folder in "tts-metal" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				supertonic/vector_estimator.onnx,
+			);
+			target = D6128CB73007AE2E00057BB7 /* tts-metal */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		D6128CBA3007AE2E00057BB7 /* tts-metal */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				A11A00050000000000000001 /* Exceptions for "tts-metal" folder in "tts-metal" target */,
+			);
 			path = "tts-metal";
 			sourceTree = "<group>";
 		};
@@ -278,7 +291,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = HUT3P3ZWDR;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -288,11 +301,11 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "anudit.tts-metal";
-				PRODUCT_NAME = Blabla;
-				INFOPLIST_KEY_CFBundleDisplayName = Blabla;
-				INFOPLIST_KEY_CFBundleName = Blabla;
+				PRODUCT_NAME = BlaBla;
+				INFOPLIST_KEY_CFBundleDisplayName = BlaBla;
+				INFOPLIST_KEY_CFBundleName = BlaBla;
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
@@ -311,7 +324,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = HUT3P3ZWDR;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -321,11 +334,11 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "anudit.tts-metal";
-				PRODUCT_NAME = Blabla;
-				INFOPLIST_KEY_CFBundleDisplayName = Blabla;
-				INFOPLIST_KEY_CFBundleName = Blabla;
+				PRODUCT_NAME = BlaBla;
+				INFOPLIST_KEY_CFBundleDisplayName = BlaBla;
+				INFOPLIST_KEY_CFBundleName = BlaBla;
 				REGISTER_APP_GROUPS = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;

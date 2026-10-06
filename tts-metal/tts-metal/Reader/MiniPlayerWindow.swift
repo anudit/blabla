@@ -134,7 +134,7 @@ struct MiniPlayerView: View {
                 transportButton("forward.fill", size: 11) { reader.skipSentence(+1) }
                     .disabled(reader.document == nil)
 
-                Text(reader.document?.fileName ?? "Blabla")
+                Text(reader.document?.fileName ?? "BlaBla")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Color(hex: theme.textMuted))
                     .lineLimit(1).truncationMode(.middle)

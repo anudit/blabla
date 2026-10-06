@@ -45,8 +45,7 @@ enum DocLoader {
         case "epub":
             // Read errors (including lost file access on resume) must reach the
             // UI as read errors, not be misreported as a corrupt archive.
-            let archiveData = try Data(contentsOf: url)
-            guard let zip = ZipArchive(data: archiveData) else { throw LoaderError.failed("Not a valid EPUB (bad ZIP).") }
+            guard let zip = try ZipArchive.open(url) else { throw LoaderError.failed("Not a valid EPUB (bad ZIP).") }
             doc = try EPUBLoader.load(zip: zip, fileName: name, sourceID: sourceID)
         case "mobi", "azw", "azw3":
             doc = try MOBILoader.load(url: url, fileName: name, sourceID: sourceID)

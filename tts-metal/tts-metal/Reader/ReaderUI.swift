@@ -27,37 +27,69 @@ struct ReaderRootView: View {
         content
         .frame(minWidth: 760, minHeight: 560)
         .background(Color(hex: reader.theme.bg))
+        .onAppear { Self.installSpaceKey() }
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    reader.outlineVisible.toggle()
-                } label: {
-                    Label("Contents", systemImage: "list.bullet")
-                }
-                .help("Show table of contents")
-                .disabled(reader.document == nil)
-                .opacity(reader.document == nil ? 0.45 : 1)
-                // A popover, not a sidebar: inset as a sidebar it narrowed the
-                // reading column, and the column width is what the book's
-                // layout is built against — so every toggle re-rendered the
-                // whole book and lost the reader's place. Floating it over the
-                // text leaves the column untouched.
-                .popover(isPresented: $reader.outlineVisible, arrowEdge: .bottom) {
-                    OutlineSidebar()
-                        .frame(width: 300, height: 560)
+            // Only while a book is open: the home screen has nothing to
+            // outline and nowhere to go back to.
+            if reader.state != .empty {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        reader.stopPlayback()
+                        reader.resetDocument()
+                    } label: {
+                        Label("Home", systemImage: "house.fill")
+                    }
+                    .help("Back to home — stop playback")
                 }
             }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    reader.stopPlayback()
-                    reader.resetDocument()
-                } label: {
-                    Label("Home", systemImage: "house.fill")
+            if reader.document != nil {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        reader.outlineVisible.toggle()
+                    } label: {
+                        Label("Contents", systemImage: "list.bullet")
+                    }
+                    .help("Show table of contents")
+                    // A popover, not a sidebar: inset as a sidebar it narrowed the
+                    // reading column, and the column width is what the book's
+                    // layout is built against — so every toggle re-rendered the
+                    // whole book and lost the reader's place. Floating it over the
+                    // text leaves the column untouched.
+                    .popover(isPresented: $reader.outlineVisible, arrowEdge: .bottom) {
+                        OutlineSidebar()
+                            .frame(width: 300, height: 560)
+                    }
                 }
-                .help("Back to home — stop playback")
-                .disabled(reader.state == .empty)
-                .opacity(reader.state == .empty ? 0.45 : 1)
             }
+        }
+    }
+
+    /// Space plays and pauses whenever a book is open — unless the user is
+    /// typing (a search field, Ask, the URL box), where it's just a space.
+    private static var spaceKeyInstalled = false
+    private static func installSpaceKey() {
+        guard !spaceKeyInstalled else { return }
+        spaceKeyInstalled = true
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let reader = ReaderControllerHolder.reader
+            guard event.keyCode == 49,                 // space
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                      .subtracting([.capsLock, .numericPad, .function]).isEmpty,
+                  reader.document != nil,
+                  !isTyping(in: event.window)
+            else { return event }
+            reader.togglePlayPause()
+            return nil
+        }
+    }
+
+    /// A text field's editor and an editable text view both take spaces;
+    /// the book's own (read-only, selectable) text view doesn't.
+    private static func isTyping(in window: NSWindow?) -> Bool {
+        switch window?.firstResponder {
+        case let text as NSTextView: return text.isEditable
+        case is NSTextField: return true
+        default: return false
         }
     }
 
@@ -109,15 +141,20 @@ struct LandingView: View {
     private var theme: ReaderTheme { reader.theme }
 
     @ObservedObject private var covers = CoverStore.shared
+    @ObservedObject private var appleBooks = AppleBooksLibrary.shared
     @State private var filter: LibraryFilter = .all
+
+    /// Anything to shelve — BlaBla's own history or the Apple Books library.
+    private var hasShelf: Bool { !bookmarks.entries.isEmpty || !appleBooks.books.isEmpty }
 
     var body: some View {
         ScrollView {
-            if bookmarks.entries.isEmpty {
+            if !hasShelf {
                 // First run: nothing to show yet, so the drop card is the page.
                 VStack(spacing: 26) {
                     card
                     if showTextarea { textarea }
+                    appleBooksBanner
                 }
                 .padding(.horizontal, 28)
                 .padding(.top, 46)
@@ -128,7 +165,9 @@ struct LandingView: View {
                 VStack(alignment: .leading, spacing: 22) {
                     libraryHeader
                     if showTextarea { textarea.frame(maxWidth: 680) }
-                    libraryGrid
+                    appleBooksBanner
+                    if !visibleEntries.isEmpty { libraryGrid }
+                    if !visibleAppleBooks.isEmpty { appleBooksSection }
                 }
                 // A centred column, like the reading view: on a wide window
                 // the shelf stays a comfortable width with margin either side
@@ -141,8 +180,11 @@ struct LandingView: View {
             }
         }
         .background(Color(hex: theme.bg))
-        .overlay { if isDragging && !bookmarks.entries.isEmpty { dropOverlay } }
-        .onAppear(perform: registerPasteHandler)
+        .overlay { if isDragging && hasShelf { dropOverlay } }
+        .onAppear {
+            registerPasteHandler()
+            appleBooks.refresh()
+        }
         .onDrop(of: [UTType.fileURL], isTargeted: $isDragging) { providers in
             handleDrop(providers)
         }
@@ -281,6 +323,13 @@ struct LandingView: View {
         bookmarks.entries.filter { filter.includes($0.fileType) }
     }
 
+    /// Apple Books titles not already on BlaBla's shelf (once opened here,
+    /// a book's BlaBla entry, with BlaBla's progress, stands in for it).
+    private var visibleAppleBooks: [AppleBook] {
+        let shelved = Set(bookmarks.entries.compactMap(\.filePath))
+        return appleBooks.books.filter { !shelved.contains($0.path) && filter.includes($0.fileType) }
+    }
+
     private var libraryHeader: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 12) {
@@ -291,12 +340,17 @@ struct LandingView: View {
                 urlField
                 headerButton("Paste", systemImage: "doc.on.clipboard", action: handleClipboard)
                     .help("Read text or a link from the clipboard (⌘V)")
+                if appleBooks.access == .notRequested && appleBooks.promptDismissed {
+                    headerButton("Apple Books", systemImage: "books.vertical", action: appleBooks.requestAccess)
+                        .help("Show your Apple Books library here")
+                }
                 headerButton("Add", systemImage: "plus", prominent: true, action: pickFile)
                     .help("Open a PDF, EPUB, MOBI, DOCX, Markdown or text file")
             }
             // Only the kinds actually present get a filter.
             let kinds = LibraryFilter.allCases.filter { f in
                 f == .all || bookmarks.entries.contains { f.includes($0.fileType) }
+                    || appleBooks.books.contains { f.includes($0.fileType) }
             }
             if kinds.count > 2 {
                 HStack(spacing: 6) {
@@ -363,13 +417,92 @@ struct LandingView: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 34, alignment: .bottom)],
                   alignment: .leading, spacing: 34) {
             ForEach(visibleEntries) { entry in
+                let available = isAvailable(entry)
                 LibraryBookCell(entry: entry, theme: theme,
                                 cover: covers.covers[entry.id] ?? nil,
-                                available: isAvailable(entry),
+                                available: available,
+                                status: .init(entry, available: available),
                                 open: { open(entry) },
                                 remove: { bookmarks.remove(id: entry.id) })
                     .onAppear { covers.request(entry) }
             }
+        }
+    }
+
+    // MARK: Apple Books
+
+    private var appleBooksSection: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .center, spacing: 10) {
+                if let icon = AppleBooksBanner.booksIcon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 30, height: 30)
+                        .accessibilityHidden(true)
+                }
+                Text("Books")
+                    .font(.system(size: 22, weight: .bold, design: .serif))
+                    .foregroundStyle(Color(hex: theme.headerColor))
+                Text("\(visibleAppleBooks.count)")
+                    .font(.system(size: 13, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Color(hex: theme.textMuted))
+                Spacer()
+                Menu {
+                    Button("Open Apple Books") {
+                        if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.iBooksX") {
+                            NSWorkspace.shared.openApplication(at: app, configuration: .init())
+                        }
+                    }
+                    Button("Refresh") { appleBooks.refresh(force: true) }
+                    Divider()
+                    Button("Stop Showing Apple Books", action: appleBooks.disconnect)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color(hex: theme.textMuted))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+            .padding(.top, visibleEntries.isEmpty ? 0 : 14)
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150, maximum: 200), spacing: 34, alignment: .bottom)],
+                      alignment: .leading, spacing: 34) {
+                ForEach(visibleAppleBooks) { book in
+                    let entry = book.libraryEntry
+                    LibraryBookCell(entry: entry, theme: theme,
+                                    cover: covers.covers[entry.id] ?? nil,
+                                    available: book.isAvailable,
+                                    status: .init(book),
+                                    open: { open(book) },
+                                    remove: nil,
+                                    openInBooks: { appleBooks.openInBooks(book) })
+                        .onAppear { covers.request(entry) }
+                }
+            }
+        }
+    }
+
+    /// Invitation to connect Apple Books, or — once macOS has refused —
+    /// the way to grant access in System Settings.
+    @ViewBuilder
+    private var appleBooksBanner: some View {
+        if appleBooks.shouldInvite {
+            AppleBooksBanner(
+                theme: theme,
+                title: "Bring in your Apple Books library",
+                message: "See the books you're reading in Apple Books here, with your progress, and listen to any of them. macOS will ask to let BlaBla access Apple Books' data.",
+                primary: ("Allow Access", appleBooks.requestAccess),
+                secondary: ("Not Now", appleBooks.dismissPrompt))
+        } else if appleBooks.access == .denied {
+            AppleBooksBanner(
+                theme: theme,
+                title: "BlaBla can't read your Apple Books library",
+                message: "Turn on BlaBla under Privacy & Security › Full Disk Access in System Settings, then come back — your books will appear here.",
+                primary: ("Open System Settings", appleBooks.openFullDiskAccessSettings),
+                secondary: ("Hide", appleBooks.disconnect))
         }
     }
 
@@ -393,6 +526,16 @@ struct LandingView: View {
     private func isAvailable(_ entry: BookmarkEntry) -> Bool {
         if let fp = entry.filePath { return FileManager.default.fileExists(atPath: fp) }
         return entry.url != nil
+    }
+
+    private func open(_ book: AppleBook) {
+        // Protected (store-bought) books can only be read by Books itself.
+        guard book.isAvailable else {
+            appleBooks.openInBooks(book)
+            return
+        }
+        reader.loadFileURL(URL(fileURLWithPath: book.path),
+                           startFraction: book.isFinished ? nil : book.progress)
     }
 
     private func open(_ entry: BookmarkEntry) {
@@ -499,8 +642,11 @@ private struct LibraryBookCell: View {
     let theme: ReaderTheme
     let cover: NSImage?
     let available: Bool
+    let status: LibraryBookStatus
     let open: () -> Void
-    let remove: () -> Void
+    /// Nil for books BlaBla doesn't own the shelf entry for (Apple Books).
+    let remove: (() -> Void)?
+    var openInBooks: (() -> Void)? = nil
     @State private var hovering = false
 
     var body: some View {
@@ -511,20 +657,27 @@ private struct LibraryBookCell: View {
                 .contentShape(Rectangle())
                 .onTapGesture(perform: open)
                 .onHover { hovering = $0 }
-                .help(entry.fileName)
+                // Apple Books entries carry the author in `preview`.
+                .help(entry.id.hasPrefix("applebooks:") && !entry.preview.isEmpty
+                      ? "\(entry.fileName) — \(entry.preview)" : entry.fileName)
 
             HStack(spacing: 6) {
                 progressLabel
                 Spacer(minLength: 4)
                 Menu {
                     Button("Open", action: open).disabled(!available)
+                    if let openInBooks {
+                        Button("Open in Apple Books", action: openInBooks)
+                    }
                     if let fp = entry.filePath, available {
                         Button("Show in Finder") {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: fp)])
                         }
                     }
-                    Divider()
-                    Button("Remove from Library", role: .destructive, action: remove)
+                    if let remove {
+                        Divider()
+                        Button("Remove from Library", role: .destructive, action: remove)
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 13, weight: .semibold))
@@ -575,11 +728,12 @@ private struct LibraryBookCell: View {
 
     @ViewBuilder
     private var progressLabel: some View {
-        if !available {
-            Text("Unavailable")
+        switch status {
+        case .unavailable(let reason):
+            Text(reason)
                 .font(.system(size: 11))
                 .foregroundStyle(Color(hex: theme.textMuted))
-        } else if entry.sentenceIndex == 0 {
+        case .new:
             Text("NEW")
                 .font(.system(size: 10, weight: .bold))
                 .kerning(0.4)
@@ -587,15 +741,113 @@ private struct LibraryBookCell: View {
                 .padding(.horizontal, 7)
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Color(hex: theme.accent).opacity(0.16)))
-        } else if entry.progress >= 0.995 {
+        case .finished:
             Text("Finished")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color(hex: theme.textMuted))
-        } else {
-            Text("\(max(1, Int(entry.progress * 100)))%")
-                .font(.system(size: 11, weight: .medium).monospacedDigit())
-                .foregroundStyle(Color(hex: theme.textMuted))
+        case .reading(let progress):
+            HStack(spacing: 6) {
+                // A thin bar, as Books draws it, beside the percentage.
+                Capsule().fill(Color(hex: theme.textMuted).opacity(0.25))
+                    .frame(width: 34, height: 3)
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(Color(hex: theme.textMuted))
+                            .frame(width: max(3, 34 * progress))
+                    }
+                Text("\(max(1, Int(progress * 100)))%")
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Color(hex: theme.textMuted))
+            }
         }
+    }
+}
+
+/// What the line under a cover says.
+enum LibraryBookStatus: Equatable {
+    case unavailable(String)
+    case new
+    case reading(Double)
+    case finished
+
+    init(_ entry: BookmarkEntry, available: Bool) {
+        if !available { self = .unavailable("Unavailable") }
+        else if entry.sentenceIndex == 0 { self = .new }
+        else if entry.progress >= 0.995 { self = .finished }
+        else { self = .reading(entry.progress) }
+    }
+
+    init(_ book: AppleBook) {
+        if book.isProtected { self = .unavailable("Apple Books only") }
+        else if !book.isAvailable { self = .unavailable("Unavailable") }
+        else if book.isFinished || book.progress >= 0.995 { self = .finished }
+        else if book.progress <= 0 { self = .new }
+        else { self = .reading(book.progress) }
+    }
+}
+
+/// A full-width card on the home screen inviting the user to connect Apple
+/// Books (or explaining how, once macOS has said no), with Books' own icon.
+private struct AppleBooksBanner: View {
+    let theme: ReaderTheme
+    let title: String
+    let message: String
+    let primary: (String, () -> Void)
+    let secondary: (String, () -> Void)
+
+    static let booksIcon: NSImage? = NSWorkspace.shared
+        .urlForApplication(withBundleIdentifier: "com.apple.iBooksX")
+        .map { NSWorkspace.shared.icon(forFile: $0.path) }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 16) {
+            Group {
+                if let icon = AppleBooksBanner.booksIcon {
+                    Image(nsImage: icon).resizable().interpolation(.high)
+                } else {
+                    Image(systemName: "books.vertical.fill")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.orange)
+                }
+            }
+            .frame(width: 48, height: 48)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Color(hex: theme.text))
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color(hex: theme.textMuted))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+
+            Button(action: secondary.1) {
+                Text(secondary.0)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color(hex: theme.textMuted))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: primary.1) {
+                Text(primary.0)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color(hex: theme.bg))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color(hex: theme.text)))
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color(hex: theme.dropBg))
+                .overlay(RoundedRectangle(cornerRadius: 16)
+                    .strokeBorder(Color(hex: theme.dropBorder).opacity(0.7)))
+        )
     }
 }
 
@@ -1108,8 +1360,8 @@ struct BottomBar: View {
                 PillButton {
                     showSpeed.toggle()
                 } label: {
-                    Text(formatSpeed(reader.speed))
-                        .font(.system(size: 13, weight: .bold))
+                    Text(Self.formatSpeed(reader.speed))
+                        .font(.system(size: 13, weight: .bold).monospacedDigit())
                 }
                 .popover(isPresented: $showSpeed, arrowEdge: .bottom) {
                     speedPopover
@@ -1134,6 +1386,7 @@ struct BottomBar: View {
                     .shadow(color: .black.opacity(0.25), radius: 4, y: 1)
                 }
                 .buttonStyle(.plain)
+                .pointerStyle(.link)
                 .disabled(!engineReady || (reader.document?.sentences.isEmpty ?? true))
                 .opacity(engineReady && !(reader.document?.sentences.isEmpty ?? true) ? 1 : 0.55)
                 .help(primaryHelp)
@@ -1183,38 +1436,32 @@ struct BottomBar: View {
         }
     }
 
-    private func formatSpeed(_ s: Double) -> String {
-        let v = (s * 100).rounded() / 100
-        return v == v.rounded() ? String(format: "%.0fx", v) : String(format: "%.2gx", v)
+    /// "1×", "1.25×", "1.5×" — `%g` keeps every significant digit
+    /// (`%.2g` had been rounding 1.25 to "1.2").
+    static func formatSpeed(_ s: Double) -> String {
+        String(format: "%g×", (s * 100).rounded() / 100)
     }
 
     private var speedPopover: some View {
-        VStack(spacing: 2) {
-            ForEach(ReaderController.speedChoices, id: \.self) { s in
-                Button {
-                    reader.speed = s
-                    showSpeed = false
-                } label: {
-                    HStack {
-                        Text(String(format: "%.2g×", s))
-                            .monospacedDigit()
-                            .foregroundStyle(Color(hex: reader.theme.text))
-                        if abs(s - reader.speed) < 0.001 {
-                            Spacer()
-                            Image(systemName: "checkmark")
-                                .foregroundStyle(Color(hex: reader.theme.text))
-                        }
+        VStack(alignment: .leading, spacing: 8) {
+            PopoverSectionLabel("Speed", theme: theme)
+                .padding(.horizontal, 8)
+            VStack(spacing: 2) {
+                ForEach(ReaderController.speedChoices, id: \.self) { s in
+                    PopoverChoiceRow(theme: theme, selected: abs(s - reader.speed) < 0.001) {
+                        reader.speed = s
+                        showSpeed = false
+                    } label: {
+                        Text(Self.formatSpeed(s))
+                            .font(.system(size: 14, weight: .medium).monospacedDigit())
                     }
-                    .frame(width: 90)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .padding(.vertical, 5)
-                .padding(.horizontal, 12)
             }
         }
-        .padding(.vertical, 6)
-        .background(Color(hex: reader.theme.menuBg))
+        .padding(8)
+        .padding(.top, 4)
+        .frame(width: 148)
+        .background(Color(hex: theme.menuBg))
     }
 
     /// Aa swatch grid matching the BlaBla theme popover.
@@ -1277,6 +1524,7 @@ private struct PillButton<Label: View>: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
+        .pointerStyle(.link)
     }
 }
 
@@ -1288,98 +1536,239 @@ struct SettingsPopover: View {
 
     private var theme: ReaderTheme { reader.theme }
 
+    /// Display names, grouped as the voice menu shows them.
+    private static let voiceGroups: [(title: String?, voices: [(id: String, name: String)])] = [
+        (nil, [("daisy", "Daisy"), ("david-deep", "David")]),
+        ("Female", (1...5).map { ("F\($0)", "Female \($0)") }),
+        ("Male", (1...5).map { ("M\($0)", "Male \($0)") }),
+    ]
+
+    private static func voiceName(_ id: String) -> String {
+        voiceGroups.flatMap(\.voices).first { $0.id == id }?.name ?? id
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Engine status row
+        VStack(alignment: .leading, spacing: 0) {
+            nowReading
+                .padding(16)
+
+            separator
+
+            VStack(alignment: .leading, spacing: 16) {
+                voiceRow
+                textSizeRow
+                volumeRow
+            }
+            .padding(16)
+
+            separator
+
+            Button { reader.resetDocument() } label: {
+                Label("Close Book", systemImage: "xmark.circle")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Color(hex: theme.textMuted))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Stop reading and go back to the library")
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .frame(width: 300)
+        .background(Color(hex: theme.menuBg))
+    }
+
+    // MARK: Sections
+
+    /// Where the reader is in the book, and what the player is doing.
+    private var nowReading: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
-                Text(statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                PopoverSectionLabel("Progress", theme: theme)
                 Spacer()
+                Circle().fill(statusColor).frame(width: 7, height: 7)
+                Text(statusText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(hex: theme.textMuted))
             }
-
-            Divider()
-
-            // Voice
-            HStack {
-                Text("Voice").frame(width: 52, alignment: .leading)
-                Picker("", selection: $reader.voice) {
-                    ForEach(["M1","M2","M3","M4","M5","F1","F2","F3","F4","F5","david-deep","daisy"], id: \.self) {
-                        Text($0).tag($0)
-                    }
-                }
-                .labelsHidden()
-            }
-
-            // State
-            HStack {
-                Text("State").frame(width: 52, alignment: .leading)
-                Text(stateLabel).font(.caption).foregroundStyle(.secondary)
-            }
-
-            // Progress
-            HStack {
-                Text("Progress").frame(width: 52, alignment: .leading)
+            HStack(alignment: .firstTextBaseline) {
                 Text("\(Int(reader.progress * 100))%")
-                    .font(.caption.monospacedDigit())
+                    .font(.system(size: 22, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(Color(hex: theme.text))
                 Spacer()
                 if let total = reader.document?.sentences.count {
-                    Text("\(reader.currentIndex + 1)/\(total)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    Text("Sentence \(reader.currentIndex + 1) of \(total)")
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Color(hex: theme.textMuted))
                 }
             }
+            Capsule()
+                .fill(Color(hex: theme.text).opacity(0.1))
+                .frame(height: 4)
+                .overlay(alignment: .leading) {
+                    GeometryReader { geo in
+                        Capsule().fill(Color(hex: theme.accent))
+                            .frame(width: max(4, geo.size.width * reader.progress))
+                    }
+                }
+        }
+    }
 
-            Divider()
+    private var voiceRow: some View {
+        settingRow("Voice") {
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(Self.voiceGroups.indices, id: \.self) { g in
+                        let group = Self.voiceGroups[g]
+                        if let title = group.title {
+                            Section(title) { voiceButtons(group.voices) }
+                        } else {
+                            voiceButtons(group.voices)
+                            Divider()
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(Self.voiceName(reader.voice))
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color(hex: theme.textMuted))
+                    }
+                    .foregroundStyle(Color(hex: theme.text))
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(fieldBackground)
+                    .contentShape(Rectangle())
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
 
-            // Font size
-            HStack {
-                Text("Font size").frame(width: 52, alignment: .leading)
-                Button("-") { reader.fontSize = max(Double(BookTextView.fontScaleRange.lowerBound), reader.fontSize - 0.05) }
-                    .buttonStyle(.bordered)
-                Text(String(format: "%.2f×", reader.fontSize))
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 44)
-                Button("+") { reader.fontSize = min(Double(BookTextView.fontScaleRange.upperBound), reader.fontSize + 0.05) }
-                    .buttonStyle(.bordered)
-            }
-
-            // Volume
-            HStack {
-                Text("Volume").frame(width: 52, alignment: .leading)
-                Slider(value: $reader.volume, in: 0...1, step: 0.05)
-                Text(String(format: "%d%%", Int(reader.volume * 100)))
-                    .font(.caption.monospacedDigit())
-                    .frame(width: 36, alignment: .trailing)
-            }
-
-            Divider()
-
-            HStack {
-                Button("Test Voice") { reader.testVoice() }
-                    .buttonStyle(.bordered)
-                Spacer()
-                Button("Reset Document", role: .destructive) { reader.resetDocument() }
-                    .buttonStyle(.bordered)
+                Button { reader.testVoice() } label: {
+                    Image(systemName: "speaker.wave.2.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(hex: theme.text))
+                        .frame(width: 28, height: 28)
+                        .background(fieldBackground)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!hub.ready)
+                .help("Preview this voice")
             }
         }
-        .padding(14)
-        .frame(width: 320)
-        .background(Color(hex: theme.menuBg))
+    }
+
+    private var textSizeRow: some View {
+        let range = BookTextView.fontScaleRange
+        return settingRow("Text Size") {
+            HStack(spacing: 0) {
+                stepButton(systemImage: "textformat.size.smaller",
+                           disabled: reader.fontSize <= Double(range.lowerBound) + 0.001) {
+                    reader.fontSize = max(Double(range.lowerBound), reader.fontSize - 0.05)
+                }
+                Text("\(Int((reader.fontSize * 100).rounded()))%")
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Color(hex: theme.text))
+                    .frame(maxWidth: .infinity)
+                stepButton(systemImage: "textformat.size.larger",
+                           disabled: reader.fontSize >= Double(range.upperBound) - 0.001) {
+                    reader.fontSize = min(Double(range.upperBound), reader.fontSize + 0.05)
+                }
+            }
+            .frame(height: 28)
+            .background(fieldBackground)
+        }
+    }
+
+    private var volumeRow: some View {
+        settingRow("Volume") {
+            HStack(spacing: 8) {
+                Image(systemName: "speaker.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(hex: theme.textMuted))
+                Slider(value: $reader.volume, in: 0...1)
+                    .controlSize(.small)
+                    .tint(Color(hex: theme.accent))
+                Image(systemName: "speaker.wave.3.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(hex: theme.textMuted))
+            }
+            .help("\(Int(reader.volume * 100))%")
+        }
+    }
+
+    // MARK: Pieces
+
+    private func voiceButtons(_ voices: [(id: String, name: String)]) -> some View {
+        ForEach(voices, id: \.id) { v in
+            Button {
+                reader.voice = v.id
+            } label: {
+                if v.id == reader.voice {
+                    Label(v.name, systemImage: "checkmark")
+                } else {
+                    Text(v.name)
+                }
+            }
+        }
+    }
+
+    private var separator: some View {
+        Rectangle().fill(Color(hex: theme.text).opacity(0.08)).frame(height: 1)
+    }
+
+    private var fieldBackground: some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(Color(hex: theme.inputBg))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .strokeBorder(Color(hex: theme.inputBorder).opacity(0.6)))
+    }
+
+    private func settingRow<Content: View>(_ title: String,
+                                           @ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(Color(hex: theme.textMuted))
+                .lineLimit(1)
+                .frame(width: 70, alignment: .leading)
+            content()
+        }
+    }
+
+    private func stepButton(systemImage: String, disabled: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color(hex: theme.text))
+                .frame(width: 36, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.35 : 1)
     }
 
     private var statusColor: Color {
         if hub.failed { return .red }
-        return hub.ready ? .green : .orange
+        if !hub.ready { return .orange }
+        switch reader.state {
+        case .playing, .generating: return .green
+        case .failed: return .red
+        default: return Color(hex: theme.textMuted).opacity(0.6)
+        }
     }
 
+    /// The player's state once the engine is up; until then, the engine's.
     private var statusText: String {
         if hub.failed { return "Engine failed" }
-        if hub.ready { return "Engine ready" }
-        return hub.statusText
+        if !hub.ready { return hub.statusText.isEmpty ? "Loading voice…" : hub.statusText }
+        return stateLabel
     }
 
     private var stateLabel: String {
@@ -1392,5 +1781,60 @@ struct SettingsPopover: View {
         case .loadingDoc: return "Loading"
         case .failed: return "Error"
         }
+    }
+}
+
+// MARK: - Popover pieces
+
+/// Small caps heading inside a popover ("SPEED", "PROGRESS").
+private struct PopoverSectionLabel: View {
+    let title: String
+    let theme: ReaderTheme
+
+    init(_ title: String, theme: ReaderTheme) {
+        self.title = title
+        self.theme = theme
+    }
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.system(size: 10, weight: .bold))
+            .kerning(0.8)
+            .foregroundStyle(Color(hex: theme.textMuted))
+    }
+}
+
+/// One choice in a popover list: a rounded highlight on hover, a tinted
+/// fill and checkmark when selected.
+private struct PopoverChoiceRow<Label: View>: View {
+    let theme: ReaderTheme
+    let selected: Bool
+    let action: () -> Void
+    @ViewBuilder let label: () -> Label
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                label()
+                    .foregroundStyle(Color(hex: theme.text))
+                Spacer(minLength: 8)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color(hex: theme.accent))
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(selected ? Color(hex: theme.accent).opacity(0.14)
+                          : Color(hex: theme.text).opacity(hovering ? 0.07 : 0))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }

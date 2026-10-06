@@ -81,10 +81,14 @@ final class ANEVectorField: @unchecked Sendable {
         case modelMissing
         case notWarmedYet(Int, Int)
         case tooLong(Int, Int)
+        case cellFailed(Int, Int)
+        case timedOut(Int, Int)
         var errorDescription: String? {
             switch self {
             case .modelMissing: return "ve_grid.mlmodelc / .mlpackage not found in bundle"
             case .notWarmedYet(let t, let l): return "(T=\(t), L=\(l)) not warmed yet"
+            case .cellFailed(let t, let l): return "(T=\(t), L=\(l)) failed to load on both the ANE and the GPU"
+            case .timedOut(let t, let l): return "(T=\(t), L=\(l)) did not finish loading in time"
             case .tooLong(let t, let l):
                 return "(T=\(t), L=\(l)) exceeds largest ANE bucket (T=\(ANEVectorField.tBuckets.last!), L=\(ANEVectorField.lBuckets.last!))"
             }
@@ -146,6 +150,8 @@ final class ANEVectorField: @unchecked Sendable {
     private var maxWorkers = 1                    // raised once the probe shows a warm cache
     private var warmStarted = false               // all guarded by cacheLock
     private var probeDone = false
+    private var aneFailed: Set<String> = []       // cells whose ANE load threw
+    private var gpuFailed: Set<String> = []       // cells whose GPU bridge failed
 
     /// GPU bridge: the same functions compiled for .cpuAndGPU, used for a cell only until
     /// its ANE program is loaded, then released. CoreML's GPU path loads a cell in ~0.06 s
@@ -253,7 +259,10 @@ final class ANEVectorField: @unchecked Sendable {
         let parts = key.dropFirst().split(separator: "_L")
         guard let tb = Int(parts[0]), let lb = Int(parts[1]) else { return false }
         let t0 = Date()
-        guard (try? model(tb, lb)) != nil else { return false }
+        guard (try? model(tb, lb)) != nil else {
+            cacheLock.lock(); aneFailed.insert(key); cacheLock.unlock()
+            return false
+        }
         cacheLock.lock(); gpuModels[key] = nil; cacheLock.unlock()   // ANE supersedes the bridge
         PerfLog.log(String(format: "ANE cell %@ warm (%.2fs)", key, Date().timeIntervalSince(t0)))
         return true
@@ -262,21 +271,24 @@ final class ANEVectorField: @unchecked Sendable {
     /// Loads `key` for the GPU and runs one throwaway predict (the first predict is where
     /// the GPU program is compiled), unless its ANE cell is already loaded. Serial, so
     /// bridge cells arrive in request order without piling up concurrent compiles.
-    private func bridge(_ key: String) {
+    /// `force` bridges even when the ANE cache is warm, for a caller blocked on the cell.
+    private func bridge(_ key: String, force: Bool = false) {
         gpuQueue.async { [self] in
             // Once the probe shows a warm ANE cache every ANE cell is ~0.5 s away, so further
             // bridging would only spend energy (and a 2-4 s GPU compile on a build's first run).
             cacheLock.lock()
-            let skip = models[key] != nil || gpuModels[key] != nil || (probeDone && maxWorkers > 1)
+            let skip = models[key] != nil || gpuModels[key] != nil
+                || (!force && probeDone && maxWorkers > 1)
             cacheLock.unlock()
             if skip { return }
+            func fail() { cacheLock.lock(); gpuFailed.insert(key); cacheLock.unlock() }
             let parts = key.dropFirst().split(separator: "_L")
-            guard let tb = Int(parts[0]), let lb = Int(parts[1]) else { return }
+            guard let tb = Int(parts[0]), let lb = Int(parts[1]) else { return fail() }
             let t0 = Date()
             let cfg = MLModelConfiguration()
             cfg.computeUnits = .cpuAndGPU
             cfg.functionName = key
-            guard let m = try? MLModel(contentsOf: modelURL, configuration: cfg) else { return }
+            guard let m = try? MLModel(contentsOf: modelURL, configuration: cfg) else { return fail() }
             func zeros(_ shape: [Int]) -> MLFeatureValue? {
                 (try? MLMultiArray(shape: shape.map(NSNumber.init), dataType: .float32)).map {
                     memset($0.dataPointer, 0, $0.count * 4); return MLFeatureValue(multiArray: $0)
@@ -289,11 +301,35 @@ final class ANEVectorField: @unchecked Sendable {
             inputs["total_step"] = MLFeatureValue(multiArray: {   // 1/total_step inside the graph
                 let a = try! MLMultiArray(shape: [1], dataType: .float32); a[0] = 8; return a }())
             guard let feats = try? MLDictionaryFeatureProvider(dictionary: inputs),
-                  (try? m.prediction(from: feats)) != nil else { return }
+                  (try? m.prediction(from: feats)) != nil else { return fail() }
             cacheLock.lock()
             if models[key] == nil { gpuModels[key] = m }
             cacheLock.unlock()
             PerfLog.log(String(format: "GPU bridge cell %@ ready (%.2fs)", key, Date().timeIntervalSince(t0)))
+        }
+    }
+
+    /// Blocks until this cell can `run` on the ANE or the GPU bridge, for a caller with no
+    /// other flow-matching backend. The cell jumps the warm queue and is bridged on the GPU
+    /// as well, so whichever arrives first wins: usually the bridge (~0.3 s) on a cold ANE
+    /// cache, the ANE program (~0.5 s) on a warm one.
+    func waitUntilReady(T: Int, L: Int, timeout: TimeInterval = 60) throws {
+        guard let tb = ANEVectorField.tBucket(for: T),
+              let lb = ANEVectorField.lBucket(for: L) else { throw ANEError.tooLong(T, L) }
+        let key = "T\(tb)_L\(lb)"
+        request(T: T, L: L)
+        cacheLock.lock(); gpuFailed.remove(key); cacheLock.unlock()   // retried just below
+        bridge(key, force: true)
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            cacheLock.lock()
+            let ready = models[key] != nil || gpuModels[key] != nil
+            let failed = aneFailed.contains(key) && gpuFailed.contains(key)
+            cacheLock.unlock()
+            if ready { return }
+            if failed { throw ANEError.cellFailed(tb, lb) }
+            if Date() >= deadline { throw ANEError.timedOut(tb, lb) }
+            Thread.sleep(forTimeInterval: 0.02)
         }
     }
 
@@ -334,7 +370,8 @@ final class ANEVectorField: @unchecked Sendable {
         // Loading a function costs ~0.5 s warm and 5-11 s when the system has to compile
         // the ANE program. Neither belongs inside a generation, so this path uses only
         // cells the background warmer has already loaded; anything else falls back to
-        // Metal for now and picks up the ANE on a later sentence.
+        // Metal for now and picks up the ANE on a later sentence (or, in builds without
+        // the Metal weights, waits on `waitUntilReady` and calls again).
         cacheLock.lock()
         let ane = models["T\(tb)_L\(bk)"], gpu = gpuModels["T\(tb)_L\(bk)"]
         cacheLock.unlock()

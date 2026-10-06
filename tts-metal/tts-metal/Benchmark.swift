@@ -8,9 +8,9 @@
 //  resample to 48 kHz), so "latency" here is time-to-first-audio for a sentence:
 //  the moment its buffer could be handed to AVAudioEngine.
 //
-//     SUPERTONIC_BENCH=1 Blabla                       launch → ready → first sentence,
+//     SUPERTONIC_BENCH=1 BlaBla                       launch → ready → first sentence,
 //                                                     then steady state once ANE is warm
-//     SUPERTONIC_BENCH=1 SUPERTONIC_ANE=0 Blabla      Metal-only steady state
+//     SUPERTONIC_BENCH=1 SUPERTONIC_ANE=0 BlaBla      Metal-only steady state
 //     SUPERTONIC_BENCH_REPS=N                         steady-state reps per text (default 6)
 //     SUPERTONIC_BENCH_DUMP=/path/prefix              write each text's first steady-state
 //                                                     output as raw float32 (A/B checks;

@@ -22,8 +22,9 @@
 - Word-by-word karaoke highlighting with auto-scroll. Double-click any sentence to start reading from there.
 - Table of contents sidebar, find in book (⌘F), and pinch-to-zoom text.
 - Remembers where you left off in every document.
+- Shows your Apple Books library, with Books' covers and reading progress, and picks up where you left off there (after you grant access).
 - Floating mini player that stays on top of other windows.
-- Now Playing and media-key support.
+- Now Playing and media-key support while a book is open; Space plays and pauses.
 - Ask questions about the book you're reading, answered on-device by Apple Intelligence with cited passages.
 - 12 voices, 1×–2× speed, six reading themes.
 
@@ -36,10 +37,10 @@
 ## Install
 
 1. Download `BlaBla.zip` from the [latest release](../../releases/latest) and unzip it.
-2. Move `Blabla.app` to `/Applications`.
+2. Move `BlaBla.app` to `/Applications`.
 3. The app is not notarized, so the first launch is blocked by Gatekeeper. Either right-click the app and choose **Open**, or run:
    ```bash
-   xattr -dr com.apple.quarantine /Applications/Blabla.app
+   xattr -dr com.apple.quarantine /Applications/BlaBla.app
    ```
 4. For the menu-bar reader, grant Accessibility access when asked (needed to read the selected text).
 
@@ -96,14 +97,14 @@ The model weights are not in the repository. Download the Supertonic 3 ONNX file
 Then build the release app:
 
 ```bash
-./build_scripts/build_release.sh     # produces ./Blabla-Release.app
+./build_scripts/build_release.sh     # produces ./BlaBla-Release.app
 ```
 
 Or open `tts-metal/tts-metal.xcodeproj` in Xcode and run the `tts-metal` scheme.
 
 ### Diagnostics
 
-The app has a few headless modes, enabled with environment variables on the binary in `Blabla.app/Contents/MacOS/Blabla`:
+The app has a few headless modes, enabled with environment variables on the binary in `BlaBla.app/Contents/MacOS/BlaBla`:
 
 | Variable | What it does |
 |---|---|
